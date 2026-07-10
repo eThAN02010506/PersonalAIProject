@@ -96,8 +96,32 @@ PYTHONPATH=src python3.11 -m qwopus_agent.integrations.smolagents_smoke \
 ```
 
 This smoke test intentionally creates a smolagents `CodeAgent` with no tools. Excel analysis,
-document upload, Streamlit, MiniRAG ingestion, and report generation remain separate placeholders
+document upload, MiniRAG ingestion, and report generation remain separate placeholders
 until the model connection is verified.
+
+## Streamlit Chat Test
+
+After the smoke test passes, verify multi-turn conversation through Streamlit:
+
+```bash
+cp .env.example .env
+pip install -e ".[dev,ui]"
+python -m mlx_lm.server --model ~/Desktop/model/gemma-4-12B-it-qat-OptiQ-4bit --port 8080
+streamlit run src/qwopus_agent/ui/streamlit_chat.py
+```
+
+The chat page provides:
+
+- sidebar model configuration and connection check
+- multi-turn chat via `st.chat_message` and `st.chat_input`
+- conversation history passed into smolagents through `run_smolagents_chat_turn`
+
+Manual checks:
+
+1. Click "检测模型连接" and confirm the MLX server is online.
+2. Send "你好，请用中文自我介绍" and confirm a response appears.
+3. Ask "上一句你说了什么？" and confirm the reply uses prior context.
+4. Stop the MLX server and confirm the UI shows a clear offline error.
 
 ## Milestone 1 Scope
 
