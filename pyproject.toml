@@ -1,0 +1,51 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "qwopus-agent"
+version = "0.1.0"
+description = "A modular local AI agent framework for planning, tool use, memory, reflection, skills, and research workflows."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [
+  { name = "Qwopus-Agent Contributors" }
+]
+dependencies = [
+  "pydantic>=2.8",
+  "smolagents>=1.26.0"
+]
+
+[project.scripts]
+qwopus-agent = "qwopus_agent.cli:main"
+qwopus-smolagents-smoke = "qwopus_agent.integrations.smolagents_smoke:main"
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+  "ruff>=0.6.0",
+  "mypy>=1.10"
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_unused_ignores = true
+warn_return_any = true
+packages = ["qwopus_agent"]

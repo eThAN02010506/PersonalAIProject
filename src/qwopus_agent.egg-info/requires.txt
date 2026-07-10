@@ -1,0 +1,7 @@
+pydantic>=2.8
+smolagents>=1.26.0
+
+[dev]
+pytest>=8.0
+ruff>=0.6.0
+mypy>=1.10
