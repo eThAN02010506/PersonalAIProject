@@ -13,14 +13,19 @@ authors = [
   { name = "Qwopus-Agent Contributors" }
 ]
 dependencies = [
+  "openpyxl>=3.1",
+  "pandas>=2.2",
   "pydantic>=2.8",
+  "pypdf>=5.0",
   "python-dotenv>=1.0",
+  "python-docx>=1.1",
   "smolagents>=1.26.0"
 ]
 
 [project.scripts]
 qwopus-agent = "qwopus_agent.cli:main"
 qwopus-smolagents-smoke = "qwopus_agent.integrations.smolagents_smoke:main"
+qwopus-ui = "qwopus_agent.ui.launcher:main"
 
 [project.optional-dependencies]
 dev = [

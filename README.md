@@ -95,33 +95,41 @@ PYTHONPATH=src python3.11 -m qwopus_agent.integrations.smolagents_smoke \
   "用一句中文回答：你是否已经连接到本地大模型？"
 ```
 
-This smoke test intentionally creates a smolagents `CodeAgent` with no tools. Excel analysis,
-document upload, MiniRAG ingestion, and report generation remain separate placeholders
-until the model connection is verified.
+This smoke test intentionally creates a smolagents `CodeAgent` with no tools. MiniRAG ingestion,
+LLM-based document reasoning, and report generation remain separate milestones.
 
-## Streamlit Chat Test
+## Streamlit Chat And Upload Analysis
 
-After the smoke test passes, verify multi-turn conversation through Streamlit:
+After the smoke test passes, verify multi-turn conversation and local upload analysis through
+Streamlit:
 
 ```bash
 cp .env.example .env
 pip install -e ".[dev,ui]"
 python -m mlx_lm.server --model ~/Desktop/model/gemma-4-12B-it-qat-OptiQ-4bit --port 8080
-streamlit run src/qwopus_agent/ui/streamlit_chat.py
+PYTHONPATH=src streamlit run src/qwopus_agent/ui/streamlit_chat.py
 ```
 
-The chat page provides:
+The Streamlit page provides:
 
 - sidebar model configuration and connection check
 - multi-turn chat via `st.chat_message` and `st.chat_input`
 - conversation history passed into smolagents through `run_smolagents_chat_turn`
+- upload analysis for PDF, DOCX, Markdown, TXT, CSV, XLSX, and XLS files
+- local pandas spreadsheet inspection with schema, sample rows, and numeric summaries
+- Markdown previews for parsed unstructured documents
 
 Manual checks:
 
 1. Click "检测模型连接" and confirm the MLX server is online.
 2. Send "你好，请用中文自我介绍" and confirm a response appears.
 3. Ask "上一句你说了什么？" and confirm the reply uses prior context.
-4. Stop the MLX server and confirm the UI shows a clear offline error.
+4. Upload a CSV or Excel file and confirm schema/sample/numeric summary tables render.
+5. Upload a TXT, Markdown, PDF, or DOCX file and confirm the Markdown preview renders.
+6. Stop the MLX server and confirm the UI shows a clear offline error.
+
+MiniRAG source is stored under `vendor/MiniRAG-main`; runtime MiniRAG data should live under
+`storage/minirag`. Actual insertion and retrieval are intentionally left for the next milestone.
 
 ## Milestone 1 Scope
 

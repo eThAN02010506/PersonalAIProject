@@ -5,23 +5,40 @@ from unittest.mock import patch
 
 from qwopus_agent.integrations.smolagents_runtime import (
     SmolagentsModelSettings,
+    build_chat_messages,
     build_smolagents_code_agent,
     build_smolagents_model,
     check_model_connection,
     format_chat_prompt,
+    run_smolagents_document_analysis,
+    run_smolagents_document_analysis_with_debug,
     run_smolagents_chat_turn,
 )
 
 
-class FakeInferenceClientModel:
+class FakeOpenAIModel:
     def __init__(self, **kwargs):
         self.kwargs = kwargs
+        self.messages = None
+
+    def generate(self, messages):
+        self.messages = messages
+        if "TRIGGER_EMPTY" in messages[-1]["content"]:
+            return types.SimpleNamespace(content="")
+        if "请直接给出中文总结" in messages[-1]["content"]:
+            return types.SimpleNamespace(content='final_answer("空返回后的重试总结。")')
+        if "上一步只是工具 Observation" in messages[-1]["content"]:
+            return types.SimpleNamespace(content='final_answer("这是最终总结。")')
+        if "TRIGGER_OBSERVATION" in messages[-1]["content"]:
+            return types.SimpleNamespace(content="Observation:\nDocument Analysis: raw preview")
+        return types.SimpleNamespace(content=f"reply: {messages[-1]['content']}")
 
 
 class FakeCodeAgent:
-    def __init__(self, tools, model):
+    def __init__(self, tools, model, **kwargs):
         self.tools = tools
         self.model = model
+        self.kwargs = kwargs
 
     def run(self, prompt):
         return f"ok: {prompt}"
@@ -31,7 +48,7 @@ class SmolagentsRuntimeTests(unittest.TestCase):
     def setUp(self) -> None:
         self.previous_module = sys.modules.get("smolagents")
         fake_module = types.ModuleType("smolagents")
-        fake_module.InferenceClientModel = FakeInferenceClientModel
+        fake_module.OpenAIModel = FakeOpenAIModel
         fake_module.CodeAgent = FakeCodeAgent
         sys.modules["smolagents"] = fake_module
 
@@ -54,7 +71,7 @@ class SmolagentsRuntimeTests(unittest.TestCase):
         model = build_smolagents_model(settings)
 
         self.assertEqual(model.kwargs["model_id"], "gemma-4-12B-it-qat-OptiQ-4bit")
-        self.assertEqual(model.kwargs["base_url"], "http://127.0.0.1:8080/v1")
+        self.assertEqual(model.kwargs["api_base"], "http://127.0.0.1:8080/v1")
         self.assertEqual(model.kwargs["api_key"], "local_token")
 
     def test_build_smolagents_code_agent_starts_without_tools(self) -> None:
@@ -94,8 +111,82 @@ class SmolagentsRuntimeTests(unittest.TestCase):
             settings=settings,
         )
 
-        self.assertIn("用户：你好", result)
-        self.assertIn("用户：请继续", result)
+        self.assertEqual(result, "reply: 请继续")
+
+    def test_build_chat_messages_uses_plain_chat_roles(self) -> None:
+        history = [{"role": "user", "content": "你好"}]
+
+        messages = build_chat_messages(history=history, user_message="请继续")
+
+        self.assertEqual(messages[0]["role"], "system")
+        self.assertEqual(messages[1], {"role": "user", "content": "你好"})
+        self.assertEqual(messages[2], {"role": "user", "content": "请继续"})
+
+    def test_run_smolagents_document_analysis_sends_file_context(self) -> None:
+        settings = SmolagentsModelSettings(
+            model_id="any-model",
+            base_url="http://127.0.0.1:8080/v1",
+        )
+
+        result = run_smolagents_document_analysis(
+            document_name="assignment.pdf",
+            content="This homework asks for vectorized R functions.",
+            user_question="总结",
+            settings=settings,
+        )
+
+        self.assertIn("reply:", result)
+        self.assertIn("assignment.pdf", result)
+        self.assertIn("总结", result)
+
+    def test_run_smolagents_document_analysis_continues_after_observation(self) -> None:
+        settings = SmolagentsModelSettings(
+            model_id="any-model",
+            base_url="http://127.0.0.1:8080/v1",
+        )
+
+        result = run_smolagents_document_analysis(
+            document_name="assignment.pdf",
+            content="TRIGGER_OBSERVATION",
+            user_question="总结",
+            settings=settings,
+        )
+
+        self.assertEqual(result, "这是最终总结。")
+
+    def test_document_analysis_debug_steps_show_observation_retry(self) -> None:
+        settings = SmolagentsModelSettings(
+            model_id="any-model",
+            base_url="http://127.0.0.1:8080/v1",
+        )
+
+        result = run_smolagents_document_analysis_with_debug(
+            document_name="assignment.pdf",
+            content="TRIGGER_OBSERVATION",
+            user_question="总结",
+            settings=settings,
+        )
+
+        self.assertEqual(result.answer, "这是最终总结。")
+        self.assertTrue(
+            any("触发第二轮最终答案生成" in step for step in result.debug_steps)
+        )
+
+    def test_document_analysis_retries_after_empty_model_response(self) -> None:
+        settings = SmolagentsModelSettings(
+            model_id="any-model",
+            base_url="http://127.0.0.1:8080/v1",
+        )
+
+        result = run_smolagents_document_analysis_with_debug(
+            document_name="assignment.pdf",
+            content="TRIGGER_EMPTY",
+            user_question="总结",
+            settings=settings,
+        )
+
+        self.assertEqual(result.answer, "空返回后的重试总结。")
+        self.assertTrue(any("第一次模型返回为空" in step for step in result.debug_steps))
 
     @patch("qwopus_agent.integrations.smolagents_runtime.urllib.request.urlopen")
     def test_check_model_connection_reports_online(self, mock_urlopen) -> None:
