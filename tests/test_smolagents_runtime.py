@@ -17,14 +17,30 @@ from qwopus_agent.integrations.smolagents_runtime import (
 
 
 class FakeOpenAIModel:
+    last_instance = None
+
     def __init__(self, **kwargs):
         self.kwargs = kwargs
         self.messages = None
+        self.calls = []
+        FakeOpenAIModel.last_instance = self
 
-    def generate(self, messages):
+    def generate(self, messages, **kwargs):
         self.messages = messages
+        self.calls.append(messages)
+        if "请直接给出中文最终答案" in messages[-1]["content"]:
+            return types.SimpleNamespace(content="这是中文最终摘要。")
         if "TRIGGER_EMPTY" in messages[-1]["content"]:
             return types.SimpleNamespace(content="")
+        if "TRIGGER_REASONING_ONLY" in messages[-1]["content"]:
+            message = types.SimpleNamespace(
+                content="",
+                reasoning_content="We need to produce a structured analysis in Chinese.",
+                tool_calls=None,
+            )
+            choice = types.SimpleNamespace(message=message, finish_reason="length")
+            raw = types.SimpleNamespace(choices=[choice])
+            return types.SimpleNamespace(content="", raw=raw)
         if "请直接给出中文总结" in messages[-1]["content"]:
             return types.SimpleNamespace(content='final_answer("空返回后的重试总结。")')
         if "上一步只是工具 Observation" in messages[-1]["content"]:
@@ -185,8 +201,43 @@ class SmolagentsRuntimeTests(unittest.TestCase):
             settings=settings,
         )
 
-        self.assertEqual(result.answer, "空返回后的重试总结。")
-        self.assertTrue(any("第一次模型返回为空" in step for step in result.debug_steps))
+        self.assertEqual(result.answer, "这是中文最终摘要。")
+        self.assertTrue(any("第一次模型未生成完整 content" in step for step in result.debug_steps))
+
+    def test_document_analysis_does_not_show_reasoning_content(self) -> None:
+        settings = SmolagentsModelSettings(
+            model_id="any-model",
+            base_url="http://127.0.0.1:8080/v1",
+        )
+
+        result = run_smolagents_document_analysis_with_debug(
+            document_name="assignment.docx",
+            content="TRIGGER_REASONING_ONLY",
+            user_question="摘要",
+            settings=settings,
+        )
+
+        self.assertEqual(result.answer, "这是中文最终摘要。")
+        self.assertNotIn("We need to", result.answer)
+
+    def test_document_analysis_retry_rebuilds_messages_without_extra_user_turn(self) -> None:
+        settings = SmolagentsModelSettings(
+            model_id="any-model",
+            base_url="http://127.0.0.1:8080/v1",
+        )
+
+        run_smolagents_document_analysis_with_debug(
+            document_name="assignment.docx",
+            content="TRIGGER_REASONING_ONLY",
+            user_question="摘要",
+            settings=settings,
+        )
+        model = FakeOpenAIModel.last_instance
+
+        self.assertEqual(len(model.calls[-1]), 2)
+        self.assertEqual(model.calls[-1][0]["role"], "system")
+        self.assertEqual(model.calls[-1][1]["role"], "user")
+        self.assertIn("TRIGGER_REASONING_ONLY", model.calls[-1][1]["content"])
 
     @patch("qwopus_agent.integrations.smolagents_runtime.urllib.request.urlopen")
     def test_check_model_connection_reports_online(self, mock_urlopen) -> None:

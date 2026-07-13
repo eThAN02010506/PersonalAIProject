@@ -334,23 +334,31 @@ def run_smolagents_document_analysis_with_debug(
 
     debug_steps.append(f"准备调用模型：{settings.model_id if settings else SmolagentsModelSettings.from_env().model_id}")
     debug_steps.append(f"用户问题：{question}")
+    output_token_limit = _document_output_token_limit(settings)
     model = build_smolagents_model(settings)
-    response = model.generate(messages)
+    response = model.generate(messages, max_tokens=output_token_limit)
     answer = _response_to_text(response)
     debug_steps.append(f"第一次模型返回结构：{_response_debug_snapshot(response)}")
     debug_steps.append(f"第一次模型返回前 500 字：{answer[:500]}")
-    if not answer.strip():
-        # 原因：部分 OpenAI-compatible 服务可能返回空 content。
-        # 作用：把空返回显式暴露出来，并用更短的最终回答指令重试一次。
-        debug_steps.append("第一次模型返回为空，触发第二轮重试。")
+    if not answer.strip() or _response_finished_by_length(response):
+        # 原因：推理模型可能把 token 用在 reasoning_content，导致 content 为空或被截断。
+        # 作用：增加输出预算并强制要求只返回最终答案，避免把思考草稿展示给用户。
+        debug_steps.append("第一次模型未生成完整 content，触发第二轮重试。")
         response = model.generate(
             [
-                *messages,
+                messages[0],
                 {
                     "role": "user",
-                    "content": "请直接给出中文总结，不要留空，不要输出工具过程。",
+                    "content": (
+                        "请直接给出中文最终答案，不要输出英文思考、推理过程、工具过程或草稿。\n\n"
+                        f"文件名：{document_name}\n\n"
+                        f"用户问题：{question}\n\n"
+                        f"文件解析内容如下：\n\n{clipped_content}\n\n"
+                        "如果只能摘要，请用 3-6 条中文要点回答。"
+                    ),
                 },
-            ]
+            ],
+            max_tokens=output_token_limit * 2,
         )
         answer = _response_to_text(response)
         debug_steps.append(f"第二次模型返回结构：{_response_debug_snapshot(response)}")
@@ -417,11 +425,26 @@ def _extract_text_from_raw_response(response: Any) -> str:
     for source in (message, first_choice):
         if source is None:
             continue
-        for field_name in ("content", "reasoning_content", "text"):
+        for field_name in ("content", "text"):
             value = getattr(source, field_name, None)
             if isinstance(value, str) and value.strip():
                 return value
     return ""
+
+
+def _document_output_token_limit(settings: SmolagentsModelSettings | None) -> int:
+    """Use a larger answer budget for document analysis."""
+    configured_limit = settings.max_tokens if settings else SmolagentsModelSettings.from_env().max_tokens
+    return max(configured_limit, 2048)
+
+
+def _response_finished_by_length(response: Any) -> bool:
+    """Detect truncated OpenAI-compatible responses."""
+    raw = getattr(response, "raw", None)
+    choices = getattr(raw, "choices", None)
+    if not choices:
+        return False
+    return getattr(choices[0], "finish_reason", None) == "length"
 
 
 def _response_debug_snapshot(response: Any) -> str:
