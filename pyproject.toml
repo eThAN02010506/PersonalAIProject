@@ -36,6 +36,11 @@ dev = [
 ui = [
   "streamlit>=1.32"
 ]
+documents = [
+  # 原因：MinerU 基础包不包含 PDF/图片 OCR 所需的本地 pipeline 依赖。
+  # 作用：提供可复现的文档解析依赖安装入口，同时保持核心 Agent 依赖精简。
+  "mineru[pipeline]>=3.4.4,<4"
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]

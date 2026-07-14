@@ -17,6 +17,7 @@ from qwopus_agent.documents import save_uploaded_bytes
 from qwopus_agent.integrations.smolagents_runtime import (
     SmolagentsModelSettings,
     check_model_connection,
+    resolve_model_settings,
     run_smolagents_document_analysis_with_debug,
 )
 from qwopus_agent.memory import MiniRAG
@@ -54,6 +55,9 @@ def analyze_uploaded_files(
         minirag: MiniRAG,
 ) -> UploadAnalysisOutcome:
     """Analyze uploaded files, update MiniRAG, and optionally call the LLM."""
+    # 原因：服务端模型可能在两次上传分析之间发生切换。
+    # 作用：每次分析开始时刷新模型 id，避免继续使用 .env 中的旧名称。
+    settings = resolve_model_settings(settings)
     debug_steps: list[str] = []
     analyzed_results: list[tuple[str, AnalysisResult]] = []
 

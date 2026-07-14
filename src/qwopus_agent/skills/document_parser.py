@@ -9,7 +9,10 @@ from qwopus_agent.documents import parse_document
 from qwopus_agent.skills.base import BaseSkill, SkillRequest, SkillResponse
 
 
-SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".md", ".txt"}
+SUPPORTED_EXTENSIONS = {
+    ".pdf", ".docx", ".md", ".txt",
+    ".png", ".jpeg", ".jpg",
+}
 
 
 @dataclass
@@ -19,8 +22,8 @@ class DocumentParserSkill(BaseSkill):
     # Reason: All document types should enter memory through one normalized Markdown pipeline.
     name: str = "document_parser"
 
-    # Role: Parses PDF, DOCX, Markdown, and TXT into Markdown text.
-    description: str = "Convert PDF, DOCX, Markdown, and TXT documents into Markdown."
+    # Role: Parses documents and OCR-capable images into Markdown text.
+    description: str = "Convert PDF, DOCX, Markdown, TXT, and images into Markdown."
 
     async def run(self, request: SkillRequest) -> SkillResponse:
         """Parse a supported document into Markdown."""

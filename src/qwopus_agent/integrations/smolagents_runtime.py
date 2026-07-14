@@ -6,11 +6,12 @@ such as optiq serve / mlx_lm.server.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import urllib.error
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from dotenv import load_dotenv
@@ -90,36 +91,79 @@ def _models_endpoint(base_url: str) -> str:
     return f"{base_url.rstrip('/')}/models"
 
 
+def resolve_model_settings(
+        settings: SmolagentsModelSettings | None = None,
+) -> SmolagentsModelSettings:
+    """Return settings updated with the model currently exposed by the server."""
+    settings = settings or SmolagentsModelSettings.from_env()
+    try:
+        status, payload = _request_models(settings)
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError):
+        return settings
+
+    model_id = _extract_server_model_id(payload) if 200 <= status < 300 else None
+    if not model_id:
+        return settings
+
+    # 原因：服务器加载的模型会变化，.env 中的静态名称可能已经过期。
+    # 作用：每次请求模型列表后使用实时 id，同时保留其他连接参数不变。
+    return replace(settings, model_id=model_id)
+
+
 def check_model_connection(
         settings: SmolagentsModelSettings | None = None,
 ) -> tuple[bool, str]:
     settings = settings or SmolagentsModelSettings.from_env()
 
-    request = urllib.request.Request(
-        _models_endpoint(settings.base_url),
-        headers={
-            "Authorization": f"Bearer {settings.api_key}"
-        },
-        method="GET",
-    )
-
     try:
-        with urllib.request.urlopen(
-                request,
-                timeout=10,
-        ) as response:
-
-            if 200 <= response.status < 300:
-                return True, f"模型服务在线: {settings.base_url}"
-
-            return False, f"模型服务异常: {response.status}"
-
-
-    except urllib.error.URLError as exc:
+        status, payload = _request_models(settings)
+        if 200 <= status < 300:
+            model_id = _extract_server_model_id(payload) or settings.model_id
+            return True, (
+                f"模型服务在线: {settings.base_url} "
+                f"(当前模型: {_display_model_name(model_id)})"
+            )
+        return False, f"模型服务异常: {status}"
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+        reason = getattr(exc, "reason", str(exc))
         return False, (
             f"无法连接模型服务: "
-            f"{settings.base_url} ({exc.reason})"
+            f"{settings.base_url} ({reason})"
         )
+
+
+def _request_models(settings: SmolagentsModelSettings) -> tuple[int, dict[str, Any]]:
+    """Request the OpenAI-compatible model list once."""
+    request = urllib.request.Request(
+        _models_endpoint(settings.base_url),
+        headers={"Authorization": f"Bearer {settings.api_key}"},
+        method="GET",
+    )
+    with urllib.request.urlopen(request, timeout=10) as response:
+        payload = json.loads(response.read().decode("utf-8"))
+        return response.status, payload
+
+
+def _extract_server_model_id(payload: dict[str, Any]) -> str | None:
+    """Read a model id from common OpenAI-compatible response shapes."""
+    data = payload.get("data")
+    if isinstance(data, list) and data and isinstance(data[0], dict):
+        model_id = data[0].get("id")
+        if isinstance(model_id, str) and model_id:
+            return model_id
+
+    models = payload.get("models")
+    if isinstance(models, list) and models and isinstance(models[0], dict):
+        for key in ("model", "name"):
+            model_id = models[0].get(key)
+            if isinstance(model_id, str) and model_id:
+                return model_id
+    return None
+
+
+def _display_model_name(model_id: str) -> str:
+    """Return a readable filename for Unix or Windows model paths."""
+    return model_id.replace("\\", "/").rsplit("/", 1)[-1]
 
 
 def format_chat_prompt(
@@ -180,6 +224,11 @@ def build_chat_messages(
             "content": (
                 "你是 Qwopus-Agent 的本地办公助手。"
                 "请直接、清晰地回答用户问题。"
+                # 原因：普通聊天只收到对话历史，无法读取上传文件或 MiniRAG 内容。
+                # 作用：禁止模型假装分析旧文件，并引导用户使用文档分析流程。
+                "普通聊天无法自动访问用户之前上传的文件或 MiniRAG。"
+                "如果用户要求分析未附带内容的历史文件，请明确说明无法读取，"
+                "并请用户在文档分析页面重新选择文件；不要编造文件内容。"
                 "不要输出 Thought、代码块或 final_answer 包装，除非用户明确要求。"
             ),
         }

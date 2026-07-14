@@ -10,6 +10,7 @@ from qwopus_agent.integrations.smolagents_runtime import (
     build_smolagents_model,
     check_model_connection,
     format_chat_prompt,
+    resolve_model_settings,
     run_smolagents_document_analysis,
     run_smolagents_document_analysis_with_debug,
     run_smolagents_chat_turn,
@@ -145,6 +146,8 @@ class SmolagentsRuntimeTests(unittest.TestCase):
         messages = build_chat_messages(history=history, user_message="请继续")
 
         self.assertEqual(messages[0]["role"], "system")
+        self.assertIn("无法自动访问用户之前上传的文件", messages[0]["content"])
+        self.assertIn("不要编造文件内容", messages[0]["content"])
         self.assertEqual(messages[1], {"role": "user", "content": "你好"})
         self.assertEqual(messages[2], {"role": "user", "content": "请继续"})
 
@@ -255,6 +258,7 @@ class SmolagentsRuntimeTests(unittest.TestCase):
     def test_check_model_connection_reports_online(self, mock_urlopen) -> None:
         mock_response = mock_urlopen.return_value.__enter__.return_value
         mock_response.status = 200
+        mock_response.read.return_value = b'{"data": [{"id": "live-model.gguf"}]}'
 
         online, message = check_model_connection(
             SmolagentsModelSettings(
@@ -265,6 +269,26 @@ class SmolagentsRuntimeTests(unittest.TestCase):
 
         self.assertTrue(online)
         self.assertIn("模型服务在线", message)
+        self.assertIn("live-model.gguf", message)
+
+    @patch("qwopus_agent.integrations.smolagents_runtime.urllib.request.urlopen")
+    def test_resolve_model_settings_uses_live_server_model(self, mock_urlopen) -> None:
+        mock_response = mock_urlopen.return_value.__enter__.return_value
+        mock_response.status = 200
+        mock_response.read.return_value = (
+            b'{"data": [{"id": "C:\\\\models\\\\current-model.gguf"}]}'
+        )
+        settings = SmolagentsModelSettings(
+            model_id="stale-model.gguf",
+            base_url="http://127.0.0.1:8080/v1",
+        )
+
+        # 原因：.env 模型名可能与服务器刚切换的模型不同。
+        # 作用：证明解析结果使用服务器实时 id，并保留原连接配置。
+        resolved = resolve_model_settings(settings)
+
+        self.assertEqual(resolved.model_id, "C:\\models\\current-model.gguf")
+        self.assertEqual(resolved.base_url, settings.base_url)
 
     @patch("qwopus_agent.integrations.smolagents_runtime.urllib.request.urlopen")
     def test_check_model_connection_reports_offline(self, mock_urlopen) -> None:

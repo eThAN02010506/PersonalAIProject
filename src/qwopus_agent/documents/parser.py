@@ -12,7 +12,8 @@ from pathlib import Path
 from qwopus_agent.documents.mineru import MinerUUnavailableError, parse_document_with_mineru
 
 
-SUPPORTED_DOCUMENT_EXTENSIONS = {".pdf", ".docx", ".md", ".txt"}
+IMAGE_EXTENSIONS = {".png", ".jpeg", ".jpg"}
+SUPPORTED_DOCUMENT_EXTENSIONS = {".pdf", ".docx", ".md", ".txt", *IMAGE_EXTENSIONS}
 
 
 @dataclass(frozen=True)
@@ -43,6 +44,10 @@ def parse_document(file_path: str | Path) -> ParsedDocument:
         return _parse_pdf(path)
     if suffix == ".docx":
         return _parse_docx(path)
+    if suffix in IMAGE_EXTENSIONS:
+        # 原因：图片没有可供普通文本解析器读取的正文。
+        # 作用：统一交给 MinerU pipeline 做版面识别和 OCR，再输出 Markdown。
+        return _parse_with_mineru(path, source_type="image")
     if suffix == ".md":
         markdown = path.read_text(encoding="utf-8", errors="ignore")
         return _build_parsed_document(path, markdown, source_type="markdown")

@@ -13,6 +13,8 @@ from pathlib import Path
 MINERU_OUTPUT_DIR = Path("storage/cache/mineru")
 MINERU_COMMANDS = ("mineru", "magic-pdf")
 VENDOR_MINERU_DIR = Path("vendor/MinerU")
+MINERU_BACKEND = "pipeline"
+OCR_IMAGE_EXTENSIONS = {".png", ".jpeg", ".jpg"}
 
 
 class MinerUUnavailableError(RuntimeError):
@@ -36,6 +38,9 @@ def parse_document_with_mineru(
 ) -> MinerUResult:
     """Convert one document to Markdown through the MinerU command line."""
     command = _build_mineru_command()
+    # 原因：图片没有 PDF 文本层，auto 可能只保留图片引用而不识别其中的文字。
+    # 作用：PNG/JPEG 强制使用 OCR；其他文档继续让 MinerU 自动选择解析方法。
+    parse_method = "ocr" if document_path.suffix.lower() in OCR_IMAGE_EXTENSIONS else "auto"
     output_root.mkdir(parents=True, exist_ok=True)
     before = set(output_root.rglob("*.md"))
 
@@ -48,6 +53,12 @@ def parse_document_with_mineru(
             str(document_path),
             "-o",
             str(output_root),
+            # 原因：MinerU 默认 hybrid-engine 对本机内存和模型依赖要求较高。
+            # 作用：固定使用支持 CPU/MPS 的 pipeline，稳定处理 PDF、图片和 OCR。
+            "-b",
+            MINERU_BACKEND,
+            "-m",
+            parse_method,
         ],
         check=False,
         capture_output=True,

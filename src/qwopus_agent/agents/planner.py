@@ -7,9 +7,14 @@ skills, reads files, or performs side effects.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from qwopus_agent.skills import SkillRegistry
+
+
+SPREADSHEET_EXTENSIONS = {".csv", ".xls", ".xlsx"}
+DOCUMENT_EXTENSIONS = {".pdf", ".docx", ".md", ".txt", ".png", ".jpeg", ".jpg"}
 
 
 @dataclass(frozen=True)
@@ -51,32 +56,98 @@ class Planner:
         """Create a plan without executing it."""
         context = context or {}
         requested_skill = context.get("skill_name")
+        arguments = dict(context.get("arguments", {}))
+        available_skills = set(self.skill_registry.list_names())
 
         if isinstance(requested_skill, str):
+            if requested_skill not in available_skills:
+                raise KeyError(f"Unknown skill: {requested_skill}")
             return Plan(
                 objective=objective,
                 steps=[
                     PlanStep(
                         skill_name=requested_skill,
                         query=objective,
-                        arguments=dict(context.get("arguments", {})),
+                        arguments=arguments,
                         reason="Skill was explicitly provided by caller context.",
                     )
                 ],
             )
 
-        skill_names = self.skill_registry.list_names()
-        if not skill_names:
-            return Plan(objective=objective, steps=[])
-
-        selected_skill = skill_names[0]
-        return Plan(
-            objective=objective,
-            steps=[
-                PlanStep(
-                    skill_name=selected_skill,
-                    query=objective,
-                    reason="Defaulted to the first registered skill until LLM planning is enabled.",
+        file_path = arguments.get("file_path")
+        if isinstance(file_path, str):
+            suffix = Path(file_path).suffix.lower()
+            if suffix in SPREADSHEET_EXTENSIONS:
+                # 原因：Excel 分析必须先检查结构，再运行本地统计分析。
+                # 作用：生成固定顺序的 schema → analysis 两步计划，避免整表进入 LLM。
+                spreadsheet_steps = [
+                    PlanStep(
+                        skill_name="excel_schema",
+                        query=objective,
+                        arguments=arguments,
+                        reason="Inspect spreadsheet schema and safe samples first.",
+                    ),
+                    PlanStep(
+                        skill_name="excel_analysis",
+                        query=objective,
+                        arguments=arguments,
+                        reason="Run local spreadsheet analysis after schema inspection.",
+                    ),
+                ]
+                return Plan(
+                    objective=objective,
+                    steps=[
+                        step for step in spreadsheet_steps
+                        if step.skill_name in available_skills
+                    ],
                 )
-            ],
-        )
+
+            if suffix in DOCUMENT_EXTENSIONS and "document_parser" in available_skills:
+                # 原因：非结构化文档必须先转换成统一 Markdown。
+                # 作用：Planner 只安排解析任务，不在规划阶段读取文件内容。
+                return Plan(
+                    objective=objective,
+                    steps=[
+                        PlanStep(
+                            skill_name="document_parser",
+                            query=objective,
+                            arguments=arguments,
+                            reason="Normalize the document into Markdown.",
+                        )
+                    ],
+                )
+
+        lowered_objective = objective.lower()
+        if (
+            "web_search" in available_skills
+            and any(term in lowered_objective for term in ("web", "网页", "联网", "互联网"))
+        ):
+            return Plan(
+                objective=objective,
+                steps=[
+                    PlanStep(
+                        skill_name="web_search",
+                        query=objective,
+                        reason="The objective explicitly requires web search.",
+                    )
+                ],
+            )
+
+        if (
+            "rag_search" in available_skills
+            and any(term in lowered_objective for term in ("rag", "minirag", "知识库", "长期记忆"))
+        ):
+            return Plan(
+                objective=objective,
+                steps=[
+                    PlanStep(
+                        skill_name="rag_search",
+                        query=objective,
+                        reason="The objective explicitly requires local knowledge retrieval.",
+                    )
+                ],
+            )
+
+        # 原因：无法判断任务类型时自动选第一个 Skill 会执行错误能力。
+        # 作用：返回空计划，让上层明确处理“无法规划”，而不是产生隐式副作用。
+        return Plan(objective=objective, steps=[])

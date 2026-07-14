@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pandas as pd
@@ -60,6 +61,26 @@ class DocumentAnalysisTests(unittest.TestCase):
             self.assertEqual(parsed.metadata["source_type"], "docx")
             self.assertEqual(parsed.metadata["parser"], "mineru")
 
+    def test_parse_image_uses_mineru_ocr(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "scan.png"
+            path.write_bytes(b"image placeholder")
+
+            with patch("qwopus_agent.documents.parser.parse_document_with_mineru") as parse_mineru:
+                parse_mineru.return_value = MinerUResult(
+                    markdown="# OCR Text",
+                    output_path=Path(tmpdir) / "scan.md",
+                    command="mineru -b pipeline",
+                )
+
+                # 原因：图片不能依赖 PDF/DOCX 的文本回退路径。
+                # 作用：验证图片始终通过 MinerU OCR 进入统一 Markdown 分析链路。
+                parsed = parse_document(path)
+
+            self.assertEqual(parsed.markdown, "# OCR Text")
+            self.assertEqual(parsed.metadata["source_type"], "image")
+            self.assertEqual(parsed.metadata["parser"], "mineru")
+
     def test_mineru_command_prefers_vendor_source(self) -> None:
         with patch.object(mineru, "VENDOR_MINERU_DIR", Path("vendor/MinerU")):
             command = mineru._build_mineru_command()
@@ -67,6 +88,32 @@ class DocumentAnalysisTests(unittest.TestCase):
         self.assertIn("-m", command.args)
         self.assertIn("mineru.cli.client", command.args)
         self.assertIn("vendor/MinerU", command.env["PYTHONPATH"])
+
+    def test_mineru_uses_pipeline_ocr_for_images(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            image_path = Path(tmpdir) / "scan.jpeg"
+            image_path.write_bytes(b"image placeholder")
+            markdown_path = Path(tmpdir) / "scan.md"
+            markdown_path.write_text("OCR result", encoding="utf-8")
+
+            # 原因：图片 real-case 证明 auto 可能只输出图片引用。
+            # 作用：锁定 PNG/JPEG 必须使用 pipeline + ocr 的命令契约。
+            with (
+                patch.object(
+                    mineru.subprocess,
+                    "run",
+                    return_value=SimpleNamespace(returncode=0, stderr=""),
+                ) as run,
+                patch.object(mineru, "_find_generated_markdown", return_value=markdown_path),
+            ):
+                mineru.parse_document_with_mineru(
+                    image_path,
+                    output_root=Path(tmpdir) / "output",
+                )
+
+            command = run.call_args.args[0]
+            self.assertEqual(command[command.index("-b") + 1], "pipeline")
+            self.assertEqual(command[-2:], ["-m", "ocr"])
 
     def test_analyze_csv_returns_schema_and_sample_without_full_llm_payload(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

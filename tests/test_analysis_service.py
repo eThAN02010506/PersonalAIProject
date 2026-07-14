@@ -31,6 +31,10 @@ class AnalysisServiceTests(unittest.TestCase):
                 patch("qwopus_agent.services.analysis_service.save_uploaded_bytes") as save_file,
                 patch("qwopus_agent.services.analysis_service.analyze_uploaded_file") as analyze_file,
                 patch("qwopus_agent.services.analysis_service.check_model_connection") as check_connection,
+                patch(
+                    "qwopus_agent.services.analysis_service.resolve_model_settings",
+                    side_effect=lambda current: current,
+                ),
                 patch("qwopus_agent.services.analysis_service.run_smolagents_document_analysis_with_debug") as run_llm,
             ):
                 # 原因：service 层测试只验证业务编排，不依赖真实上传目录和模型服务。

@@ -11,6 +11,7 @@ from qwopus_agent.integrations.smolagents_runtime import (
     SmolagentsDependencyError,
     SmolagentsModelSettings,
     check_model_connection,
+    resolve_model_settings,
     run_smolagents_chat_turn,
 )
 from qwopus_agent.memory import MiniRAG
@@ -152,8 +153,13 @@ def _render_upload_analysis(settings: SmolagentsModelSettings) -> None:
     st.caption("当前阶段：上传文件 → 本地解析/分析 → MiniRAG 入库/检索 → 页面展示。")
 
     uploaded_files = st.file_uploader(
-        "上传 PDF / DOCX / Markdown / TXT / CSV / Excel（可多选）",
-        type=["pdf", "docx", "md", "txt", "csv", "xlsx", "xls"],
+        "上传 PDF / DOCX / Markdown / TXT / 图片 / CSV / Excel（可多选）",
+        # 原因：MinerU pipeline 支持图片 OCR，上传入口需要开放相同格式。
+        # 作用：让图片与其他文档共用解析、MiniRAG 入库和模型分析流程。
+        type=[
+            "pdf", "docx", "md", "txt", "png", "jpeg", "jpg",
+            "csv", "xlsx", "xls",
+        ],
         accept_multiple_files=True,
     )
     user_question = st.text_area(
@@ -203,7 +209,9 @@ def main() -> None:
     st.caption("当前阶段：smolagents 对话 + 文档/Excel 上传分析 + MiniRAG 入库检索。报告生成仍为后续模块。")
 
     _init_session_state()
-    settings = SmolagentsModelSettings.from_env()
+    # 原因：用户会在同一个服务器地址上频繁切换模型。
+    # 作用：Streamlit 每次重跑都从 /models 刷新侧边栏和后续请求使用的模型 id。
+    settings = resolve_model_settings(SmolagentsModelSettings.from_env())
     _render_sidebar(settings)
     analysis_tab, chat_tab = st.tabs(["文档分析", "对话测试"])
 

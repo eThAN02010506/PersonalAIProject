@@ -52,13 +52,14 @@ class Executor:
         contents: list[str] = []
 
         for step in plan.steps:
-            skill = self.skill_registry.get(step.skill_name)
             request = SkillRequest(
                 query=step.query,
                 arguments=step.arguments,
                 context={"objective": plan.objective, **context},
             )
-            response = await skill.run(request)
+            # 原因：Executor 不应取得具体 Skill 后绕过 Registry 直接调用。
+            # 作用：所有 Skill 都通过统一执行入口运行，保持调用边界和错误语义一致。
+            response = await self.skill_registry.execute(step.skill_name, request)
             executed_steps.append(StepExecution(skill_name=step.skill_name, response=response))
             contents.append(response.content)
 
