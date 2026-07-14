@@ -9,6 +9,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+from qwopus_agent.documents.mineru import MinerUUnavailableError, parse_document_with_mineru
+
 
 SUPPORTED_DOCUMENT_EXTENSIONS = {".pdf", ".docx", ".md", ".txt"}
 
@@ -51,6 +53,11 @@ def parse_document(file_path: str | Path) -> ParsedDocument:
 
 def _parse_pdf(path: Path) -> ParsedDocument:
     """Extract text from PDF pages."""
+    try:
+        return _parse_with_mineru(path, source_type="pdf")
+    except MinerUUnavailableError:
+        pass
+
     from pypdf import PdfReader
 
     reader = PdfReader(str(path))
@@ -64,12 +71,18 @@ def _parse_pdf(path: Path) -> ParsedDocument:
 
     markdown = "\n\n".join(pages)
     parsed = _build_parsed_document(path, markdown, source_type="pdf")
+    parsed.metadata["parser"] = "pypdf"
     parsed.metadata["pages"] = len(reader.pages)
     return parsed
 
 
 def _parse_docx(path: Path) -> ParsedDocument:
     """Extract paragraphs and tables from DOCX into Markdown."""
+    try:
+        return _parse_with_mineru(path, source_type="docx")
+    except MinerUUnavailableError:
+        pass
+
     from docx import Document
 
     document = Document(str(path))
@@ -88,6 +101,17 @@ def _parse_docx(path: Path) -> ParsedDocument:
             blocks.append(f"### Table {table_index}\n\n{_rows_to_markdown_table(rows)}")
 
     return _build_parsed_document(path, "\n\n".join(blocks), source_type="docx")
+
+
+def _parse_with_mineru(path: Path, source_type: str) -> ParsedDocument:
+    mineru_result = parse_document_with_mineru(path)
+    parsed = _build_parsed_document(path, mineru_result.markdown, source_type=source_type)
+    # 原因：调试和后续报告需要知道文档实际由哪个解析器处理。
+    # 作用：标记 MinerU 输出路径，便于排查解析质量。
+    parsed.metadata["parser"] = "mineru"
+    parsed.metadata["mineru_command"] = mineru_result.command
+    parsed.metadata["mineru_output_path"] = str(mineru_result.output_path)
+    return parsed
 
 
 def _rows_to_markdown_table(rows: list[list[str]]) -> str:

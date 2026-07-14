@@ -27,10 +27,24 @@ class MiniRAG:
         if not query.strip():
             raise ValueError("query must not be empty")
 
-        query_terms = query.lower().split()
+        query_terms = _query_terms(query)
         matches = [
             document
             for document in self._documents
             if any(term in document.lower() for term in query_terms)
         ]
         return matches
+
+
+def _query_terms(query: str) -> list[str]:
+    """Build simple searchable terms for English and Chinese queries."""
+    lowered = query.lower().strip()
+    terms = lowered.split()
+    compact = "".join(terms)
+    if compact and compact not in terms:
+        terms.append(compact)
+    if any("\u4e00" <= char <= "\u9fff" for char in compact):
+        # 原因：中文问题通常没有空格，直接 split 会导致召回很弱。
+        # 作用：加入中文字符级 term，让“分析收入”能命中包含“收入”的文档。
+        terms.extend(char for char in compact if "\u4e00" <= char <= "\u9fff")
+    return list(dict.fromkeys(term for term in terms if term))

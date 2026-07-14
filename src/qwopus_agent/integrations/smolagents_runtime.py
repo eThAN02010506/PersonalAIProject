@@ -215,7 +215,6 @@ def build_smolagents_model(
         api_base=settings.base_url,
         api_key=settings.api_key,
         temperature=settings.temperature,
-        max_tokens=settings.max_tokens,
     )
 
 
@@ -266,7 +265,10 @@ def run_smolagents_chat_turn(
         settings: SmolagentsModelSettings | None = None,
 ):
     model = build_smolagents_model(settings)
-    response = model.generate(build_chat_messages(history, user_message))
+    response = model.generate(
+        build_chat_messages(history, user_message),
+        max_tokens=(settings or SmolagentsModelSettings.from_env()).max_tokens,
+    )
 
     # 原因：不同 smolagents 版本返回 ChatMessage 对象或 dict-like 结构。
     # 作用：把返回值统一成 Streamlit 可展示的纯文本。
@@ -354,7 +356,9 @@ def run_smolagents_document_analysis_with_debug(
                         f"文件名：{document_name}\n\n"
                         f"用户问题：{question}\n\n"
                         f"文件解析内容如下：\n\n{clipped_content}\n\n"
-                        "如果只能摘要，请用 3-6 条中文要点回答。"
+                        "请生成较完整的中文分析，不要只返回简短 bullet point。"
+                        "请包含：整体概览、关键内容、重要数据或结论、可执行建议。"
+                        "只有当用户明确要求简短时，才使用简短要点。"
                     ),
                 },
             ],

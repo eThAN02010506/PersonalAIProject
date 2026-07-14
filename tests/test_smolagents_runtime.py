@@ -23,13 +23,22 @@ class FakeOpenAIModel:
         self.kwargs = kwargs
         self.messages = None
         self.calls = []
+        self.call_kwargs = []
         FakeOpenAIModel.last_instance = self
 
     def generate(self, messages, **kwargs):
         self.messages = messages
         self.calls.append(messages)
+        self.call_kwargs.append(kwargs)
         if "请直接给出中文最终答案" in messages[-1]["content"]:
-            return types.SimpleNamespace(content="这是中文最终摘要。")
+            return types.SimpleNamespace(
+                content=(
+                    "这是一份较完整的中文分析。\n\n"
+                    "整体概览：文件围绕作业内容展开。\n\n"
+                    "关键内容：文档包含主要任务、计算步骤和结果说明。\n\n"
+                    "结论与建议：可以继续补充更细的结果解释。"
+                )
+            )
         if "TRIGGER_EMPTY" in messages[-1]["content"]:
             return types.SimpleNamespace(content="")
         if "TRIGGER_REASONING_ONLY" in messages[-1]["content"]:
@@ -89,6 +98,7 @@ class SmolagentsRuntimeTests(unittest.TestCase):
         self.assertEqual(model.kwargs["model_id"], "gemma-4-12B-it-qat-OptiQ-4bit")
         self.assertEqual(model.kwargs["api_base"], "http://127.0.0.1:8080/v1")
         self.assertEqual(model.kwargs["api_key"], "local_token")
+        self.assertNotIn("max_tokens", model.kwargs)
 
     def test_build_smolagents_code_agent_starts_without_tools(self) -> None:
         settings = SmolagentsModelSettings(
@@ -201,7 +211,8 @@ class SmolagentsRuntimeTests(unittest.TestCase):
             settings=settings,
         )
 
-        self.assertEqual(result.answer, "这是中文最终摘要。")
+        self.assertIn("整体概览", result.answer)
+        self.assertIn("关键内容", result.answer)
         self.assertTrue(any("第一次模型未生成完整 content" in step for step in result.debug_steps))
 
     def test_document_analysis_does_not_show_reasoning_content(self) -> None:
@@ -217,7 +228,7 @@ class SmolagentsRuntimeTests(unittest.TestCase):
             settings=settings,
         )
 
-        self.assertEqual(result.answer, "这是中文最终摘要。")
+        self.assertIn("整体概览", result.answer)
         self.assertNotIn("We need to", result.answer)
 
     def test_document_analysis_retry_rebuilds_messages_without_extra_user_turn(self) -> None:
@@ -238,6 +249,7 @@ class SmolagentsRuntimeTests(unittest.TestCase):
         self.assertEqual(model.calls[-1][0]["role"], "system")
         self.assertEqual(model.calls[-1][1]["role"], "user")
         self.assertIn("TRIGGER_REASONING_ONLY", model.calls[-1][1]["content"])
+        self.assertGreater(model.call_kwargs[-1]["max_tokens"], settings.max_tokens)
 
     @patch("qwopus_agent.integrations.smolagents_runtime.urllib.request.urlopen")
     def test_check_model_connection_reports_online(self, mock_urlopen) -> None:

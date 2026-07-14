@@ -16,3 +16,10 @@ class MiniRAGTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "document must not be empty"):
             memory.insert(" ")
+
+    def test_search_supports_chinese_queries_without_spaces(self) -> None:
+        memory = MiniRAG()
+
+        memory.insert("# 销售分析\n收入增长，缺失值较少。")
+
+        self.assertEqual(memory.search("分析收入"), ["# 销售分析\n收入增长，缺失值较少。"])
