@@ -105,3 +105,13 @@ class AgentArchitectureTests(unittest.TestCase):
         plan = asyncio.run(planner.plan("处理这个任务"))
 
         self.assertEqual(plan.steps, [])
+
+    def test_executor_reports_empty_plan_as_failure(self) -> None:
+        registry = SkillRegistry.discover()
+        planner = Planner(skill_registry=registry)
+        plan = asyncio.run(planner.plan("处理这个任务"))
+
+        result = asyncio.run(Executor(skill_registry=registry).execute(plan))
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.content, "No executable plan steps.")

@@ -5,7 +5,8 @@
 - Model-agnostic: all model providers implement `BaseLLM`.
 - Interface-first: agent, tools, memory, reflection, and skills communicate through stable contracts.
 - Local-first: the first concrete model adapter targets `mlx_lm.server` through its OpenAI-compatible API.
-- Incremental: advanced memory, RAG, research, and multi-agent behavior are intentionally deferred.
+- Incremental: memory, reports, reflection, and research start as small testable modules; browser
+  automation and multi-agent behavior remain deferred.
 
 ## First-Stage Modules
 
@@ -23,21 +24,42 @@ other model family.
 The agent layer is split into:
 
 - `Planner`: creates a `Plan` from a user objective.
-- `Executor`: executes a `Plan`, optionally resolving named tools from `ToolRegistry`.
-- `AgentLoop`: coordinates planning and execution.
+- `Executor`: executes a `Plan` through `SkillRegistry`.
+- `AgentRouter`: coordinates planning and execution.
+- `ResearchAgent`: reuses `AgentRouter` and reflection for research-style tasks.
 
 ### Tools
 
 `BaseTool` defines structured tool execution. `ToolRegistry` keeps tool discovery out of the agent loop,
 which makes Python tools, file tools, project analyzers, and research tools easy to add later.
 
-### Future Modules
+### Memory
 
-- `memory`: long-term memory and retrieval interfaces
-- `reflection`: task critique and improvement loops
-- `skills`: reusable skill definitions and loaders
-- `reports`: structured research and task reports
-- `prompts`: prompt assets and builders
+`MiniRAG` exposes only `insert(document)` and `search(query)`. The current backend persists JSONL
+documents under `storage/minirag` and uses a simple local search fallback.
+
+### Skills
+
+`SkillRegistry.discover()` scans `qwopus_agent.skills` and imports modules with `create_skill()`.
+Planner selects skills; Executor runs them through the registry.
+
+### Reports
+
+`ReportGenerator` is the unified report module. It writes Markdown, Excel, chart manifests, and a
+minimal PDF artifact from one request.
+
+### Reflection
+
+`TaskReflectionEvaluator` provides structured quality observations and retry suggestions without
+requiring another LLM call.
+
+### Deferred Modules
+
+- production web-search provider
+- browser automation
+- multi-agent collaboration
+- semantic/vector MiniRAG backend
+- advanced skill versioning and reuse
 
 ## Suggested Milestone Order
 
@@ -48,3 +70,5 @@ which makes Python tools, file tools, project analyzers, and research tools easy
 5. Add reflection hooks.
 6. Add skill loading and reuse.
 7. Build the research agent on top of the stable primitives.
+8. Add production web-search provider wiring.
+9. Add report download integration in the UI.

@@ -1,1 +1,5 @@
-"""Task reflection interfaces will live here in later milestones."""
+"""Task reflection interfaces."""
+
+from qwopus_agent.reflection.evaluator import ReflectionResult, TaskReflectionEvaluator
+
+__all__ = ["ReflectionResult", "TaskReflectionEvaluator"]

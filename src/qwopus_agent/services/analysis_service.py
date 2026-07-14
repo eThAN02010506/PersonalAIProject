@@ -6,13 +6,15 @@ outputs.
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
 
-from qwopus_agent.analysis import AnalysisResult, analyze_uploaded_file
+from qwopus_agent.agents import AgentRouter, Executor, Planner
+from qwopus_agent.analysis import AnalysisResult
 from qwopus_agent.documents import save_uploaded_bytes
 from qwopus_agent.integrations.smolagents_runtime import (
     SmolagentsModelSettings,
@@ -21,6 +23,7 @@ from qwopus_agent.integrations.smolagents_runtime import (
     run_smolagents_document_analysis_with_debug,
 )
 from qwopus_agent.memory import MiniRAG
+from qwopus_agent.skills import SkillRegistry
 from qwopus_agent.utils.conversation_log import append_conversation_event
 from qwopus_agent.utils.logging_config import get_logger
 
@@ -46,6 +49,15 @@ class UploadAnalysisOutcome:
     debug_steps: list[str]
 
     analyzed_file_names: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class FileAgentAnalysis:
+    """One saved file analyzed through the Agent route."""
+
+    result: AnalysisResult
+
+    plan_steps: list[str]
 
 
 def analyze_uploaded_files(
@@ -75,36 +87,53 @@ def analyze_uploaded_files(
                 f"保存路径：{stored.path}",
             ]
         )
-        result = analyze_uploaded_file(stored.path, user_question=user_question)
+        routed_analysis = _analyze_file_with_agent(stored.path, user_question=user_question)
+        result = routed_analysis.result
         logger.info(
             "upload_analyzed filename=%s metadata=%s",
             stored.original_name,
             result.metadata,
+        )
+        debug_steps.append(
+            f"Agent 计划执行：{stored.original_name}: "
+            f"{' → '.join(routed_analysis.plan_steps) or '无可执行步骤'}"
         )
         debug_steps.append(f"本地解析完成：{stored.original_name}: {result.metadata}")
         analyzed_results.append((stored.original_name, result))
 
     result = combine_analysis_results(analyzed_results)
     memory_context = ""
+    memory_hit_count = 0
     if result.markdown_document:
-        # 原因：上传后的 Markdown/Excel 安全摘要需要进入统一知识层。
-        # 作用：后续分析可以通过 MiniRAG.search(query) 复用已上传内容。
-        minirag.insert(result.markdown_document)
-        logger.info(
-            "minirag_inserted file_count=%s context_length=%s",
-            len(analyzed_results),
-            len(result.markdown_document),
-        )
-        debug_steps.append("MiniRAG 入库完成：已插入当前文件的 Markdown/安全摘要。")
+        result.metadata["minirag_inserted"] = False
+        result.metadata["minirag_search_hits"] = 0
         if user_question.strip():
+            # 原因：MiniRAG 应该补充“已有知识”，当前上传文件已经在 document_context 里。
+            # 作用：先检索旧知识再入库，避免把当前文件重复算作知识库命中。
             memory_results = minirag.search(user_question)
+            memory_hit_count = len(memory_results)
+            result.metadata["minirag_search_hits"] = memory_hit_count
+            result.metadata["minirag_context_used"] = memory_hit_count > 0
             memory_context = format_memory_context(memory_results)
             logger.info(
                 "minirag_search query_length=%s hits=%s",
                 len(user_question),
                 len(memory_results),
             )
-            debug_steps.append(f"MiniRAG 检索完成：命中 {len(memory_results)} 条。")
+            debug_steps.append(f"MiniRAG 检索完成：命中 {len(memory_results)} 条已有知识。")
+
+        # 原因：上传后的 Markdown/Excel 安全摘要需要进入统一知识层。
+        # 作用：后续分析可以通过 MiniRAG.search(query) 复用已上传内容。
+        minirag.insert(result.markdown_document)
+        # 原因：第八步要求上传内容进入知识层，但主界面不能暴露原始检索内容。
+        # 作用：只把入库状态和命中数写入 metadata，供 UI 展示轻量状态。
+        result.metadata["minirag_inserted"] = True
+        logger.info(
+            "minirag_inserted file_count=%s context_length=%s",
+            len(analyzed_results),
+            len(result.markdown_document),
+        )
+        debug_steps.append("MiniRAG 入库完成：已插入当前文件的 Markdown/安全摘要。")
 
     if user_question.strip() and result.markdown_document:
         online, connection_message = check_model_connection(settings)
@@ -125,7 +154,10 @@ def analyze_uploaded_files(
             result = AnalysisResult(
                 markdown_summary=result.markdown_summary,
                 tables=result.tables,
-                metadata=result.metadata,
+                metadata={
+                    **result.metadata,
+                    "minirag_search_hits": memory_hit_count,
+                },
                 markdown_document=result.markdown_document,
                 llm_analysis=analysis_run.answer,
             )
@@ -149,6 +181,45 @@ def analyze_uploaded_files(
         result=result,
         debug_steps=debug_steps,
         analyzed_file_names=[file_name for file_name, _ in analyzed_results],
+    )
+
+
+def _analyze_file_with_agent(file_path: Path, user_question: str) -> FileAgentAnalysis:
+    """Analyze one saved file through Planner, Executor, and Skills."""
+    registry = SkillRegistry.discover()
+    router = AgentRouter(
+        planner=Planner(skill_registry=registry),
+        executor=Executor(skill_registry=registry),
+    )
+    # 原因：上传分析入口必须真实经过 Agent 架构，而不是绕过 Planner/Executor 直接调用解析函数。
+    # 作用：UI、CLI、API 后续都能复用同一条“规划 → 执行 → Skill”的能力链路。
+    agent_run = asyncio.run(
+        router.run(
+            user_question or "分析上传文件",
+            context={"arguments": {"file_path": str(file_path)}},
+        )
+    )
+    if not agent_run.execution.success:
+        raise RuntimeError(agent_run.execution.content)
+
+    plan_steps = [step.skill_name for step in agent_run.plan.steps]
+    last_response = agent_run.execution.steps[-1].response
+    analysis_result = last_response.data.get("analysis_result")
+    if isinstance(analysis_result, AnalysisResult):
+        return FileAgentAnalysis(result=analysis_result, plan_steps=plan_steps)
+
+    markdown = str(last_response.data.get("markdown") or last_response.content)
+    metadata = dict(last_response.data.get("metadata", {}))
+    # 原因：文档解析 Skill 的职责是返回 Markdown，不负责生成完整报告对象。
+    # 作用：服务层把 Skill 输出包装成 AnalysisResult，后续 MiniRAG 和 LLM 总结逻辑无需改动。
+    return FileAgentAnalysis(
+        result=AnalysisResult(
+            markdown_summary=markdown,
+            tables={},
+            metadata=metadata,
+            markdown_document=markdown,
+        ),
+        plan_steps=plan_steps,
     )
 
 

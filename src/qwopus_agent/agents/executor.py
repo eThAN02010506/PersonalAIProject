@@ -47,6 +47,11 @@ class Executor:
 
     async def execute(self, plan: Plan, context: dict[str, Any] | None = None) -> ExecutionResult:
         """Execute a plan without changing the plan itself."""
+        if not plan.steps:
+            # 原因：Planner 无法识别任务时会返回空计划，不能伪装成执行成功。
+            # 作用：向 Router/UI 返回明确失败，让调用方提示用户补充文件或任务类型。
+            return ExecutionResult(success=False, content="No executable plan steps.")
+
         context = context or {}
         executed_steps: list[StepExecution] = []
         contents: list[str] = []

@@ -52,6 +52,9 @@ class ExcelAnalysisSkill(BaseSkill):
             content=result.markdown_summary,
             data={
                 "file_path": str(path),
+                # 原因：上传分析服务需要保留表格、Markdown 和 metadata，不能只拿 Skill 的文本摘要。
+                # 作用：Executor 仍通过统一 SkillResponse 返回结果，下游无需再次读取同一个 Excel 文件。
+                "analysis_result": result,
                 "metadata": result.metadata,
                 "markdown_document": result.markdown_document,
                 "table_names": sorted(result.tables),

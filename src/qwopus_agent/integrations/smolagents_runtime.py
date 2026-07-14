@@ -370,7 +370,8 @@ def run_smolagents_document_analysis_with_debug(
                 "你是 Qwopus-Agent 的文件分析助手。"
                 "请严格基于用户上传文件的解析内容回答，不要编造文件里没有的信息。"
                 "如果内容不足以回答，请明确说明缺少什么。"
-                "请用中文输出结构化分析。"
+                "回答语言必须跟随用户问题的语言；如果用户问题语言不明确，再跟随文件主要语言。"
+                "请输出结构化分析。"
             ),
         },
         {
@@ -401,11 +402,12 @@ def run_smolagents_document_analysis_with_debug(
                 {
                     "role": "user",
                     "content": (
-                        "请直接给出中文最终答案，不要输出英文思考、推理过程、工具过程或草稿。\n\n"
+                        "请直接给出最终答案，不要输出思考、推理过程、工具过程或草稿。"
+                        "回答语言必须跟随用户问题的语言；如果用户问题语言不明确，再跟随文件主要语言。\n\n"
                         f"文件名：{document_name}\n\n"
                         f"用户问题：{question}\n\n"
                         f"文件解析内容如下：\n\n{clipped_content}\n\n"
-                        "请生成较完整的中文分析，不要只返回简短 bullet point。"
+                        "请生成较完整的分析，不要只返回简短 bullet point。"
                         "请包含：整体概览、关键内容、重要数据或结论、可执行建议。"
                         "只有当用户明确要求简短时，才使用简短要点。"
                     ),
@@ -447,6 +449,32 @@ def run_smolagents_document_analysis_with_debug(
 
     if _looks_like_tool_observation(final_answer):
         debug_steps.append("警告：最终答案仍像工具 Observation，说明模型第二轮没有完成总结。")
+        # 原因：用户主界面不能展示工具 Observation 或原始解析预览。
+        # 作用：最多再做一次强制收敛，把工具输出转换成自然语言最终答案。
+        response = model.generate(
+            [
+                {
+                    "role": "system",
+                    "content": (
+                        "你只负责输出给最终用户看的答案。"
+                        "回答语言必须跟随用户问题的语言；如果用户问题语言不明确，再跟随文件主要语言。"
+                        "禁止输出 Observation、Document Analysis、Preview、工具日志或草稿。"
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        f"用户问题：{question}\n\n"
+                        f"工具观察内容：\n{final_answer}\n\n"
+                        "请基于上面的内容生成完整最终答案。"
+                    ),
+                },
+            ],
+            max_tokens=output_token_limit * 2,
+        )
+        final_answer = _extract_final_answer(_response_to_text(response))
+        debug_steps.append(f"第三次模型返回结构：{_response_debug_snapshot(response)}")
+        debug_steps.append(f"第三次模型返回前 500 字：{final_answer[:500]}")
 
     return DocumentAnalysisRun(answer=final_answer, debug_steps=debug_steps)
 

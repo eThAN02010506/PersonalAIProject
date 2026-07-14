@@ -11,7 +11,7 @@ architecture rather than advanced agent behavior:
 - local MLX model adapter through `LocalMLXLLM`
 - tool abstraction through `BaseTool`
 - minimal Planner, Executor, and Agent Loop skeleton
-- reserved module boundaries for memory, reflection, skills, reports, prompts, storage, and logs
+- working module boundaries for memory, reflection, skills, reports, prompts, storage, and logs
 - runnable tests for the core contracts
 
 ## Project Layout
@@ -21,10 +21,10 @@ src/qwopus_agent/
   agent/        Planner, Executor, and AgentLoop skeleton
   llm/          BaseLLM interface and LocalMLXLLM adapter
   tools/        BaseTool interface and tool registry
-  memory/       Future long-term memory interfaces
-  skills/       Future reusable skill system
-  reflection/   Future task reflection interfaces
-  reports/      Future report generation module
+  memory/       MiniRAG facade with local JSONL persistence
+  skills/       Reusable skill system and auto-discovery registry
+  reflection/   Lightweight task reflection evaluator
+  reports/      Unified report generation module
   prompts/      Prompt templates and system prompt assets
 tests/          Unit tests for first-stage architecture
 storage/        Runtime data, ignored by Git except .gitkeep
@@ -128,11 +128,22 @@ Manual checks:
 5. Upload a TXT, Markdown, PDF, or DOCX file and confirm the Markdown preview renders.
 6. Stop the MLX server and confirm the UI shows a clear offline error.
 
-MiniRAG source is stored under `vendor/MiniRAG-main`; runtime MiniRAG data should live under
-`storage/minirag`. Actual insertion and retrieval are intentionally left for the next milestone.
+Runtime MiniRAG data lives under `storage/minirag`. Uploaded Markdown-normalized documents and safe
+spreadsheet summaries are inserted through the `MiniRAG.insert(document)` facade, and later analysis
+can retrieve existing context through `MiniRAG.search(query)`.
+
+Reports are generated through one module, `qwopus_agent.reports.ReportGenerator`, which currently
+creates Markdown, Excel workbooks, a chart manifest, and a minimal PDF artifact under
+`storage/reports`.
+
+Reflection and research orchestration are intentionally lightweight in this milestone:
+
+- `TaskReflectionEvaluator` checks basic execution quality and trace completeness.
+- `ResearchAgent` reuses `AgentRouter` and reflection instead of introducing browser automation or
+  multi-agent workflows.
 
 ## Milestone 1 Scope
 
-This stage deliberately avoids complex long-term memory, RAG, browser automation, multi-agent
-systems, and production research workflows. Those will be added after the core contracts are
-stable.
+This stage deliberately avoids browser automation, multi-agent systems, and production-grade web
+research. Web search has a provider-independent Skill interface, but a real search provider must be
+injected before it can access external search results.

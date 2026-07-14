@@ -31,7 +31,9 @@ class FakeOpenAIModel:
         self.messages = messages
         self.calls.append(messages)
         self.call_kwargs.append(kwargs)
-        if "请直接给出中文最终答案" in messages[-1]["content"]:
+        if "工具观察内容" in messages[-1]["content"]:
+            return types.SimpleNamespace(content='final_answer("第三轮最终总结。")')
+        if "请直接给出最终答案" in messages[-1]["content"]:
             return types.SimpleNamespace(
                 content=(
                     "这是一份较完整的中文分析。\n\n"
@@ -51,11 +53,13 @@ class FakeOpenAIModel:
             choice = types.SimpleNamespace(message=message, finish_reason="length")
             raw = types.SimpleNamespace(choices=[choice])
             return types.SimpleNamespace(content="", raw=raw)
-        if "请直接给出中文总结" in messages[-1]["content"]:
-            return types.SimpleNamespace(content='final_answer("空返回后的重试总结。")')
         if "上一步只是工具 Observation" in messages[-1]["content"]:
+            if any("STILL_OBSERVATION" in message["content"] for message in messages):
+                return types.SimpleNamespace(content="Observation:\nDocument Analysis: still raw preview")
             return types.SimpleNamespace(content='final_answer("这是最终总结。")')
         if "TRIGGER_OBSERVATION" in messages[-1]["content"]:
+            return types.SimpleNamespace(content="Observation:\nDocument Analysis: raw preview")
+        if "STILL_OBSERVATION" in messages[-1]["content"]:
             return types.SimpleNamespace(content="Observation:\nDocument Analysis: raw preview")
         return types.SimpleNamespace(content=f"reply: {messages[-1]['content']}")
 
@@ -201,6 +205,23 @@ class SmolagentsRuntimeTests(unittest.TestCase):
             any("触发第二轮最终答案生成" in step for step in result.debug_steps)
         )
 
+    def test_document_analysis_finalizes_when_second_response_is_still_observation(self) -> None:
+        settings = SmolagentsModelSettings(
+            model_id="any-model",
+            base_url="http://127.0.0.1:8080/v1",
+        )
+
+        result = run_smolagents_document_analysis_with_debug(
+            document_name="assignment.pdf",
+            content="STILL_OBSERVATION",
+            user_question="总结",
+            settings=settings,
+        )
+
+        self.assertEqual(result.answer, "第三轮最终总结。")
+        self.assertTrue(any("第三次模型返回" in step for step in result.debug_steps))
+        self.assertNotIn("Observation", result.answer)
+
     def test_document_analysis_retries_after_empty_model_response(self) -> None:
         settings = SmolagentsModelSettings(
             model_id="any-model",
@@ -252,6 +273,8 @@ class SmolagentsRuntimeTests(unittest.TestCase):
         self.assertEqual(model.calls[-1][0]["role"], "system")
         self.assertEqual(model.calls[-1][1]["role"], "user")
         self.assertIn("TRIGGER_REASONING_ONLY", model.calls[-1][1]["content"])
+        self.assertIn("回答语言必须跟随用户问题的语言", model.calls[-1][0]["content"])
+        self.assertIn("回答语言必须跟随用户问题的语言", model.calls[-1][1]["content"])
         self.assertGreater(model.call_kwargs[-1]["max_tokens"], settings.max_tokens)
 
     @patch("qwopus_agent.integrations.smolagents_runtime.urllib.request.urlopen")

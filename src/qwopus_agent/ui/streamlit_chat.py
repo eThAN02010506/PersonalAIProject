@@ -104,6 +104,7 @@ def _render_analysis_result(result: AnalysisResult) -> None:
     if result.llm_analysis:
         st.subheader("分析结果")
         st.markdown(result.llm_analysis)
+        _render_analysis_status(result)
     else:
         st.warning("尚未生成最终答案。请确认模型服务在线，并输入分析问题后重新分析。")
 
@@ -113,12 +114,28 @@ def _render_analysis_result(result: AnalysisResult) -> None:
                 st.markdown(_dataframe_to_safe_html(dataframe), unsafe_allow_html=True)
 
 
+def _render_analysis_status(result: AnalysisResult) -> None:
+    """Render safe analysis metadata without exposing raw tool observations."""
+    metadata = result.metadata
+    file_count = metadata.get("file_count", 1)
+    hit_count = metadata.get("minirag_search_hits", 0)
+    inserted = metadata.get("minirag_inserted") is True
+
+    # 原因：第九步需要让用户看到分析链路状态，而不是只能看到一段答案。
+    # 作用：用轻量指标展示文件、表格、知识层参与情况，不暴露原始检索内容。
+    columns = st.columns(4)
+    columns[0].metric("文件", str(file_count))
+    columns[1].metric("表格结果", str(len(result.tables)))
+    columns[2].metric("MiniRAG 命中", str(hit_count))
+    columns[3].metric("已入库", "是" if inserted else "否")
+
+
 def _render_debug_steps(debug_steps: list[str]) -> None:
     """Render document-analysis trace only when the user asks for it."""
     if not debug_steps:
         return
 
-    with st.expander("调试过程", expanded=True):
+    with st.expander("分析过程", expanded=False):
         for index, step in enumerate(debug_steps, start=1):
             st.markdown(f"**Step {index}.** {step}")
 
@@ -167,7 +184,9 @@ def _render_upload_analysis(settings: SmolagentsModelSettings) -> None:
         placeholder="例如：概括文档重点，或查看表格有哪些字段和数值列。",
         height=90,
     )
-    show_debug = st.checkbox("显示调试过程", value=True)
+    # 原因：主界面默认只呈现最终答案，但用户需要时可以查看可审计的分析过程。
+    # 作用：把工具调用、检索命中、模型重试等过程信息放到用户可选区域。
+    show_debug = st.checkbox("显示分析过程", value=False)
 
     if st.button("开始本地分析", type="primary", width="stretch"):
         if not uploaded_files:
