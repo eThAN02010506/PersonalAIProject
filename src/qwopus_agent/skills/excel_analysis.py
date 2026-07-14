@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
+
+from qwopus_agent.analysis import analyze_uploaded_file
 
 from qwopus_agent.skills.base import BaseSkill, SkillRequest, SkillResponse
 
@@ -18,17 +21,41 @@ class ExcelAnalysisSkill(BaseSkill):
     description: str = "Generate and execute local dataframe analysis without sending full Excel data."
 
     async def run(self, request: SkillRequest) -> SkillResponse:
-        """Return a safe placeholder until the pandas execution sandbox is added."""
-        if "schema" not in request.arguments:
+        """Run the existing local spreadsheet analysis pipeline."""
+        file_path = request.arguments.get("file_path")
+        if not file_path:
             return SkillResponse(
                 success=False,
-                content="excel_analysis requires arguments.schema from excel_schema.",
+                content="excel_analysis requires arguments.file_path.",
+            )
+
+        path = Path(str(file_path))
+        if not path.exists():
+            return SkillResponse(
+                success=False,
+                content=f"Spreadsheet file does not exist: {path}",
+            )
+
+        try:
+            # 原因：第三步只要求把现有能力 Skill 化，暂时不引入 pandas 代码沙箱。
+            # 作用：复用当前安全分析流程，返回 schema/sample/statistics 等本地计算结果。
+            result = analyze_uploaded_file(path, user_question=request.query)
+        except Exception as exc:
+            return SkillResponse(
+                success=False,
+                content=f"Excel analysis failed: {exc}",
+                data={"file_path": str(path)},
             )
 
         return SkillResponse(
             success=True,
-            content="Excel analysis skill is registered and ready for local code execution.",
-            data={"query": request.query},
+            content=result.markdown_summary,
+            data={
+                "file_path": str(path),
+                "metadata": result.metadata,
+                "markdown_document": result.markdown_document,
+                "table_names": sorted(result.tables),
+            },
         )
 
 

@@ -10,7 +10,7 @@ from qwopus_agent.analysis import AnalysisResult, analyze_uploaded_file
 from qwopus_agent.documents import parse_document, save_uploaded_bytes
 from qwopus_agent.documents import mineru
 from qwopus_agent.documents.mineru import MinerUResult
-from qwopus_agent.ui.streamlit_chat import _combine_analysis_results, _merge_analysis_context
+from qwopus_agent.services.analysis_service import combine_analysis_results, merge_analysis_context
 
 
 class DocumentAnalysisTests(unittest.TestCase):
@@ -164,7 +164,7 @@ class DocumentAnalysisTests(unittest.TestCase):
             self.assertIn("人物卡_form_summary", result.markdown_document)
 
     def test_merge_analysis_context_adds_minirag_results(self) -> None:
-        merged = _merge_analysis_context(
+        merged = merge_analysis_context(
             document_context="# Current Document",
             memory_context="### MiniRAG Result 1\n\n# Prior Document",
         )
@@ -187,7 +187,7 @@ class DocumentAnalysisTests(unittest.TestCase):
             markdown_document="beta",
         )
 
-        combined = _combine_analysis_results(
+        combined = combine_analysis_results(
             [
                 ("a.txt", result_a),
                 ("b.txt", result_b),

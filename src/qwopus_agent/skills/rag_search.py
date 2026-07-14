@@ -38,4 +38,6 @@ class RagSearchSkill(BaseSkill):
 
 def create_skill() -> BaseSkill:
     """Factory used by SkillRegistry for zero-manual registration."""
-    return RagSearchSkill()
+    # 原因：自动发现的 rag_search 也应该开箱可用，而不是必须由 UI 手动注入依赖。
+    # 作用：默认连接持久化 MiniRAG facade；测试仍可直接构造 RagSearchSkill 注入临时实例。
+    return RagSearchSkill(minirag=MiniRAG())

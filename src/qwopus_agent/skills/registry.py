@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from types import ModuleType
 
 import qwopus_agent.skills as skills_package
-from qwopus_agent.skills.base import BaseSkill
+from qwopus_agent.skills.base import BaseSkill, SkillRequest, SkillResponse
 
 
 IGNORED_MODULES = {"base", "registry"}
@@ -41,6 +41,12 @@ class SkillRegistry:
     def list_names(self) -> list[str]:
         """Return registered skill names in deterministic order."""
         return sorted(self._skills)
+
+    async def execute(self, name: str, request: SkillRequest) -> SkillResponse:
+        """Execute one registered skill through the common typed contract."""
+        # 原因：调用方不应先取得具体 Skill 再了解其 run() 调用细节。
+        # 作用：把 Skill 查找和异步执行收口到 Registry 的统一入口。
+        return await self.get(name).run(request)
 
     @classmethod
     def discover(cls) -> SkillRegistry:
