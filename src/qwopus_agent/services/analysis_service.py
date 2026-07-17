@@ -6,27 +6,29 @@ outputs.
 
 from __future__ import annotations
 
-import asyncio
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
 
-from qwopus_agent.agents import AgentRouter, Executor, Planner
-from qwopus_agent.analysis import AnalysisResult
+from qwopus_agent.analysis import AnalysisResult, analyze_uploaded_file
 from qwopus_agent.documents import save_uploaded_bytes
 from qwopus_agent.integrations.smolagents_runtime import (
     SmolagentsModelSettings,
     check_model_connection,
     resolve_model_settings,
-    run_smolagents_document_analysis_with_debug,
+    run_smolagents_file_analysis_with_debug,
+)
+from qwopus_agent.integrations.smolagents_tools import (
+    build_document_parser_tool,
+    build_excel_analysis_tool,
+    build_excel_schema_tool,
+    build_minirag_search_tool,
 )
 from qwopus_agent.memory import MiniRAG
-from qwopus_agent.skills import SkillRegistry
 from qwopus_agent.utils.conversation_log import append_conversation_event
 from qwopus_agent.utils.logging_config import get_logger
-
 
 logger = get_logger("services.analysis_service")
 
@@ -51,20 +53,11 @@ class UploadAnalysisOutcome:
     analyzed_file_names: list[str] = field(default_factory=list)
 
 
-@dataclass(frozen=True)
-class FileAgentAnalysis:
-    """One saved file analyzed through the Agent route."""
-
-    result: AnalysisResult
-
-    plan_steps: list[str]
-
-
 def analyze_uploaded_files(
-        uploaded_files: list[UploadedFileInput],
-        user_question: str,
-        settings: SmolagentsModelSettings,
-        minirag: MiniRAG,
+    uploaded_files: list[UploadedFileInput],
+    user_question: str,
+    settings: SmolagentsModelSettings,
+    minirag: MiniRAG,
 ) -> UploadAnalysisOutcome:
     """Analyze uploaded files, update MiniRAG, and optionally call the LLM."""
     # 原因：服务端模型可能在两次上传分析之间发生切换。
@@ -72,6 +65,9 @@ def analyze_uploaded_files(
     settings = resolve_model_settings(settings)
     debug_steps: list[str] = []
     analyzed_results: list[tuple[str, AnalysisResult]] = []
+    document_contexts: dict[str, str] = {}
+    spreadsheet_contexts: dict[str, str] = {}
+    spreadsheet_paths: dict[str, Path] = {}
 
     for uploaded_file in uploaded_files:
         logger.info(
@@ -87,22 +83,24 @@ def analyze_uploaded_files(
                 f"保存路径：{stored.path}",
             ]
         )
-        routed_analysis = _analyze_file_with_agent(stored.path, user_question=user_question)
-        result = routed_analysis.result
+        # 原因：文件解析是确定性的输入预处理，不应该再启动另一套 Planner/Executor。
+        # 作用：只生成 UI、MiniRAG 和 Tool 共用的安全上下文；Agent 决策留给 smolagents。
+        result = analyze_uploaded_file(stored.path, user_question=user_question)
+        if result.markdown_document:
+            if result.metadata.get("source_type") == "spreadsheet":
+                spreadsheet_contexts[stored.original_name] = result.markdown_document
+                spreadsheet_paths[stored.original_name] = stored.path
+            else:
+                document_contexts[stored.original_name] = result.markdown_document
         logger.info(
             "upload_analyzed filename=%s metadata=%s",
             stored.original_name,
             result.metadata,
         )
-        debug_steps.append(
-            f"Agent 计划执行：{stored.original_name}: "
-            f"{' → '.join(routed_analysis.plan_steps) or '无可执行步骤'}"
-        )
-        debug_steps.append(f"本地解析完成：{stored.original_name}: {result.metadata}")
+        debug_steps.append(f"本地预处理完成：{stored.original_name}: {result.metadata}")
         analyzed_results.append((stored.original_name, result))
 
     result = combine_analysis_results(analyzed_results)
-    memory_context = ""
     memory_hit_count = 0
     if result.markdown_document:
         result.metadata["minirag_inserted"] = False
@@ -113,8 +111,6 @@ def analyze_uploaded_files(
             memory_results = minirag.search(user_question)
             memory_hit_count = len(memory_results)
             result.metadata["minirag_search_hits"] = memory_hit_count
-            result.metadata["minirag_context_used"] = memory_hit_count > 0
-            memory_context = format_memory_context(memory_results)
             logger.info(
                 "minirag_search query_length=%s hits=%s",
                 len(user_question),
@@ -139,10 +135,24 @@ def analyze_uploaded_files(
         online, connection_message = check_model_connection(settings)
         debug_steps.append(f"模型连接检测：{connection_message}")
         if online:
-            analysis_run = run_smolagents_document_analysis_with_debug(
-                document_name=", ".join(file_name for file_name, _ in analyzed_results),
-                content=merge_analysis_context(result.markdown_document, memory_context),
+            analysis_tools: list[Any] = []
+            if document_contexts:
+                analysis_tools.append(build_document_parser_tool(document_contexts))
+            if spreadsheet_contexts:
+                analysis_tools.extend(
+                    [
+                        build_excel_schema_tool(spreadsheet_contexts),
+                        build_excel_analysis_tool(spreadsheet_paths),
+                    ]
+                )
+            analysis_tools.append(build_minirag_search_tool(minirag))
+            # 原因：smolagents 是文件分析的统一驱动，服务层只注入当前任务允许访问的能力。
+            # 作用：Agent 自行选择文档、Excel 沙箱或 MiniRAG Tool，且无法访问未上传的路径。
+            analysis_run = run_smolagents_file_analysis_with_debug(
+                file_names=[file_name for file_name, _ in analyzed_results],
+                spreadsheet_names=list(spreadsheet_contexts),
                 user_question=user_question,
+                tools=analysis_tools,
                 settings=settings,
             )
             logger.info(
@@ -157,6 +167,9 @@ def analyze_uploaded_files(
                 metadata={
                     **result.metadata,
                     "minirag_search_hits": memory_hit_count,
+                    "minirag_context_used": "rag_search" in analysis_run.tool_calls,
+                    "pandas_sandbox_used": "excel_analysis" in analysis_run.tool_calls,
+                    "smolagents_tool_calls": analysis_run.tool_calls,
                 },
                 markdown_document=result.markdown_document,
                 llm_analysis=analysis_run.answer,
@@ -184,76 +197,8 @@ def analyze_uploaded_files(
     )
 
 
-def _analyze_file_with_agent(file_path: Path, user_question: str) -> FileAgentAnalysis:
-    """Analyze one saved file through Planner, Executor, and Skills."""
-    registry = SkillRegistry.discover()
-    router = AgentRouter(
-        planner=Planner(skill_registry=registry),
-        executor=Executor(skill_registry=registry),
-    )
-    # 原因：上传分析入口必须真实经过 Agent 架构，而不是绕过 Planner/Executor 直接调用解析函数。
-    # 作用：UI、CLI、API 后续都能复用同一条“规划 → 执行 → Skill”的能力链路。
-    agent_run = asyncio.run(
-        router.run(
-            user_question or "分析上传文件",
-            context={"arguments": {"file_path": str(file_path)}},
-        )
-    )
-    if not agent_run.execution.success:
-        raise RuntimeError(agent_run.execution.content)
-
-    plan_steps = [step.skill_name for step in agent_run.plan.steps]
-    last_response = agent_run.execution.steps[-1].response
-    analysis_result = last_response.data.get("analysis_result")
-    if isinstance(analysis_result, AnalysisResult):
-        return FileAgentAnalysis(result=analysis_result, plan_steps=plan_steps)
-
-    markdown = str(last_response.data.get("markdown") or last_response.content)
-    metadata = dict(last_response.data.get("metadata", {}))
-    # 原因：文档解析 Skill 的职责是返回 Markdown，不负责生成完整报告对象。
-    # 作用：服务层把 Skill 输出包装成 AnalysisResult，后续 MiniRAG 和 LLM 总结逻辑无需改动。
-    return FileAgentAnalysis(
-        result=AnalysisResult(
-            markdown_summary=markdown,
-            tables={},
-            metadata=metadata,
-            markdown_document=markdown,
-        ),
-        plan_steps=plan_steps,
-    )
-
-
-def format_memory_context(memory_results: list[str], max_chars: int = 4000) -> str:
-    """Build bounded MiniRAG context for LLM analysis."""
-    if not memory_results:
-        return ""
-
-    sections: list[str] = []
-    remaining = max_chars
-    for index, document in enumerate(memory_results, start=1):
-        if remaining <= 0:
-            break
-        snippet = document[:remaining]
-        # 原因：MiniRAG 可能返回长文档，不能无界加入 LLM 上下文。
-        # 作用：只附加有限检索片段，让回答能利用知识层但不爆上下文。
-        sections.append(f"### MiniRAG Result {index}\n\n{snippet}")
-        remaining -= len(snippet)
-    return "\n\n".join(sections)
-
-
-def merge_analysis_context(document_context: str, memory_context: str) -> str:
-    """Merge current file context with MiniRAG search context."""
-    if not memory_context:
-        return document_context
-    return (
-        f"{document_context}\n\n"
-        "## MiniRAG Search Context\n\n"
-        f"{memory_context}"
-    )
-
-
 def combine_analysis_results(
-        results: list[tuple[str, AnalysisResult]],
+    results: list[tuple[str, AnalysisResult]],
 ) -> AnalysisResult:
     """Combine multiple uploaded-file analysis results."""
     markdown_sections: list[str] = []

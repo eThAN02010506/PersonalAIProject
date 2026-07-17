@@ -8,10 +8,9 @@ import pandas as pd
 from openpyxl import Workbook
 
 from qwopus_agent.analysis import AnalysisResult, analyze_uploaded_file
-from qwopus_agent.documents import parse_document, save_uploaded_bytes
-from qwopus_agent.documents import mineru
+from qwopus_agent.documents import mineru, parse_document, save_uploaded_bytes
 from qwopus_agent.documents.mineru import MinerUResult
-from qwopus_agent.services.analysis_service import combine_analysis_results, merge_analysis_context
+from qwopus_agent.services.analysis_service import combine_analysis_results
 
 
 class DocumentAnalysisTests(unittest.TestCase):
@@ -202,23 +201,10 @@ class DocumentAnalysisTests(unittest.TestCase):
             result = analyze_uploaded_file(path)
             form_summary = result.tables["人物卡_form_summary"]
 
-            pairs = {
-                row["key"]: row["value"]
-                for row in form_summary.to_dict(orient="records")
-            }
+            pairs = {row["key"]: row["value"] for row in form_summary.to_dict(orient="records")}
             self.assertEqual(pairs["姓名"], "L'hopital")
             self.assertEqual(pairs["职业"], "教授")
             self.assertIn("人物卡_form_summary", result.markdown_document)
-
-    def test_merge_analysis_context_adds_minirag_results(self) -> None:
-        merged = merge_analysis_context(
-            document_context="# Current Document",
-            memory_context="### MiniRAG Result 1\n\n# Prior Document",
-        )
-
-        self.assertIn("# Current Document", merged)
-        self.assertIn("## MiniRAG Search Context", merged)
-        self.assertIn("# Prior Document", merged)
 
     def test_combine_analysis_results_keeps_multiple_file_contexts(self) -> None:
         result_a = AnalysisResult(

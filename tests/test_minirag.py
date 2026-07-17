@@ -42,6 +42,19 @@ class MiniRAGTests(unittest.TestCase):
                 ["# Persisted\nLong-term knowledge."],
             )
 
+    def test_search_ranks_documents_with_vector_similarity(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            memory = MiniRAG(storage_path=Path(tmpdir) / "documents.jsonl")
+
+            memory.insert("# Cooking\nPasta sauce and tomato recipe.")
+            memory.insert("# Agent\nPlanner Executor SkillRegistry routing architecture.")
+
+            # 原因：MiniRAG 已从关键词过滤升级为内部向量排序。
+            # 作用：验证 search(query) 外部接口不变，但更相关文档排在前面。
+            results = memory.search("executor routing")
+
+            self.assertEqual(results[0], "# Agent\nPlanner Executor SkillRegistry routing architecture.")
+
     def test_insert_deduplicates_exact_documents(self) -> None:
         with TemporaryDirectory() as tmpdir:
             storage_path = Path(tmpdir) / "documents.jsonl"

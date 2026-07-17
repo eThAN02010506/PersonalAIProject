@@ -49,9 +49,10 @@ class SkillRegistry:
         return await self.get(name).run(request)
 
     @classmethod
-    def discover(cls) -> SkillRegistry:
+    def discover(cls, overrides: dict[str, BaseSkill] | None = None) -> SkillRegistry:
         """Build a registry by scanning and importing the skills package."""
         registry = cls()
+        overrides = overrides or {}
         for module_info in pkgutil.iter_modules(skills_package.__path__):
             if module_info.name.startswith("_") or module_info.name in IGNORED_MODULES:
                 continue
@@ -59,6 +60,10 @@ class SkillRegistry:
             # Reason: importing modules here lets new files self-register through `create_skill`.
             module = importlib.import_module(f"{skills_package.__name__}.{module_info.name}")
             skill = _create_skill_from_module(module)
+            if skill is not None and skill.name in overrides:
+                # 原因：自动发现要保留零手动注册，同时生产环境需要注入真实 provider。
+                # 作用：允许调用方用同名 Skill 覆盖默认占位 Skill，例如联网 web_search。
+                skill = overrides[skill.name]
             if skill is not None:
                 registry.register(skill)
         return registry

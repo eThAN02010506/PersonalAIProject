@@ -11,10 +11,13 @@ import os
 import re
 import urllib.error
 import urllib.request
-from dataclasses import dataclass, replace
+from collections.abc import Callable
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from dotenv import load_dotenv
+
+from qwopus_agent.integrations.smolagents_tools import build_tavily_search_tool
 
 load_dotenv()
 
@@ -24,6 +27,8 @@ class SmolagentsDependencyError(RuntimeError):
 
 
 ChatMessage = dict[str, str]
+CHAT_HISTORY_MAX_MESSAGES = 8
+CHAT_HISTORY_MAX_CHARS = 4000
 
 
 @dataclass(frozen=True)
@@ -49,32 +54,11 @@ class SmolagentsModelSettings:
                 "QWOPUS_MLX_MODEL",
                 "gemma-4-12B-it-qat-OptiQ-4bit",
             ),
-            base_url=os.getenv(
-                "QWOPUS_MLX_BASE_URL",
-                "http://127.0.0.1:8080/v1"
-            ),
-            api_key=os.getenv(
-                "QWOPUS_SMOLAGENTS_API_KEY",
-                "sk-optiq-local"
-            ),
-            timeout_seconds=int(
-                os.getenv(
-                    "QWOPUS_SMOLAGENTS_TIMEOUT_SECONDS",
-                    "120"
-                )
-            ),
-            temperature=float(
-                os.getenv(
-                    "QWOPUS_SMOLAGENTS_TEMPERATURE",
-                    "0.2"
-                )
-            ),
-            max_tokens=int(
-                os.getenv(
-                    "QWOPUS_SMOLAGENTS_MAX_TOKENS",
-                    "1024"
-                )
-            ),
+            base_url=os.getenv("QWOPUS_MLX_BASE_URL", "http://127.0.0.1:8080/v1"),
+            api_key=os.getenv("QWOPUS_SMOLAGENTS_API_KEY", "sk-optiq-local"),
+            timeout_seconds=int(os.getenv("QWOPUS_SMOLAGENTS_TIMEOUT_SECONDS", "120")),
+            temperature=float(os.getenv("QWOPUS_SMOLAGENTS_TEMPERATURE", "0.2")),
+            max_tokens=int(os.getenv("QWOPUS_SMOLAGENTS_MAX_TOKENS", "1024")),
         )
 
 
@@ -86,13 +70,15 @@ class DocumentAnalysisRun:
 
     debug_steps: list[str]
 
+    tool_calls: list[str] = field(default_factory=list)
+
 
 def _models_endpoint(base_url: str) -> str:
     return f"{base_url.rstrip('/')}/models"
 
 
 def resolve_model_settings(
-        settings: SmolagentsModelSettings | None = None,
+    settings: SmolagentsModelSettings | None = None,
 ) -> SmolagentsModelSettings:
     """Return settings updated with the model currently exposed by the server."""
     settings = settings or SmolagentsModelSettings.from_env()
@@ -111,7 +97,7 @@ def resolve_model_settings(
 
 
 def check_model_connection(
-        settings: SmolagentsModelSettings | None = None,
+    settings: SmolagentsModelSettings | None = None,
 ) -> tuple[bool, str]:
     settings = settings or SmolagentsModelSettings.from_env()
 
@@ -120,16 +106,12 @@ def check_model_connection(
         if 200 <= status < 300:
             model_id = _extract_server_model_id(payload) or settings.model_id
             return True, (
-                f"模型服务在线: {settings.base_url} "
-                f"(当前模型: {_display_model_name(model_id)})"
+                f"模型服务在线: {settings.base_url} (当前模型: {_display_model_name(model_id)})"
             )
         return False, f"模型服务异常: {status}"
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
         reason = getattr(exc, "reason", str(exc))
-        return False, (
-            f"无法连接模型服务: "
-            f"{settings.base_url} ({reason})"
-        )
+        return False, (f"无法连接模型服务: {settings.base_url} ({reason})")
 
 
 def _request_models(settings: SmolagentsModelSettings) -> tuple[int, dict[str, Any]]:
@@ -167,8 +149,8 @@ def _display_model_name(model_id: str) -> str:
 
 
 def format_chat_prompt(
-        history: list[ChatMessage],
-        user_message: str,
+    history: list[ChatMessage],
+    user_message: str,
 ) -> str:
     lines = [
         """
@@ -187,19 +169,14 @@ def format_chat_prompt(
     ]
 
     for message in history:
-
         role = message.get("role")
         content = message.get("content")
 
         if role == "user":
-            lines.append(
-                f"用户：{content}"
-            )
+            lines.append(f"用户：{content}")
 
         elif role == "assistant":
-            lines.append(
-                f"助手：{content}"
-            )
+            lines.append(f"助手：{content}")
 
     lines.extend(
         [
@@ -214,8 +191,8 @@ def format_chat_prompt(
 
 
 def build_chat_messages(
-        history: list[ChatMessage],
-        user_message: str,
+    history: list[ChatMessage],
+    user_message: str,
 ) -> list[ChatMessage]:
     """Build plain chat messages for direct model generation."""
     messages: list[ChatMessage] = [
@@ -246,38 +223,33 @@ def build_chat_messages(
     return messages
 
 
-def build_smolagents_model(
-        settings: SmolagentsModelSettings | None = None
-) -> Any:
+def build_smolagents_model(settings: SmolagentsModelSettings | None = None) -> Any:
     settings = settings or SmolagentsModelSettings.from_env()
 
     try:
         from smolagents import OpenAIModel
 
     except ModuleNotFoundError as exc:
-        raise SmolagentsDependencyError(
-            "smolagents is not installed"
-        ) from exc
+        raise SmolagentsDependencyError("smolagents is not installed") from exc
 
     return OpenAIModel(
         model_id=settings.model_id,
         api_base=settings.base_url,
         api_key=settings.api_key,
+        client_kwargs={"timeout": settings.timeout_seconds},
         temperature=settings.temperature,
     )
 
 
 def build_smolagents_code_agent(
-        settings: SmolagentsModelSettings | None = None,
-        tools: list[Any] | None = None,
+    settings: SmolagentsModelSettings | None = None,
+    tools: list[Any] | None = None,
 ):
     try:
         from smolagents import CodeAgent
 
     except ModuleNotFoundError as exc:
-        raise SmolagentsDependencyError(
-            "Install smolagents first."
-        ) from exc
+        raise SmolagentsDependencyError("Install smolagents first.") from exc
 
     model = build_smolagents_model(settings)
 
@@ -296,9 +268,29 @@ def build_smolagents_code_agent(
     )
 
 
+def build_smolagents_tool_calling_agent(
+    settings: SmolagentsModelSettings | None = None,
+    tools: list[Any] | None = None,
+):
+    """Build the smolagents Agent runtime used as Qwopus' chat driver."""
+    try:
+        from smolagents import ToolCallingAgent
+
+    except ModuleNotFoundError as exc:
+        raise SmolagentsDependencyError("Install smolagents first.") from exc
+
+    model = build_smolagents_model(settings)
+    # 原因：smolagents 是整体 Agent 驱动入口，工具选择应由 Agent runtime 处理。
+    # 作用：Streamlit 不再手动先搜索再拼 prompt，而是把受控 Tool 交给 Agent。
+    return ToolCallingAgent(
+        tools=tools or [],
+        model=model,
+    )
+
+
 def run_smolagents_smoke_test(
-        prompt: str,
-        settings: SmolagentsModelSettings | None = None,
+    prompt: str,
+    settings: SmolagentsModelSettings | None = None,
 ):
     agent = build_smolagents_code_agent(
         settings=settings,
@@ -308,10 +300,268 @@ def run_smolagents_smoke_test(
     return str(agent.run(prompt))
 
 
+def run_agent_chat_turn(
+    user_message: str,
+    history: list[ChatMessage],
+    settings: SmolagentsModelSettings | None = None,
+    enable_web_search: bool = False,
+    progress_callback: Callable[[str], None] | None = None,
+) -> str:
+    """Run one chat turn through smolagents as the Agent driver."""
+    tools = (
+        [build_tavily_search_tool(progress_callback=progress_callback)]
+        if enable_web_search
+        else []
+    )
+    agent = build_smolagents_tool_calling_agent(settings=settings, tools=tools)
+    prompt = format_agent_chat_prompt(
+        history=history,
+        user_message=user_message,
+        enable_web_search=enable_web_search,
+    )
+    if progress_callback is not None:
+        progress_callback("planning")
+    # 原因：部分模型会反复调用同一个搜索 Tool，直到耗尽默认步数和上下文。
+    # 作用：一次搜索加一次 final_answer 已足够，保留两步纠错余量并阻止无界循环。
+    result = agent.run(prompt, max_steps=4 if enable_web_search else 2)
+    if progress_callback is not None:
+        progress_callback("completed")
+    return _extract_final_answer(str(result))
+
+
+def format_agent_chat_prompt(
+    history: list[ChatMessage],
+    user_message: str,
+    enable_web_search: bool,
+) -> str:
+    """Build a single task prompt for smolagents Agent chat."""
+    lines = [
+        "You are Qwopus-Agent's local office assistant.",
+        "Return only the final answer. Do not expose Tool logs, Observation, Thought, or drafts.",
+        # 原因：历史对话或系统提示的中文可能让模型忽略当前英文等其他语言输入。
+        # 作用：只根据当前问题选择回答语言，混合输入则跟随主要语言或用户明确要求。
+        (
+            "The final answer MUST use the same language as the CURRENT USER QUESTION below. "
+            "Determine it only from that question, not from this prompt or conversation history. "
+            "Do not default to Chinese or English. For mixed-language input, use its dominant "
+            "language unless the user explicitly requests another language."
+        ),
+        # 原因：只要求“最终答案”容易让模型把搜索结果压缩成一小段。
+        # 作用：在未要求简答时生成有结论、细节、解释和来源的完整多段回答。
+        (
+            "Unless the user explicitly asks for brevity, provide a detailed, complete answer: "
+            "answer directly, then explain key facts, context or practical implications, and "
+            "include available source links. Do not reduce the answer to a short bullet list."
+        ),
+        (
+            "Chat cannot automatically access previously uploaded files or MiniRAG. "
+            "Ask the user to upload files on the document analysis page when their content "
+            "is needed."
+        ),
+    ]
+    if enable_web_search:
+        # 原因：部分模型会把“详细回答”仍压缩成几条短句，尤其是中文输出。
+        # 作用：为联网答案规定可检查的内容范围和篇幅，同时保留用户主动要求简答的权利。
+        lines.append(
+            "Use tavily_search when current or external information is needed, then synthesize "
+            "the evidence into the final answer. Unless brevity was requested, organize the "
+            "answer into substantial sections covering the direct answer, how it works, key "
+            "features or evidence, practical uses, limitations or cautions, and 2-5 actual "
+            "source URLs when they are useful. Match the depth and length to the question; do "
+            "not enforce a fixed minimum length, and respect explicit requests for a shorter "
+            "or longer response. For a simple question, call tavily_search only once; after a "
+            "successful Observation, use that evidence and call final_answer instead of "
+            "repeating the search."
+        )
+    else:
+        lines.append("Internet search is disabled; do not claim that you searched the web.")
+
+    if history:
+        lines.append("\nRECENT CONVERSATION:")
+        for message in _bounded_chat_history(history):
+            role = message.get("role")
+            content = message.get("content")
+            if role in {"user", "assistant"} and content:
+                lines.append(f"{role}: {content}")
+
+    lines.extend(
+        [
+            "",
+            "CURRENT USER QUESTION (the only source for response language):",
+            user_message,
+            "",
+            "Now produce the complete final answer in that same language.",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _bounded_chat_history(history: list[ChatMessage]) -> list[ChatMessage]:
+    """Keep recent chat context inside a predictable character budget."""
+    selected: list[ChatMessage] = []
+    remaining_chars = CHAT_HISTORY_MAX_CHARS
+
+    for message in reversed(history[-CHAT_HISTORY_MAX_MESSAGES:]):
+        role = message.get("role")
+        content = message.get("content")
+        if role not in {"user", "assistant"} or not content:
+            continue
+        if len(content) > remaining_chars:
+            # 原因：单条长报告也可能超过整个上下文预算，拖慢模型首 token。
+            # 作用：保留最近消息的开头并停止加入更旧内容，让延迟保持可预测。
+            if remaining_chars > 0:
+                selected.append(
+                    {"role": role, "content": f"{content[:remaining_chars]} [truncated]"}
+                )
+            break
+        selected.append({"role": role, "content": content})
+        remaining_chars -= len(content)
+
+    return list(reversed(selected))
+
+
+def run_smolagents_file_analysis_with_debug(
+    file_names: list[str],
+    spreadsheet_names: list[str],
+    user_question: str,
+    tools: list[Any],
+    settings: SmolagentsModelSettings | None = None,
+) -> DocumentAnalysisRun:
+    """Run uploaded-file analysis through the smolagents ToolCallingAgent."""
+    if not file_names:
+        raise ValueError("file_names must not be empty.")
+    if not tools:
+        raise ValueError("At least one file-analysis tool is required.")
+
+    agent = build_smolagents_tool_calling_agent(settings=settings, tools=tools)
+    prompt = format_file_analysis_agent_prompt(
+        file_names=file_names,
+        spreadsheet_names=spreadsheet_names,
+        user_question=user_question,
+    )
+    max_steps = min(max(8, len(file_names) * 2 + 4), 20)
+    # 原因：上传分析需要由 smolagents 自己选择解析、RAG 或 Excel 沙箱工具。
+    # 作用：返回完整运行状态供可选调试区审计，主界面仍只使用最终 answer。
+    run_result = agent.run(
+        prompt,
+        max_steps=max_steps,
+        return_full_result=True,
+    )
+    answer, state, steps = _unpack_agent_run_result(run_result)
+    tool_calls = _extract_agent_tool_calls(steps)
+    debug_steps = _agent_debug_steps(state=state, steps=steps, tool_calls=tool_calls)
+    required_tools = _required_file_tools(
+        file_names=file_names,
+        spreadsheet_names=spreadsheet_names,
+    )
+    missing_tools = required_tools.difference(tool_calls)
+
+    final_answer = _extract_final_answer(answer)
+    if not final_answer or _looks_like_tool_observation(final_answer) or missing_tools:
+        # 原因：少数模型会把最后一次 Tool Observation 当作回答，或者在步数内没有调用 final_answer。
+        # 作用：保留同一个 Agent memory 再收敛一轮，禁止原始工具输出进入 Streamlit 主结果。
+        if missing_tools:
+            missing_names = ", ".join(sorted(missing_tools))
+            debug_steps.append(f"Agent 尚未调用必要 Tool：{missing_names}；触发补充执行。")
+        else:
+            debug_steps.append("Agent 尚未形成最终答案，保留工具上下文后触发收敛步骤。")
+        missing_tool_instruction = ", ".join(sorted(missing_tools)) or "none"
+        retry_result = agent.run(
+            (
+                "Continue from the existing tool observations and answer the original "
+                "user question now. "
+                f"Before answering, call every missing required tool: {missing_tool_instruction}. "
+                "For excel_analysis, generate restricted pandas code from the existing "
+                "excel_schema observation. Return only a complete natural-language final "
+                "answer. Do not repeat Observation, tool output, Thought, code drafts, or "
+                "internal steps. Follow the language of the user's question."
+            ),
+            reset=False,
+            max_steps=3,
+            return_full_result=True,
+        )
+        retry_answer, retry_state, retry_steps = _unpack_agent_run_result(retry_result)
+        retry_tool_calls = _extract_agent_tool_calls(retry_steps)
+        tool_calls.extend(retry_tool_calls)
+        debug_steps.extend(
+            _agent_debug_steps(
+                state=retry_state,
+                steps=retry_steps,
+                tool_calls=retry_tool_calls,
+                prefix="收敛轮",
+            )
+        )
+        final_answer = _extract_final_answer(retry_answer)
+
+    missing_tools = required_tools.difference(tool_calls)
+    if missing_tools:
+        missing_names = ", ".join(sorted(missing_tools))
+        raise RuntimeError(f"smolagents did not call required file tools: {missing_names}.")
+    if not final_answer or _looks_like_tool_observation(final_answer):
+        raise RuntimeError("smolagents did not produce a final answer after tool execution.")
+
+    return DocumentAnalysisRun(
+        answer=final_answer,
+        debug_steps=debug_steps,
+        tool_calls=list(dict.fromkeys(tool_calls)),
+    )
+
+
+def format_file_analysis_agent_prompt(
+    file_names: list[str],
+    spreadsheet_names: list[str],
+    user_question: str,
+) -> str:
+    """Build the task prompt for the smolagents uploaded-file driver."""
+    question = user_question.strip() or "Summarize the uploaded files."
+    file_list = "\n".join(f"- {file_name}" for file_name in file_names)
+    lines = [
+        "You are Qwopus-Agent's uploaded-file analysis agent.",
+        "Use the available tools to inspect the current uploaded files before answering.",
+        "Never invent file content and never return raw Tool Observation text as the final answer.",
+        (
+            "The final answer must follow the language of the user's question; "
+            "if unclear, follow the files' main language."
+        ),
+        (
+            "Give a complete natural-language answer with enough detail for the request, "
+            "not a fixed short bullet list."
+        ),
+        "Use rag_search only when previously indexed local knowledge is relevant.",
+        "Current uploaded files:",
+        file_list,
+    ]
+    if spreadsheet_names:
+        spreadsheet_list = ", ".join(spreadsheet_names)
+        lines.extend(
+            [
+                f"Spreadsheets: {spreadsheet_list}.",
+                (
+                    "For a spreadsheet, call excel_schema first. If computation is needed, "
+                    "then call excel_analysis."
+                ),
+                (
+                    "Use restricted pandas code with dfs and pd, and assign the final value "
+                    "to result."
+                ),
+                "Never request or reproduce the entire spreadsheet.",
+            ]
+        )
+    lines.extend(
+        [
+            "",
+            f"User question: {question}",
+            "",
+            "Produce the final answer after using the needed tools.",
+        ]
+    )
+    return "\n".join(lines)
+
+
 def run_smolagents_chat_turn(
-        user_message: str,
-        history: list[ChatMessage],
-        settings: SmolagentsModelSettings | None = None,
+    user_message: str,
+    history: list[ChatMessage],
+    settings: SmolagentsModelSettings | None = None,
 ):
     model = build_smolagents_model(settings)
     response = model.generate(
@@ -329,225 +579,60 @@ def run_smolagents_chat_turn(
     return str(response)
 
 
-def run_smolagents_document_analysis(
-        document_name: str,
-        content: str,
-        user_question: str,
-        settings: SmolagentsModelSettings | None = None,
-        max_context_chars: int = 16000,
-) -> str:
-    """Ask the configured model to analyze a parsed document or spreadsheet summary."""
-    return run_smolagents_document_analysis_with_debug(
-        document_name=document_name,
-        content=content,
-        user_question=user_question,
-        settings=settings,
-        max_context_chars=max_context_chars,
-    ).answer
+def _unpack_agent_run_result(run_result: Any) -> tuple[str, str | None, list[dict[str, Any]]]:
+    """Normalize smolagents RunResult and older direct return values."""
+    if hasattr(run_result, "output"):
+        output = getattr(run_result, "output", None)
+        state = getattr(run_result, "state", None)
+        steps = getattr(run_result, "steps", None)
+        return str(output or ""), str(state) if state is not None else None, steps or []
+    return str(run_result), None, []
 
 
-def run_smolagents_document_analysis_with_debug(
-        document_name: str,
-        content: str,
-        user_question: str,
-        settings: SmolagentsModelSettings | None = None,
-        max_context_chars: int = 16000,
-) -> DocumentAnalysisRun:
-    """Ask the model to analyze a parsed document and return traceable steps."""
-    debug_steps: list[str] = []
-    question = user_question.strip() or "请总结这份文件的主要内容。"
-    clipped_content = content[:max_context_chars]
-    if len(content) > max_context_chars:
-        clipped_content += "\n\n[内容过长，已截断。后续将接入 MiniRAG 处理长文档。]"
-        debug_steps.append(f"文档内容超过 {max_context_chars} 字符，已截断后发送给模型。")
-    else:
-        debug_steps.append(f"文档内容长度 {len(content)} 字符，未截断。")
-
-    messages: list[ChatMessage] = [
-        {
-            "role": "system",
-            "content": (
-                "你是 Qwopus-Agent 的文件分析助手。"
-                "请严格基于用户上传文件的解析内容回答，不要编造文件里没有的信息。"
-                "如果内容不足以回答，请明确说明缺少什么。"
-                "回答语言必须跟随用户问题的语言；如果用户问题语言不明确，再跟随文件主要语言。"
-                "请输出结构化分析。"
-            ),
-        },
-        {
-            "role": "user",
-            "content": (
-                f"文件名：{document_name}\n\n"
-                f"用户问题：{question}\n\n"
-                f"文件解析内容如下：\n\n{clipped_content}"
-            ),
-        },
-    ]
-
-    debug_steps.append(f"准备调用模型：{settings.model_id if settings else SmolagentsModelSettings.from_env().model_id}")
-    debug_steps.append(f"用户问题：{question}")
-    output_token_limit = _document_output_token_limit(settings)
-    model = build_smolagents_model(settings)
-    response = model.generate(messages, max_tokens=output_token_limit)
-    answer = _response_to_text(response)
-    debug_steps.append(f"第一次模型返回结构：{_response_debug_snapshot(response)}")
-    debug_steps.append(f"第一次模型返回前 500 字：{answer[:500]}")
-    if not answer.strip() or _response_finished_by_length(response):
-        # 原因：推理模型可能把 token 用在 reasoning_content，导致 content 为空或被截断。
-        # 作用：增加输出预算并强制要求只返回最终答案，避免把思考草稿展示给用户。
-        debug_steps.append("第一次模型未生成完整 content，触发第二轮重试。")
-        response = model.generate(
-            [
-                messages[0],
-                {
-                    "role": "user",
-                    "content": (
-                        "请直接给出最终答案，不要输出思考、推理过程、工具过程或草稿。"
-                        "回答语言必须跟随用户问题的语言；如果用户问题语言不明确，再跟随文件主要语言。\n\n"
-                        f"文件名：{document_name}\n\n"
-                        f"用户问题：{question}\n\n"
-                        f"文件解析内容如下：\n\n{clipped_content}\n\n"
-                        "请生成较完整的分析，不要只返回简短 bullet point。"
-                        "请包含：整体概览、关键内容、重要数据或结论、可执行建议。"
-                        "只有当用户明确要求简短时，才使用简短要点。"
-                    ),
-                },
-            ],
-            max_tokens=output_token_limit * 2,
-        )
-        answer = _response_to_text(response)
-        debug_steps.append(f"第二次模型返回结构：{_response_debug_snapshot(response)}")
-        debug_steps.append(f"第二次模型返回前 500 字：{answer[:500]}")
-    elif _looks_like_tool_observation(answer):
-        # 原因：模型有时会停在工具 Observation 阶段。
-        # 作用：明确追加一轮，让模型把 Observation 转成用户可读的最终答案。
-        debug_steps.append("检测到 Observation/Document Analysis/Preview，触发第二轮最终答案生成。")
-        response = model.generate(
-            [
-                *messages,
-                {"role": "assistant", "content": answer},
-                {
-                    "role": "user",
-                    "content": (
-                        "上一步只是工具 Observation。请继续推理，基于 Observation 生成最终答案。"
-                        "只输出给用户看的自然语言总结，不要输出 Observation、Document Analysis、Preview 或工具原文。"
-                    ),
-                },
-            ]
-        )
-        answer = _response_to_text(response)
-        debug_steps.append(f"第二次模型返回结构：{_response_debug_snapshot(response)}")
-        debug_steps.append(f"第二次模型返回前 500 字：{answer[:500]}")
-    else:
-        debug_steps.append("第一次返回不像工具 Observation，直接进入 final_answer 提取。")
-
-    final_answer = _extract_final_answer(answer)
-    if final_answer != answer.strip():
-        debug_steps.append("检测到 final_answer(...) 包装，已提取内部答案。")
-    else:
-        debug_steps.append("未检测到 final_answer(...) 包装，使用模型返回文本作为最终答案。")
-
-    if _looks_like_tool_observation(final_answer):
-        debug_steps.append("警告：最终答案仍像工具 Observation，说明模型第二轮没有完成总结。")
-        # 原因：用户主界面不能展示工具 Observation 或原始解析预览。
-        # 作用：最多再做一次强制收敛，把工具输出转换成自然语言最终答案。
-        response = model.generate(
-            [
-                {
-                    "role": "system",
-                    "content": (
-                        "你只负责输出给最终用户看的答案。"
-                        "回答语言必须跟随用户问题的语言；如果用户问题语言不明确，再跟随文件主要语言。"
-                        "禁止输出 Observation、Document Analysis、Preview、工具日志或草稿。"
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": (
-                        f"用户问题：{question}\n\n"
-                        f"工具观察内容：\n{final_answer}\n\n"
-                        "请基于上面的内容生成完整最终答案。"
-                    ),
-                },
-            ],
-            max_tokens=output_token_limit * 2,
-        )
-        final_answer = _extract_final_answer(_response_to_text(response))
-        debug_steps.append(f"第三次模型返回结构：{_response_debug_snapshot(response)}")
-        debug_steps.append(f"第三次模型返回前 500 字：{final_answer[:500]}")
-
-    return DocumentAnalysisRun(answer=final_answer, debug_steps=debug_steps)
-
-
-def _response_to_text(response: Any) -> str:
-    """Normalize smolagents model responses to text."""
-    content_value = getattr(response, "content", None)
-    if isinstance(content_value, str) and content_value:
-        return content_value
-    if isinstance(response, dict):
-        return str(response.get("content", response))
-    raw_text = _extract_text_from_raw_response(response)
-    if raw_text:
-        return raw_text
-    if isinstance(content_value, str):
-        return content_value
-    return str(response)
-
-
-def _extract_text_from_raw_response(response: Any) -> str:
-    """Read fallback text from OpenAI-compatible raw responses."""
-    raw = getattr(response, "raw", None)
-    choices = getattr(raw, "choices", None)
-    if not choices:
-        return ""
-
-    first_choice = choices[0]
-    message = getattr(first_choice, "message", None)
-    for source in (message, first_choice):
-        if source is None:
+def _extract_agent_tool_calls(steps: list[dict[str, Any]]) -> list[str]:
+    """Extract Tool names from smolagents' succinct step records."""
+    names: list[str] = []
+    for step in steps:
+        if not isinstance(step, dict):
             continue
-        for field_name in ("content", "text"):
-            value = getattr(source, field_name, None)
-            if isinstance(value, str) and value.strip():
-                return value
-    return ""
+        for tool_call in step.get("tool_calls") or []:
+            if not isinstance(tool_call, dict):
+                continue
+            function = tool_call.get("function")
+            if isinstance(function, dict) and isinstance(function.get("name"), str):
+                names.append(function["name"])
+    return names
 
 
-def _document_output_token_limit(settings: SmolagentsModelSettings | None) -> int:
-    """Use a larger answer budget for document analysis."""
-    configured_limit = settings.max_tokens if settings else SmolagentsModelSettings.from_env().max_tokens
-    return max(configured_limit, 2048)
+def _required_file_tools(file_names: list[str], spreadsheet_names: list[str]) -> set[str]:
+    """Return the minimum Tool chain required before a file answer is accepted."""
+    required: set[str] = set()
+    if len(file_names) > len(spreadsheet_names):
+        required.add("document_parser")
+    if spreadsheet_names:
+        # 原因：模型可能直接根据 sample 心算，绕过本地 pandas 沙箱。
+        # 作用：所有 Excel 回答必须先看 schema，再执行本地代码；完整表格始终不进入 LLM。
+        required.update({"excel_schema", "excel_analysis"})
+    return required
 
 
-def _response_finished_by_length(response: Any) -> bool:
-    """Detect truncated OpenAI-compatible responses."""
-    raw = getattr(response, "raw", None)
-    choices = getattr(raw, "choices", None)
-    if not choices:
-        return False
-    return getattr(choices[0], "finish_reason", None) == "length"
-
-
-def _response_debug_snapshot(response: Any) -> str:
-    """Return compact response metadata for Streamlit debugging."""
-    raw = getattr(response, "raw", None)
-    choices = getattr(raw, "choices", None)
-    content_value = getattr(response, "content", None)
-    parts = [
-        f"type={type(response).__name__}",
-        f"content_len={len(content_value) if isinstance(content_value, str) else 'n/a'}",
-        f"has_raw={raw is not None}",
-    ]
-    if choices:
-        first_choice = choices[0]
-        message = getattr(first_choice, "message", None)
-        parts.append(f"finish_reason={getattr(first_choice, 'finish_reason', None)}")
-        parts.append(f"tool_calls={getattr(message, 'tool_calls', None) if message else None}")
-        parts.append(f"raw_content={repr(getattr(message, 'content', None)) if message else None}")
-        parts.append(
-            f"reasoning_content={repr(getattr(message, 'reasoning_content', None)) if message else None}"
-        )
-    return ", ".join(parts)
+def _agent_debug_steps(
+    state: str | None,
+    steps: list[dict[str, Any]],
+    tool_calls: list[str],
+    prefix: str = "smolagents",
+) -> list[str]:
+    """Build a safe trace without exposing Tool observations or model reasoning."""
+    trace = [f"{prefix} 运行状态：{state or 'completed'}；步骤数：{len(steps)}。"]
+    for tool_name in tool_calls:
+        # 原因：用户可以选择查看 Agent 过程，但原始 Observation 可能包含整段文件内容。
+        # 作用：调试区只展示调用了哪个 Tool，不展示参数、推理文本或 Tool 返回正文。
+        trace.append(f"{prefix} 调用 Tool：{tool_name}")
+    for step in steps:
+        if isinstance(step, dict) and step.get("error"):
+            step_number = step.get("step_number", "?")
+            trace.append(f"{prefix} 第 {step_number} 步发生错误，Agent 已按运行策略处理。")
+    return trace
 
 
 def _looks_like_tool_observation(text: str) -> bool:

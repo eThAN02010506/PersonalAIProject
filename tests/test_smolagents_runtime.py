@@ -8,12 +8,15 @@ from qwopus_agent.integrations.smolagents_runtime import (
     build_chat_messages,
     build_smolagents_code_agent,
     build_smolagents_model,
+    build_smolagents_tool_calling_agent,
     check_model_connection,
+    format_agent_chat_prompt,
     format_chat_prompt,
+    format_file_analysis_agent_prompt,
     resolve_model_settings,
-    run_smolagents_document_analysis,
-    run_smolagents_document_analysis_with_debug,
+    run_agent_chat_turn,
     run_smolagents_chat_turn,
+    run_smolagents_file_analysis_with_debug,
 )
 
 
@@ -31,36 +34,6 @@ class FakeOpenAIModel:
         self.messages = messages
         self.calls.append(messages)
         self.call_kwargs.append(kwargs)
-        if "工具观察内容" in messages[-1]["content"]:
-            return types.SimpleNamespace(content='final_answer("第三轮最终总结。")')
-        if "请直接给出最终答案" in messages[-1]["content"]:
-            return types.SimpleNamespace(
-                content=(
-                    "这是一份较完整的中文分析。\n\n"
-                    "整体概览：文件围绕作业内容展开。\n\n"
-                    "关键内容：文档包含主要任务、计算步骤和结果说明。\n\n"
-                    "结论与建议：可以继续补充更细的结果解释。"
-                )
-            )
-        if "TRIGGER_EMPTY" in messages[-1]["content"]:
-            return types.SimpleNamespace(content="")
-        if "TRIGGER_REASONING_ONLY" in messages[-1]["content"]:
-            message = types.SimpleNamespace(
-                content="",
-                reasoning_content="We need to produce a structured analysis in Chinese.",
-                tool_calls=None,
-            )
-            choice = types.SimpleNamespace(message=message, finish_reason="length")
-            raw = types.SimpleNamespace(choices=[choice])
-            return types.SimpleNamespace(content="", raw=raw)
-        if "上一步只是工具 Observation" in messages[-1]["content"]:
-            if any("STILL_OBSERVATION" in message["content"] for message in messages):
-                return types.SimpleNamespace(content="Observation:\nDocument Analysis: still raw preview")
-            return types.SimpleNamespace(content='final_answer("这是最终总结。")')
-        if "TRIGGER_OBSERVATION" in messages[-1]["content"]:
-            return types.SimpleNamespace(content="Observation:\nDocument Analysis: raw preview")
-        if "STILL_OBSERVATION" in messages[-1]["content"]:
-            return types.SimpleNamespace(content="Observation:\nDocument Analysis: raw preview")
         return types.SimpleNamespace(content=f"reply: {messages[-1]['content']}")
 
 
@@ -74,12 +47,33 @@ class FakeCodeAgent:
         return f"ok: {prompt}"
 
 
+class FakeToolCallingAgent:
+    last_instance = None
+    queued_results = []
+
+    def __init__(self, tools, model, **kwargs):
+        self.tools = tools
+        self.model = model
+        self.kwargs = kwargs
+        self.prompt = None
+        FakeToolCallingAgent.last_instance = self
+
+    def run(self, prompt, **kwargs):
+        self.prompt = prompt
+        self.run_kwargs = kwargs
+        if self.queued_results:
+            return self.queued_results.pop(0)
+        return f"agent reply: {prompt}"
+
+
 class SmolagentsRuntimeTests(unittest.TestCase):
     def setUp(self) -> None:
+        FakeToolCallingAgent.queued_results = []
         self.previous_module = sys.modules.get("smolagents")
         fake_module = types.ModuleType("smolagents")
         fake_module.OpenAIModel = FakeOpenAIModel
         fake_module.CodeAgent = FakeCodeAgent
+        fake_module.ToolCallingAgent = FakeToolCallingAgent
         sys.modules["smolagents"] = fake_module
 
     def tearDown(self) -> None:
@@ -103,6 +97,7 @@ class SmolagentsRuntimeTests(unittest.TestCase):
         self.assertEqual(model.kwargs["model_id"], "gemma-4-12B-it-qat-OptiQ-4bit")
         self.assertEqual(model.kwargs["api_base"], "http://127.0.0.1:8080/v1")
         self.assertEqual(model.kwargs["api_key"], "local_token")
+        self.assertEqual(model.kwargs["client_kwargs"], {"timeout": 120})
         self.assertNotIn("max_tokens", model.kwargs)
 
     def test_build_smolagents_code_agent_starts_without_tools(self) -> None:
@@ -115,6 +110,231 @@ class SmolagentsRuntimeTests(unittest.TestCase):
 
         self.assertEqual(agent.tools, [])
         self.assertEqual(agent.run("hello"), "ok: hello")
+
+    def test_build_smolagents_tool_calling_agent_starts_with_tools(self) -> None:
+        settings = SmolagentsModelSettings(
+            model_id="any-model",
+            base_url="http://127.0.0.1:8080/v1",
+        )
+        tools = [object()]
+
+        agent = build_smolagents_tool_calling_agent(settings=settings, tools=tools)
+
+        self.assertEqual(agent.tools, tools)
+        self.assertIs(agent.model, FakeOpenAIModel.last_instance)
+
+    def test_run_agent_chat_turn_uses_smolagents_driver_without_web_tool(self) -> None:
+        settings = SmolagentsModelSettings(
+            model_id="any-model",
+            base_url="http://127.0.0.1:8080/v1",
+        )
+
+        result = run_agent_chat_turn(
+            user_message="你好",
+            history=[],
+            settings=settings,
+            enable_web_search=False,
+        )
+
+        self.assertIn("agent reply:", result)
+        self.assertEqual(FakeToolCallingAgent.last_instance.tools, [])
+        self.assertIn("Internet search is disabled", FakeToolCallingAgent.last_instance.prompt)
+
+    def test_run_agent_chat_turn_injects_tavily_tool_when_web_enabled(self) -> None:
+        settings = SmolagentsModelSettings(
+            model_id="any-model",
+            base_url="http://127.0.0.1:8080/v1",
+        )
+        fake_tool = object()
+
+        # 原因：smolagents 是聊天驱动入口，联网搜索应作为 Tavily Tool 注入 Agent。
+        # 作用：验证 Streamlit 不需要手动先搜索，Agent runtime 会持有工具。
+        with patch(
+            "qwopus_agent.integrations.smolagents_runtime.build_tavily_search_tool",
+            return_value=fake_tool,
+        ):
+            run_agent_chat_turn(
+                user_message="查一下米饭怎么做",
+                history=[],
+                settings=settings,
+                enable_web_search=True,
+            )
+
+        self.assertEqual(FakeToolCallingAgent.last_instance.tools, [fake_tool])
+        self.assertIn("Use tavily_search", FakeToolCallingAgent.last_instance.prompt)
+        self.assertEqual(FakeToolCallingAgent.last_instance.run_kwargs["max_steps"], 4)
+
+    def test_format_agent_chat_prompt_keeps_recent_history(self) -> None:
+        prompt = format_agent_chat_prompt(
+            history=[{"role": "user", "content": "上一句"}],
+            user_message="继续",
+            enable_web_search=True,
+        )
+
+        self.assertIn("user: 上一句", prompt)
+        self.assertIn("CURRENT USER QUESTION", prompt)
+        self.assertIn("\n继续\n", prompt)
+        self.assertIn("tavily_search", prompt)
+        self.assertNotIn("800-1500 Chinese characters", prompt)
+        self.assertIn("do not enforce a fixed minimum length", prompt)
+        self.assertIn("call tavily_search only once", prompt)
+        # 原因：历史对话语言不能覆盖当前搜索输入，且默认回答不应被压成短要点。
+        # 作用：锁定多语言跟随与详细回答这两个 Prompt 行为约束。
+        self.assertIn("Do not default to Chinese or English", prompt)
+        self.assertIn("Do not reduce the answer to a short bullet list", prompt)
+
+    def test_format_agent_chat_prompt_bounds_history_characters(self) -> None:
+        prompt = format_agent_chat_prompt(
+            history=[
+                {"role": "user", "content": "old message"},
+                {"role": "assistant", "content": "x" * 5000},
+            ],
+            user_message="current question",
+            enable_web_search=False,
+        )
+
+        # 原因：最近一条长回答也可能让远程模型的首 token 延迟显著增加。
+        # 作用：锁定 4000 字符预算，并确认更旧消息会在预算耗尽后被丢弃。
+        self.assertIn("[truncated]", prompt)
+        self.assertNotIn("old message", prompt)
+        self.assertLess(len(prompt), 6000)
+
+    def test_file_analysis_agent_requires_and_records_file_tool_call(self) -> None:
+        settings = SmolagentsModelSettings(
+            model_id="any-model",
+            base_url="http://127.0.0.1:8080/v1",
+        )
+        FakeToolCallingAgent.queued_results = [
+            types.SimpleNamespace(
+                output="完整文件总结",
+                state="success",
+                steps=[
+                    {
+                        "step_number": 1,
+                        "tool_calls": [{"function": {"name": "document_parser", "arguments": {}}}],
+                    }
+                ],
+            )
+        ]
+
+        result = run_smolagents_file_analysis_with_debug(
+            file_names=["notes.txt"],
+            spreadsheet_names=[],
+            user_question="总结",
+            tools=[object()],
+            settings=settings,
+        )
+
+        # 原因：自然语言答案不能证明模型真的读取了上传文件。
+        # 作用：断言 runtime 记录了文件 Tool 调用，并且只返回最终答案。
+        self.assertEqual(result.answer, "完整文件总结")
+        self.assertEqual(result.tool_calls, ["document_parser"])
+        self.assertTrue(any("document_parser" in step for step in result.debug_steps))
+
+    def test_file_analysis_agent_retries_raw_observation(self) -> None:
+        settings = SmolagentsModelSettings(
+            model_id="any-model",
+            base_url="http://127.0.0.1:8080/v1",
+        )
+        tool_step = {
+            "step_number": 1,
+            "tool_calls": [{"function": {"name": "document_parser", "arguments": {}}}],
+        }
+        FakeToolCallingAgent.queued_results = [
+            types.SimpleNamespace(
+                output="Observation:\nDocument Analysis: raw",
+                state="success",
+                steps=[tool_step],
+            ),
+            types.SimpleNamespace(
+                output="这是最终总结。",
+                state="success",
+                steps=[],
+            ),
+        ]
+
+        result = run_smolagents_file_analysis_with_debug(
+            file_names=["notes.txt"],
+            spreadsheet_names=[],
+            user_question="总结",
+            tools=[object()],
+            settings=settings,
+        )
+
+        self.assertEqual(result.answer, "这是最终总结。")
+        self.assertNotIn("Observation", result.answer)
+
+    def test_file_analysis_agent_rejects_answer_without_file_inspection(self) -> None:
+        settings = SmolagentsModelSettings(
+            model_id="any-model",
+            base_url="http://127.0.0.1:8080/v1",
+        )
+        FakeToolCallingAgent.queued_results = [
+            types.SimpleNamespace(output="猜测答案", state="success", steps=[]),
+            types.SimpleNamespace(output="仍然猜测", state="success", steps=[]),
+        ]
+
+        with self.assertRaisesRegex(RuntimeError, "required file tools"):
+            run_smolagents_file_analysis_with_debug(
+                file_names=["notes.txt"],
+                spreadsheet_names=[],
+                user_question="总结",
+                tools=[object()],
+                settings=settings,
+            )
+
+    def test_file_analysis_agent_forces_excel_sandbox_after_schema(self) -> None:
+        settings = SmolagentsModelSettings(
+            model_id="any-model",
+            base_url="http://127.0.0.1:8080/v1",
+        )
+        FakeToolCallingAgent.queued_results = [
+            types.SimpleNamespace(
+                output="根据样本猜测 East 为 40。",
+                state="success",
+                steps=[
+                    {
+                        "step_number": 1,
+                        "tool_calls": [{"function": {"name": "excel_schema"}}],
+                    }
+                ],
+            ),
+            types.SimpleNamespace(
+                output="本地计算结果：East 为 40，West 为 20。",
+                state="success",
+                steps=[
+                    {
+                        "step_number": 2,
+                        "tool_calls": [{"function": {"name": "excel_analysis"}}],
+                    }
+                ],
+            ),
+        ]
+
+        result = run_smolagents_file_analysis_with_debug(
+            file_names=["sales.xlsx"],
+            spreadsheet_names=["sales.xlsx"],
+            user_question="按地区汇总收入",
+            tools=[object(), object()],
+            settings=settings,
+        )
+
+        # 原因：schema sample 可能刚好包含全部小表，模型会跳过真实 pandas 计算。
+        # 作用：验证 runtime 必须补调 excel_analysis 后才接受最终答案。
+        self.assertEqual(result.tool_calls, ["excel_schema", "excel_analysis"])
+        self.assertIn("East 为 40", result.answer)
+        self.assertTrue(any("excel_analysis" in step for step in result.debug_steps))
+
+    def test_format_file_analysis_prompt_explains_excel_tool_order(self) -> None:
+        prompt = format_file_analysis_agent_prompt(
+            file_names=["sales.xlsx"],
+            spreadsheet_names=["sales.xlsx"],
+            user_question="按地区汇总收入",
+        )
+
+        self.assertIn("excel_schema first", prompt)
+        self.assertIn("excel_analysis", prompt)
+        self.assertIn("按地区汇总收入", prompt)
 
     def test_format_chat_prompt_includes_history_and_latest_user_message(self) -> None:
         history = [
@@ -154,128 +374,6 @@ class SmolagentsRuntimeTests(unittest.TestCase):
         self.assertIn("不要编造文件内容", messages[0]["content"])
         self.assertEqual(messages[1], {"role": "user", "content": "你好"})
         self.assertEqual(messages[2], {"role": "user", "content": "请继续"})
-
-    def test_run_smolagents_document_analysis_sends_file_context(self) -> None:
-        settings = SmolagentsModelSettings(
-            model_id="any-model",
-            base_url="http://127.0.0.1:8080/v1",
-        )
-
-        result = run_smolagents_document_analysis(
-            document_name="assignment.pdf",
-            content="This homework asks for vectorized R functions.",
-            user_question="总结",
-            settings=settings,
-        )
-
-        self.assertIn("reply:", result)
-        self.assertIn("assignment.pdf", result)
-        self.assertIn("总结", result)
-
-    def test_run_smolagents_document_analysis_continues_after_observation(self) -> None:
-        settings = SmolagentsModelSettings(
-            model_id="any-model",
-            base_url="http://127.0.0.1:8080/v1",
-        )
-
-        result = run_smolagents_document_analysis(
-            document_name="assignment.pdf",
-            content="TRIGGER_OBSERVATION",
-            user_question="总结",
-            settings=settings,
-        )
-
-        self.assertEqual(result, "这是最终总结。")
-
-    def test_document_analysis_debug_steps_show_observation_retry(self) -> None:
-        settings = SmolagentsModelSettings(
-            model_id="any-model",
-            base_url="http://127.0.0.1:8080/v1",
-        )
-
-        result = run_smolagents_document_analysis_with_debug(
-            document_name="assignment.pdf",
-            content="TRIGGER_OBSERVATION",
-            user_question="总结",
-            settings=settings,
-        )
-
-        self.assertEqual(result.answer, "这是最终总结。")
-        self.assertTrue(
-            any("触发第二轮最终答案生成" in step for step in result.debug_steps)
-        )
-
-    def test_document_analysis_finalizes_when_second_response_is_still_observation(self) -> None:
-        settings = SmolagentsModelSettings(
-            model_id="any-model",
-            base_url="http://127.0.0.1:8080/v1",
-        )
-
-        result = run_smolagents_document_analysis_with_debug(
-            document_name="assignment.pdf",
-            content="STILL_OBSERVATION",
-            user_question="总结",
-            settings=settings,
-        )
-
-        self.assertEqual(result.answer, "第三轮最终总结。")
-        self.assertTrue(any("第三次模型返回" in step for step in result.debug_steps))
-        self.assertNotIn("Observation", result.answer)
-
-    def test_document_analysis_retries_after_empty_model_response(self) -> None:
-        settings = SmolagentsModelSettings(
-            model_id="any-model",
-            base_url="http://127.0.0.1:8080/v1",
-        )
-
-        result = run_smolagents_document_analysis_with_debug(
-            document_name="assignment.pdf",
-            content="TRIGGER_EMPTY",
-            user_question="总结",
-            settings=settings,
-        )
-
-        self.assertIn("整体概览", result.answer)
-        self.assertIn("关键内容", result.answer)
-        self.assertTrue(any("第一次模型未生成完整 content" in step for step in result.debug_steps))
-
-    def test_document_analysis_does_not_show_reasoning_content(self) -> None:
-        settings = SmolagentsModelSettings(
-            model_id="any-model",
-            base_url="http://127.0.0.1:8080/v1",
-        )
-
-        result = run_smolagents_document_analysis_with_debug(
-            document_name="assignment.docx",
-            content="TRIGGER_REASONING_ONLY",
-            user_question="摘要",
-            settings=settings,
-        )
-
-        self.assertIn("整体概览", result.answer)
-        self.assertNotIn("We need to", result.answer)
-
-    def test_document_analysis_retry_rebuilds_messages_without_extra_user_turn(self) -> None:
-        settings = SmolagentsModelSettings(
-            model_id="any-model",
-            base_url="http://127.0.0.1:8080/v1",
-        )
-
-        run_smolagents_document_analysis_with_debug(
-            document_name="assignment.docx",
-            content="TRIGGER_REASONING_ONLY",
-            user_question="摘要",
-            settings=settings,
-        )
-        model = FakeOpenAIModel.last_instance
-
-        self.assertEqual(len(model.calls[-1]), 2)
-        self.assertEqual(model.calls[-1][0]["role"], "system")
-        self.assertEqual(model.calls[-1][1]["role"], "user")
-        self.assertIn("TRIGGER_REASONING_ONLY", model.calls[-1][1]["content"])
-        self.assertIn("回答语言必须跟随用户问题的语言", model.calls[-1][0]["content"])
-        self.assertIn("回答语言必须跟随用户问题的语言", model.calls[-1][1]["content"])
-        self.assertGreater(model.call_kwargs[-1]["max_tokens"], settings.max_tokens)
 
     @patch("qwopus_agent.integrations.smolagents_runtime.urllib.request.urlopen")
     def test_check_model_connection_reports_online(self, mock_urlopen) -> None:

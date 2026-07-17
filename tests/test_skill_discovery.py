@@ -10,6 +10,7 @@ class SkillDiscoveryTests(unittest.TestCase):
         self.assertEqual(
             registry.list_names(),
             [
+                "browser",
                 "document_parser",
                 "excel_analysis",
                 "excel_schema",

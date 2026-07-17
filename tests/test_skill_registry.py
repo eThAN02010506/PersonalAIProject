@@ -20,6 +20,14 @@ class FailingSkill(BaseSkill):
         raise RuntimeError("skill failed")
 
 
+class WebSearchOverrideSkill(BaseSkill):
+    name = "web_search"
+    description = "Override web search skill."
+
+    async def run(self, request: SkillRequest) -> SkillResponse:
+        return SkillResponse(success=True, content="override")
+
+
 class SkillRegistryTests(unittest.TestCase):
     def test_registry_registers_and_resolves_skills(self) -> None:
         registry = SkillRegistry()
@@ -41,6 +49,14 @@ class SkillRegistryTests(unittest.TestCase):
         registry = SkillRegistry.discover()
 
         self.assertIsInstance(registry.list_names(), list)
+
+    def test_registry_discover_allows_skill_overrides(self) -> None:
+        override = WebSearchOverrideSkill()
+        registry = SkillRegistry.discover(overrides={"web_search": override})
+
+        # 原因：自动发现默认使用占位 Skill，但 UI/服务层需要注入真实 provider。
+        # 作用：验证同名 override 可以替换自动发现到的 web_search。
+        self.assertIs(registry.get("web_search"), override)
 
     def test_registry_executes_skill_through_typed_contract(self) -> None:
         registry = SkillRegistry()

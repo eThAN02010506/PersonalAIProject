@@ -7,13 +7,17 @@ the retrieval implementation details.
 from __future__ import annotations
 
 import json
+import math
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from hashlib import blake2b
 from pathlib import Path
 from uuid import uuid4
 
 
 DEFAULT_MINIRAG_STORE_PATH = Path("storage/minirag/documents.jsonl")
+VECTOR_DIMENSIONS = 256
 
 
 @dataclass
@@ -23,12 +27,15 @@ class MiniRAG:
     # Reason: Public API remains insert/search while storage can evolve behind the facade.
     _documents: list[str] = field(default_factory=list)
 
+    _vectors: list[list[float]] = field(default_factory=list)
+
     storage_path: Path = DEFAULT_MINIRAG_STORE_PATH
 
     def __post_init__(self) -> None:
         """Load persisted Markdown documents on startup."""
         self.storage_path = Path(self.storage_path)
         self._documents.extend(_load_documents(self.storage_path))
+        self._vectors.extend(_document_vector(document) for document in self._documents)
 
     def insert(self, document: str) -> None:
         """Insert one Markdown-normalized document."""
@@ -37,34 +44,61 @@ class MiniRAG:
         if document in self._documents:
             return
         self._documents.append(document)
+        self._vectors.append(_document_vector(document))
         _append_document(self.storage_path, document)
 
     def search(self, query: str) -> list[str]:
-        """Search documents with a simple local fallback."""
+        """Search documents with an internal vector index."""
         if not query.strip():
             raise ValueError("query must not be empty")
 
-        query_terms = _query_terms(query)
-        matches = [
-            document
-            for document in self._documents
-            if any(term in document.lower() for term in query_terms)
+        query_vector = _document_vector(query)
+        scored = [
+            (_cosine_similarity(query_vector, vector), document)
+            for document, vector in zip(self._documents, self._vectors, strict=True)
         ]
-        return matches
+        # 原因：MiniRAG 对外只暴露 search(query)，内部可以从关键词升级为向量排序。
+        # 作用：返回和查询最接近的文档，同时保持旧调用方完全不变。
+        return [
+            document
+            for score, document in sorted(scored, key=lambda item: item[0], reverse=True)
+            if score > 0
+        ]
 
 
-def _query_terms(query: str) -> list[str]:
-    """Build simple searchable terms for English and Chinese queries."""
-    lowered = query.lower().strip()
-    terms = lowered.split()
-    compact = "".join(terms)
-    if compact and compact not in terms:
-        terms.append(compact)
-    if any("\u4e00" <= char <= "\u9fff" for char in compact):
-        # 原因：中文问题通常没有空格，直接 split 会导致召回很弱。
-        # 作用：加入中文字符级 term，让“分析收入”能命中包含“收入”的文档。
-        terms.extend(char for char in compact if "\u4e00" <= char <= "\u9fff")
-    return list(dict.fromkeys(term for term in terms if term))
+def _document_vector(text: str) -> list[float]:
+    """Build a small deterministic hashed vector for local retrieval."""
+    vector = [0.0] * VECTOR_DIMENSIONS
+    for token in _vector_tokens(text):
+        index = _token_index(token)
+        vector[index] += 1.0
+    norm = math.sqrt(sum(value * value for value in vector))
+    if norm == 0:
+        return vector
+    return [value / norm for value in vector]
+
+
+def _vector_tokens(text: str) -> list[str]:
+    """Tokenize English words, Chinese characters, and character n-grams."""
+    lowered = text.lower()
+    word_tokens = re.findall(r"[a-z0-9]+", lowered)
+    chinese_chars = [char for char in lowered if "\u4e00" <= char <= "\u9fff"]
+    compact = re.sub(r"\s+", "", lowered)
+    # 原因：本地无 embedding 模型时，字符 n-gram 能提升相近拼写和中文短查询召回。
+    # 作用：让 vector search 比纯关键词匹配更稳，同时保持零外部依赖。
+    ngrams = [compact[index:index + 3] for index in range(max(len(compact) - 2, 0))]
+    return list(dict.fromkeys(word_tokens + chinese_chars + ngrams))
+
+
+def _token_index(token: str) -> int:
+    """Map one token to a stable vector bucket."""
+    digest = blake2b(token.encode("utf-8"), digest_size=4).digest()
+    return int.from_bytes(digest, "big") % VECTOR_DIMENSIONS
+
+
+def _cosine_similarity(left: list[float], right: list[float]) -> float:
+    """Calculate cosine similarity for normalized vectors."""
+    return sum(left_value * right_value for left_value, right_value in zip(left, right, strict=True))
 
 
 def _load_documents(storage_path: Path) -> list[str]:
@@ -96,7 +130,7 @@ def _append_document(storage_path: Path, document: str) -> None:
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "document": document,
     }
-    # 原因：MiniRAG 需要重启后自动恢复，但当前阶段不引入真实向量数据库。
-    # 作用：把 insert(document) 追加写入 storage/minirag/documents.jsonl。
+    # 原因：MiniRAG 需要重启后自动恢复，向量索引可以从文档内容确定性重建。
+    # 作用：只持久化原始 document，启动时自动重建内部向量。
     with storage_path.open("a", encoding="utf-8") as file:
         file.write(json.dumps(record, ensure_ascii=False) + "\n")
