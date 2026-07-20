@@ -11,7 +11,6 @@ from pathlib import Path
 
 from qwopus_agent.documents.mineru import MinerUUnavailableError, parse_document_with_mineru
 
-
 IMAGE_EXTENSIONS = {".png", ".jpeg", ".jpg"}
 SUPPORTED_DOCUMENT_EXTENSIONS = {".pdf", ".docx", ".md", ".txt", *IMAGE_EXTENSIONS}
 

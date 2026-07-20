@@ -6,7 +6,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from qwopus_agent.analysis import analyze_uploaded_file
-
 from qwopus_agent.skills.base import BaseSkill, SkillRequest, SkillResponse
 
 
@@ -17,8 +16,10 @@ class ExcelAnalysisSkill(BaseSkill):
     # Reason: Planner needs a distinct skill for analysis after schema inspection.
     name: str = "excel_analysis"
 
-    # Role: Runs local pandas-style analysis from schema and samples, returning only computed results.
-    description: str = "Generate and execute local dataframe analysis without sending full Excel data."
+    # Role: Runs local pandas-style analysis from schema and samples, returning computed results.
+    description: str = (
+        "Generate and execute local dataframe analysis without sending full Excel data."
+    )
 
     async def run(self, request: SkillRequest) -> SkillResponse:
         """Run the existing local spreadsheet analysis pipeline."""
@@ -53,7 +54,8 @@ class ExcelAnalysisSkill(BaseSkill):
             data={
                 "file_path": str(path),
                 # 原因：上传分析服务需要保留表格、Markdown 和 metadata，不能只拿 Skill 的文本摘要。
-                # 作用：Executor 仍通过统一 SkillResponse 返回结果，下游无需再次读取同一个 Excel 文件。
+                # 作用：Executor 仍通过统一 SkillResponse 返回结果，下游无需再次读取
+                # 同一个 Excel 文件。
                 "analysis_result": result,
                 "metadata": result.metadata,
                 "markdown_document": result.markdown_document,

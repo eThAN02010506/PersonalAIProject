@@ -94,9 +94,11 @@ class AgentArchitectureTests(unittest.TestCase):
         planner = Planner(skill_registry=SkillRegistry.discover())
 
         rag_plan = asyncio.run(planner.plan("在 MiniRAG 知识库中查找项目记录"))
+        graph_plan = asyncio.run(planner.plan("查询 Company A 到 Company B 的多跳关系路径"))
         web_plan = asyncio.run(planner.plan("联网搜索 web 上的最新资料"))
 
         self.assertEqual([step.skill_name for step in rag_plan.steps], ["rag_search"])
+        self.assertEqual([step.skill_name for step in graph_plan.steps], ["graph_search"])
         self.assertEqual([step.skill_name for step in web_plan.steps], ["web_search"])
 
     def test_planner_does_not_guess_when_route_is_unknown(self) -> None:

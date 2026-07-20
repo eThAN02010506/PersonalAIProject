@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
-
 
 DEFAULT_LOG_PATH = Path("logs/conversations.jsonl")
 
@@ -21,7 +20,7 @@ def append_conversation_event(
     log_path.parent.mkdir(parents=True, exist_ok=True)
     record = {
         "id": uuid4().hex,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
         "event_type": event_type,
         "payload": payload,
     }

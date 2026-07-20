@@ -12,7 +12,6 @@ from typing import Any
 
 from qwopus_agent.skills import SkillRegistry
 
-
 SPREADSHEET_EXTENSIONS = {".csv", ".xls", ".xlsx"}
 DOCUMENT_EXTENSIONS = {".pdf", ".docx", ".md", ".txt", ".png", ".jpeg", ".jpg"}
 
@@ -129,6 +128,35 @@ class Planner:
                         skill_name="web_search",
                         query=objective,
                         reason="The objective explicitly requires web search.",
+                    )
+                ],
+            )
+
+        if (
+            "graph_search" in available_skills
+            and any(
+                term in lowered_objective
+                for term in (
+                    "knowledge graph",
+                    "relationship",
+                    "multi-hop",
+                    "graph path",
+                    "知识图谱",
+                    "关系路径",
+                    "多跳",
+                    "实体关系",
+                )
+            )
+        ):
+            # 原因：关系路径问题需要真实图遍历，普通向量 RAG 只能碰巧召回完整证据链。
+            # 作用：Planner 明确选择 graph_search，Executor 仍只负责执行已生成的计划。
+            return Plan(
+                objective=objective,
+                steps=[
+                    PlanStep(
+                        skill_name="graph_search",
+                        query=objective,
+                        reason="The objective requires persistent entity relationship traversal.",
                     )
                 ],
             )

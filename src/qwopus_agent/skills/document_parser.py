@@ -8,7 +8,6 @@ from pathlib import Path
 from qwopus_agent.documents import parse_document
 from qwopus_agent.skills.base import BaseSkill, SkillRequest, SkillResponse
 
-
 SUPPORTED_EXTENSIONS = {
     ".pdf", ".docx", ".md", ".txt",
     ".png", ".jpeg", ".jpg",

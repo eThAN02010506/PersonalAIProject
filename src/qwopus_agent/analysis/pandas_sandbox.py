@@ -42,8 +42,31 @@ _ALLOWED_BUILTINS = {
 }
 
 _ALLOWED_ROOT_NAMES = set(_ALLOWED_BUILTINS) | {"dfs", "pd", "result"}
-_ALLOWED_ASSIGN_NAMES = {"result", "df", "data", "summary", "table", "series", "grouped", "mask", "value", "values", "rows"}
-_BLOCKED_CALLS = {"eval", "exec", "open", "compile", "__import__", "input", "globals", "locals", "vars", "dir"}
+_ALLOWED_ASSIGN_NAMES = {
+    "data",
+    "df",
+    "grouped",
+    "mask",
+    "result",
+    "rows",
+    "series",
+    "summary",
+    "table",
+    "value",
+    "values",
+}
+_BLOCKED_CALLS = {
+    "__import__",
+    "compile",
+    "dir",
+    "eval",
+    "exec",
+    "globals",
+    "input",
+    "locals",
+    "open",
+    "vars",
+}
 _BLOCKED_NAMES = {"os", "sys", "subprocess", "socket", "pathlib", "shutil", "requests", "urllib"}
 _MAX_CODE_CHARS = 4000
 _MAX_RESULT_MARKDOWN_CHARS = 6000
@@ -66,7 +89,10 @@ def execute_pandas_code(code: str, dataframes: dict[str, pd.DataFrame]) -> Sandb
     value = locals_env.get("result")
     if value is None:
         raise ValueError("Sandbox code must assign the final answer to result.")
-    return SandboxExecutionResult(value=value, markdown=_truncate_markdown(_result_to_markdown(value)))
+    return SandboxExecutionResult(
+        value=value,
+        markdown=_truncate_markdown(_result_to_markdown(value)),
+    )
 
 
 def _strip_code_fence(code: str) -> str:
@@ -85,7 +111,26 @@ def _strip_code_fence(code: str) -> str:
 def _validate_ast(tree: ast.AST) -> None:
     """Reject nodes and names that could escape the dataframe sandbox."""
     for node in ast.walk(tree):
-        if isinstance(node, (ast.Import, ast.ImportFrom, ast.Global, ast.Nonlocal, ast.With, ast.AsyncWith, ast.Try, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.Delete, ast.Await, ast.Yield, ast.YieldFrom)):
+        if isinstance(
+            node,
+            (
+                ast.Import,
+                ast.ImportFrom,
+                ast.Global,
+                ast.Nonlocal,
+                ast.With,
+                ast.AsyncWith,
+                ast.Try,
+                ast.ClassDef,
+                ast.FunctionDef,
+                ast.AsyncFunctionDef,
+                ast.Lambda,
+                ast.Delete,
+                ast.Await,
+                ast.Yield,
+                ast.YieldFrom,
+            ),
+        ):
             raise ValueError(f"Unsupported sandbox syntax: {type(node).__name__}")
         if isinstance(node, ast.Assign):
             _validate_assignment(node)
@@ -110,7 +155,11 @@ def _validate_name(node: ast.Name) -> None:
     """Block dangerous names and unknown root reads."""
     if node.id in _BLOCKED_NAMES or node.id.startswith("__"):
         raise ValueError(f"Blocked sandbox name: {node.id}")
-    if isinstance(node.ctx, ast.Load) and node.id not in _ALLOWED_ROOT_NAMES and node.id not in _ALLOWED_ASSIGN_NAMES:
+    if (
+        isinstance(node.ctx, ast.Load)
+        and node.id not in _ALLOWED_ROOT_NAMES
+        and node.id not in _ALLOWED_ASSIGN_NAMES
+    ):
         raise ValueError(f"Unknown sandbox name: {node.id}")
 
 
@@ -118,7 +167,18 @@ def _validate_attribute(node: ast.Attribute) -> None:
     """Block private and escape-prone attribute access."""
     if node.attr.startswith("_"):
         raise ValueError(f"Blocked private attribute access: {node.attr}")
-    if node.attr in {"to_csv", "to_excel", "to_json", "to_pickle", "to_sql", "read_csv", "read_excel", "read_sql", "eval", "query"}:
+    if node.attr in {
+        "eval",
+        "query",
+        "read_csv",
+        "read_excel",
+        "read_sql",
+        "to_csv",
+        "to_excel",
+        "to_json",
+        "to_pickle",
+        "to_sql",
+    }:
         raise ValueError(f"Blocked sandbox attribute: {node.attr}")
 
 

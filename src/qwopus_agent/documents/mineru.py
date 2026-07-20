@@ -9,7 +9,6 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-
 MINERU_OUTPUT_DIR = Path("storage/cache/mineru")
 MINERU_COMMANDS = ("mineru", "magic-pdf")
 VENDOR_MINERU_DIR = Path("vendor/MinerU")

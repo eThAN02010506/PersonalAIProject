@@ -36,6 +36,29 @@ class SkillCatalogTests(unittest.TestCase):
             self.assertEqual(latest.description, "new")
             self.assertEqual(len(catalog.list()), 1)
 
+    def test_skill_catalog_orders_semantic_versions_and_activates_one(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            catalog = SkillCatalog(storage_path=Path(tmpdir) / "catalog.json")
+            catalog.register(SkillManifest("demo", "0.9.0", "old", "workflow"))
+            catalog.register(
+                SkillManifest(
+                    "demo",
+                    "0.10.0",
+                    "new",
+                    "workflow",
+                    status="candidate",
+                )
+            )
+
+            # 原因：字符串排序会错误地把 0.9.0 判断为比 0.10.0 更新。
+            # 作用：验证 Catalog 使用语义版本，并且激活新版时只保留一个 active。
+            active = catalog.activate("demo", "0.10.0")
+
+            self.assertEqual(catalog.latest("demo").version, "0.10.0")
+            self.assertEqual(active.status, "active")
+            statuses = {item.version: item.status for item in catalog.list()}
+            self.assertEqual(statuses, {"0.9.0": "archived", "0.10.0": "active"})
+
 
 if __name__ == "__main__":
     unittest.main()

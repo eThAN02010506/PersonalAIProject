@@ -16,7 +16,7 @@ from qwopus_agent.integrations.smolagents_tools import (
     build_minirag_search_tool,
     build_tavily_search_tool,
 )
-from qwopus_agent.memory import MiniRAG
+from tests.minirag_fakes import make_test_minirag
 
 
 class FakeTool:
@@ -122,7 +122,7 @@ class SmolagentsToolsTests(unittest.TestCase):
     def test_minirag_tool_returns_bounded_search_results(self) -> None:
         fake_module = types.SimpleNamespace(Tool=FakeTool)
         with tempfile.TemporaryDirectory() as tmpdir:
-            minirag = MiniRAG(storage_path=Path(tmpdir) / "documents.jsonl")
+            minirag = make_test_minirag(Path(tmpdir) / "documents.jsonl")
             minirag.insert("Qwopus stores local project knowledge.")
 
             with patch.dict(sys.modules, {"smolagents": fake_module}):

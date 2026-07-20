@@ -13,13 +13,27 @@ authors = [
   { name = "Qwopus-Agent Contributors" }
 ]
 dependencies = [
+  # 原因：统一报告模块必须输出可查看的真实 PNG/SVG，而不是图表描述文件。
+  # 作用：使用无窗口 Agg 后端生成跨平台图表，并保持 UI 只负责下载。
+  "matplotlib>=3.8,<4",
+  # 原因：知识图谱需要有向多关系路径遍历，同时保持本地持久化和独立测试。
+  # 作用：提供实体节点、关系边、邻域和多跳路径算法。
+  "networkx>=3.2,<4",
+  # 原因：MiniRAG 的持久化向量层使用官方 vendor 代码选择的 NanoVectorDB。
+  # 作用：新环境安装项目后可以直接创建和恢复本地语义索引。
+  "minirag-hku>=0.0.2,<0.1",
+  "nano-vectordb>=0.0.4,<0.1",
+  "numpy>=1.26,<3",
   "openpyxl>=3.1",
   "pandas>=2.2",
   "pydantic>=2.8",
   "pypdf>=5.0",
   "python-dotenv>=1.0",
   "python-docx>=1.1",
-  "smolagents>=1.26.0"
+  "smolagents>=1.26.0",
+  # 原因：知识检索需要独立于聊天 LLM 的多语言本地 embedding。
+  # 作用：Gemma、Qwen 或其他生成模型切换时，已有向量索引和检索接口保持稳定。
+  "sentence-transformers>=5.0,<6",
 ]
 
 [project.scripts]
@@ -30,10 +44,16 @@ qwopus-ui = "qwopus_agent.ui.launcher:main"
 [project.optional-dependencies]
 dev = [
   "pytest>=8.0",
+  # 原因：真实格式集成测试需要生成带可提取文本层的 PDF fixture。
+  # 作用：验证 PDF → Markdown → MiniRAG/图谱链路，而不是使用伪 PDF 字节。
+  "reportlab>=4,<6",
   "ruff>=0.6.0",
   "mypy>=1.10"
 ]
 ui = [
+  # 原因：知识图谱页面需要绘制有向实体关系，Streamlit 将 DOT 交给 graphviz 渲染。
+  # 作用：支持本地图谱可视化，同时不把 UI 依赖加入纯核心安装。
+  "graphviz>=0.20,<1",
   "streamlit>=1.32"
 ]
 documents = [

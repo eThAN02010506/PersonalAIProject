@@ -1,23 +1,40 @@
-"""Application services that keep business logic out of UI layers."""
+"""Lazy application-service exports that keep business logic out of UI layers."""
 
-from qwopus_agent.services.analysis_service import (
-    UploadAnalysisOutcome,
-    UploadedFileInput,
-    analyze_uploaded_files,
-    combine_analysis_results,
-)
-from qwopus_agent.services.chat_service import (
-    BackgroundChatTask,
-    ChatTaskResult,
-    start_chat_task,
-)
+from __future__ import annotations
 
-__all__ = [
-    "UploadedFileInput",
-    "UploadAnalysisOutcome",
-    "BackgroundChatTask",
-    "ChatTaskResult",
-    "analyze_uploaded_files",
-    "combine_analysis_results",
-    "start_chat_task",
-]
+from importlib import import_module
+from typing import Any
+
+_EXPORTS = {
+    "UploadedFileInput": ("analysis_service", "UploadedFileInput"),
+    "UploadAnalysisOutcome": ("analysis_service", "UploadAnalysisOutcome"),
+    "analyze_uploaded_files": ("analysis_service", "analyze_uploaded_files"),
+    "combine_analysis_results": ("analysis_service", "combine_analysis_results"),
+    "BackgroundChatTask": ("chat_service", "BackgroundChatTask"),
+    "ChatTaskResult": ("chat_service", "ChatTaskResult"),
+    "start_chat_task": ("chat_service", "start_chat_task"),
+    "KnowledgeGraphService": ("knowledge_graph_service", "KnowledgeGraphService"),
+    "KnowledgeMaintenanceService": (
+        "knowledge_maintenance_service",
+        "KnowledgeMaintenanceService",
+    ),
+    "SkillGrowthDecision": ("skill_growth_service", "SkillGrowthDecision"),
+    "SkillGrowthPolicy": ("skill_growth_service", "SkillGrowthPolicy"),
+    "SkillGrowthService": ("skill_growth_service", "SkillGrowthService"),
+}
+
+__all__ = sorted(_EXPORTS)
+
+
+def __getattr__(name: str) -> Any:
+    """Resolve one service export without importing every service dependency."""
+    try:
+        module_name, attribute = _EXPORTS[name]
+    except KeyError as exc:
+        raise AttributeError(name) from exc
+    # 原因：成长或聊天服务不需要在导入时初始化文档分析与 MiniRAG 依赖。
+    # 作用：保留稳定 package 导入接口，同时只加载当前调用链需要的服务模块。
+    module = import_module(f"qwopus_agent.services.{module_name}")
+    value = getattr(module, attribute)
+    globals()[name] = value
+    return value

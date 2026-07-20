@@ -47,7 +47,10 @@ class WebSearchSkillTests(unittest.TestCase):
 
         # 原因：联网搜索应由 smolagents Tool 驱动，但搜索 provider 使用 Tavily。
         # 作用：验证 Skill provider 经由 Tavily Tool adapter，而不是直接请求外部 API。
-        with patch("qwopus_agent.skills.web_search.build_tavily_search_tool", side_effect=fake_build_tool):
+        with patch(
+            "qwopus_agent.skills.web_search.build_tavily_search_tool",
+            side_effect=fake_build_tool,
+        ):
             results = provider.search("how to cook rice")
 
         self.assertEqual(results, ["rice cooking result"])
@@ -61,7 +64,10 @@ class WebSearchSkillTests(unittest.TestCase):
         def fake_build_tool(config):
             return FakeTool()
 
-        with patch("qwopus_agent.skills.web_search.build_tavily_search_tool", side_effect=fake_build_tool):
+        with patch(
+            "qwopus_agent.skills.web_search.build_tavily_search_tool",
+            side_effect=fake_build_tool,
+        ):
             results = SmolagentsTavilySearchProvider().search("Qwopus")
 
         self.assertEqual(results, ["first", "second"])

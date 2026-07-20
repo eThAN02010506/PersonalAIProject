@@ -11,17 +11,17 @@ from qwopus_agent.integrations.smolagents_runtime import (
     DocumentAnalysisRun,
     SmolagentsModelSettings,
 )
-from qwopus_agent.memory import MiniRAG
 from qwopus_agent.services.analysis_service import (
     UploadedFileInput,
     analyze_uploaded_files,
 )
+from tests.minirag_fakes import make_test_minirag
 
 
 class AnalysisServiceTests(unittest.TestCase):
     def test_analyze_uploaded_files_runs_without_streamlit(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
-            minirag = MiniRAG(storage_path=Path(tmpdir) / "documents.jsonl")
+            minirag = make_test_minirag(Path(tmpdir) / "documents.jsonl")
             settings = SmolagentsModelSettings(
                 model_id="test-model",
                 base_url="http://127.0.0.1:9999/v1",
@@ -73,13 +73,14 @@ class AnalysisServiceTests(unittest.TestCase):
             self.assertTrue(any("本地预处理完成" in step for step in outcome.debug_steps))
             self.assertTrue(any("模型未连接" in step for step in outcome.debug_steps))
             self.assertEqual(
-                minirag.search("local markdown"), ["# File: notes.txt\n\nlocal markdown content"]
+                minirag.search("local markdown"),
+                ["[Source: notes.txt]\nlocal markdown content"],
             )
             run_llm.assert_not_called()
 
     def test_analyze_uploaded_files_uses_existing_minirag_context_before_insert(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
-            minirag = MiniRAG(storage_path=Path(tmpdir) / "documents.jsonl")
+            minirag = make_test_minirag(Path(tmpdir) / "documents.jsonl")
             minirag.insert("Prior MiniRAG note about revenue growth.")
             settings = SmolagentsModelSettings(
                 model_id="test-model",
@@ -142,7 +143,9 @@ class AnalysisServiceTests(unittest.TestCase):
             self.assertEqual(captured["tool_names"], ["document_parser", "rag_search"])
             self.assertIn("Prior MiniRAG note", captured["rag_result"])
             self.assertTrue(outcome.result.metadata["minirag_context_used"])
-            self.assertTrue(minirag.search("Current uploaded")[0].startswith("# File: revenue.txt"))
+            self.assertTrue(
+                minirag.search("Current uploaded")[0].startswith("[Source: revenue.txt]")
+            )
 
     def test_excel_upload_injects_schema_and_sandbox_tools(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -150,7 +153,7 @@ class AnalysisServiceTests(unittest.TestCase):
             pd.DataFrame({"region": ["East", "West", "East"], "revenue": [10, 20, 30]}).to_excel(
                 path, index=False
             )
-            minirag = MiniRAG(storage_path=Path(tmpdir) / "documents.jsonl")
+            minirag = make_test_minirag(Path(tmpdir) / "documents.jsonl")
             settings = SmolagentsModelSettings(
                 model_id="test-model",
                 base_url="http://127.0.0.1:9999/v1",

@@ -4,9 +4,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
 
 import pandas as pd
+
+from qwopus_agent.reports.charts import ChartRenderer
 
 
 @dataclass(frozen=True)
@@ -29,7 +30,7 @@ class GeneratedReport:
 
 @dataclass
 class ReportGenerator:
-    """Generate Markdown, Excel, chart manifests, and PDF artifacts."""
+    """Generate Markdown, Excel, real chart, and PDF artifacts."""
 
     output_dir: Path = Path("storage/reports")
 
@@ -59,18 +60,20 @@ class ReportGenerator:
                 )
             )
 
-        # 原因：当前阶段还没有图表渲染依赖，仍需要给报告链路一个稳定 charts 输出。
-        # 作用：生成 chart manifest，后续可替换为真实 PNG/SVG 图表而不改调用方。
-        artifacts.append(
-            ReportArtifact(
-                kind="charts",
-                path=_write_chart_manifest(self.output_dir / f"{safe_basename}_charts.md", tables),
-            )
+        # 原因：manifest 只能描述图表，用户无法查看或用于报告交付。
+        # 作用：统一生成真实 PNG/SVG，并继续通过 ReportArtifact 交给 UI 下载。
+        artifacts.extend(
+            ReportArtifact(kind=chart.kind, path=chart.path)
+            for chart in ChartRenderer(self.output_dir).render(tables, safe_basename)
         )
         artifacts.append(
             ReportArtifact(
                 kind="pdf",
-                path=_write_simple_pdf(self.output_dir / f"{safe_basename}.pdf", title, markdown_body),
+                path=_write_simple_pdf(
+                    self.output_dir / f"{safe_basename}.pdf",
+                    title,
+                    markdown_body,
+                ),
             )
         )
 
@@ -105,25 +108,6 @@ def _excel_sheet_name(name: str, fallback: str) -> str:
     return (cleaned or fallback)[:31]
 
 
-def _write_chart_manifest(path: Path, tables: dict[str, pd.DataFrame]) -> Path:
-    """Write a chart manifest from available tables."""
-    lines = ["# Chart Manifest", ""]
-    if not tables:
-        lines.append("_No chartable tables were provided._")
-    for name, dataframe in tables.items():
-        numeric_columns = [str(column) for column in dataframe.select_dtypes(include="number").columns]
-        lines.extend(
-            [
-                f"## {name}",
-                f"- Rows: {len(dataframe)}",
-                f"- Numeric columns: {', '.join(numeric_columns) or 'None'}",
-                "",
-            ]
-        )
-    path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
-    return path
-
-
 def _write_simple_pdf(path: Path, title: str, body: str) -> Path:
     """Write a minimal PDF without introducing a new runtime dependency."""
     content = _escape_pdf_text(f"{title}\n\n{body}"[:3500])
@@ -136,7 +120,11 @@ def _write_simple_pdf(path: Path, title: str, body: str) -> Path:
             "/Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >> endobj"
         ),
         "4 0 obj << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> endobj",
-        f"5 0 obj << /Length {len(stream.encode('latin-1', errors='replace'))} >> stream\n{stream}\nendstream endobj",
+        (
+            "5 0 obj << /Length "
+            f"{len(stream.encode('latin-1', errors='replace'))} >> stream\n"
+            f"{stream}\nendstream endobj"
+        ),
     ]
     offsets: list[int] = []
     pdf = "%PDF-1.4\n"
@@ -158,4 +146,9 @@ def _write_simple_pdf(path: Path, title: str, body: str) -> Path:
 def _escape_pdf_text(text: str) -> str:
     """Escape text for a simple PDF text operator."""
     ascii_text = text.encode("latin-1", errors="replace").decode("latin-1")
-    return ascii_text.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)").replace("\n", "\\n")
+    return (
+        ascii_text.replace("\\", "\\\\")
+        .replace("(", "\\(")
+        .replace(")", "\\)")
+        .replace("\n", "\\n")
+    )

@@ -8,13 +8,21 @@ from qwopus_agent.reports import ReportGenerator
 
 
 class ReportGeneratorTests(unittest.TestCase):
-    def test_report_generator_creates_all_artifacts(self) -> None:
+    def test_report_generator_creates_real_png_and_svg_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             generator = ReportGenerator(output_dir=Path(tmpdir))
-            tables = {"summary": pd.DataFrame([{"metric": "rows", "value": 3}])}
+            tables = {
+                "Quarterly Sales": pd.DataFrame(
+                    {
+                        "quarter": ["Q1", "Q2", "Q3"],
+                        "revenue": [120, 160, 190],
+                        "cost": [80, 95, 110],
+                    }
+                )
+            }
 
-            # 原因：报告生成必须通过统一模块完成，不能散落在 UI 或 Skill 中。
-            # 作用：验证 Markdown、Excel、Charts manifest、PDF 都由同一入口产出。
+            # 原因：检查文件存在无法区分真实图像与旧 chart manifest。
+            # 作用：同时验证统一入口、PNG 签名和 SVG 根元素。
             report = generator.generate(
                 title="Analysis Report",
                 markdown_body="Final answer body.",
@@ -22,15 +30,48 @@ class ReportGeneratorTests(unittest.TestCase):
                 basename="analysis report",
             )
 
-            artifact_kinds = {artifact.kind for artifact in report.artifacts}
+            artifacts = {artifact.kind: artifact.path for artifact in report.artifacts}
             self.assertEqual(
-                artifact_kinds,
-                {"markdown", "excel", "charts", "pdf"},
+                set(artifacts),
+                {"markdown", "excel", "chart_png", "chart_svg", "pdf"},
             )
-            self.assertTrue(report.markdown.exists())
             self.assertIn("Final answer body.", report.markdown.read_text(encoding="utf-8"))
-            for artifact in report.artifacts:
-                self.assertTrue(artifact.path.exists(), artifact.path)
+            self.assertTrue(artifacts["chart_png"].read_bytes().startswith(b"\x89PNG\r\n\x1a\n"))
+            self.assertGreater(artifacts["chart_png"].stat().st_size, 5_000)
+            svg = artifacts["chart_svg"].read_text(encoding="utf-8")
+            self.assertIn("<svg", svg)
+            self.assertGreater(len(svg), 1_000)
+
+    def test_non_numeric_tables_do_not_create_empty_charts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            report = ReportGenerator(output_dir=Path(tmpdir)).generate(
+                title="Text Report",
+                markdown_body="Body",
+                tables={"notes": pd.DataFrame({"label": ["a", "b"]})},
+            )
+
+            kinds = {artifact.kind for artifact in report.artifacts}
+            self.assertEqual(kinds, {"markdown", "excel", "pdf"})
+
+    def test_multiple_tables_receive_distinct_chart_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            report = ReportGenerator(output_dir=Path(tmpdir)).generate(
+                title="Multiple",
+                markdown_body="Body",
+                tables={
+                    "same/name": pd.DataFrame({"label": ["a"], "value": [1]}),
+                    "same:name": pd.DataFrame({"label": ["b"], "value": [2]}),
+                },
+                basename="multi",
+            )
+
+            chart_paths = [
+                artifact.path
+                for artifact in report.artifacts
+                if artifact.kind in {"chart_png", "chart_svg"}
+            ]
+            self.assertEqual(len(chart_paths), 4)
+            self.assertEqual(len(set(chart_paths)), 4)
 
 
 if __name__ == "__main__":

@@ -84,12 +84,16 @@ class OpenAICompatibleLLM(BaseLLM):
                 f"OpenAI-compatible server returned HTTP {exc.code}: {detail}"
             ) from exc
         except URLError as exc:
-            raise OpenAICompatibleLLMError(f"Could not reach LLM server at {url}: {exc.reason}") from exc
+            raise OpenAICompatibleLLMError(
+                f"Could not reach LLM server at {url}: {exc.reason}"
+            ) from exc
 
         try:
             decoded = json.loads(data)
         except json.JSONDecodeError as exc:
-            raise OpenAICompatibleLLMError("OpenAI-compatible server returned invalid JSON.") from exc
+            raise OpenAICompatibleLLMError(
+                "OpenAI-compatible server returned invalid JSON."
+            ) from exc
         if not isinstance(decoded, dict):
             raise OpenAICompatibleLLMError(
                 "OpenAI-compatible server returned a non-object JSON response."

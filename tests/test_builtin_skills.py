@@ -5,12 +5,12 @@ from pathlib import Path
 
 import pandas as pd
 
-from qwopus_agent.memory import MiniRAG
 from qwopus_agent.skills.base import SkillRequest
 from qwopus_agent.skills.document_parser import DocumentParserSkill
 from qwopus_agent.skills.excel_analysis import ExcelAnalysisSkill
 from qwopus_agent.skills.excel_schema import ExcelSchemaSkill
 from qwopus_agent.skills.rag_search import RagSearchSkill
+from tests.minirag_fakes import make_test_minirag
 
 
 class BuiltinSkillTests(unittest.TestCase):
@@ -72,7 +72,7 @@ class BuiltinSkillTests(unittest.TestCase):
 
     def test_rag_search_skill_uses_injected_minirag(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
-            minirag = MiniRAG(storage_path=Path(tmpdir) / "documents.jsonl")
+            minirag = make_test_minirag(Path(tmpdir) / "documents.jsonl")
             minirag.insert("Project Alpha revenue increased.")
 
             # 原因：Skill 测试需要隔离持久化知识库，不能污染真实 storage/minirag。

@@ -6,7 +6,6 @@ import logging
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
-
 DEFAULT_RUNTIME_LOG_PATH = Path("logs/qwopus_agent.log")
 
 

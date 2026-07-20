@@ -20,20 +20,25 @@ class StreamlitReportDownloadTests(unittest.TestCase):
         with patch("qwopus_agent.ui.streamlit_chat.Path") as path_cls:
             path_cls.return_value = self._temporary_output_dir()
             # 原因：Streamlit 页面只负责触发下载，实际报告生成必须走 ReportGenerator。
-            # 作用：验证 UI 辅助函数能从 AnalysisResult 产出四类下载 artifact。
+            # 作用：验证 UI 辅助函数能从 AnalysisResult 产出真实图表下载 artifact。
             report = _generate_analysis_report(result)
 
         self.assertEqual(
             {artifact.kind for artifact in report.artifacts},
-            {"markdown", "excel", "charts", "pdf"},
+            {"markdown", "excel", "chart_png", "chart_svg", "pdf"},
         )
         for artifact in report.artifacts:
             self.assertTrue(artifact.path.exists(), artifact.path)
 
     def test_report_mime_types_are_download_friendly(self) -> None:
         self.assertEqual(_report_mime_type("markdown"), "text/markdown")
-        self.assertEqual(_report_mime_type("excel"), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        self.assertEqual(
+            _report_mime_type("excel"),
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
         self.assertEqual(_report_mime_type("pdf"), "application/pdf")
+        self.assertEqual(_report_mime_type("chart_png"), "image/png")
+        self.assertEqual(_report_mime_type("chart_svg"), "image/svg+xml")
 
     def _temporary_output_dir(self):
         from pathlib import Path

@@ -8,13 +8,15 @@ import urllib.request
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from dotenv import dotenv_values
 
 from qwopus_agent.analysis.excel_processing import read_spreadsheet
 from qwopus_agent.analysis.pandas_sandbox import execute_pandas_code
-from qwopus_agent.memory import MiniRAG
+
+if TYPE_CHECKING:
+    from qwopus_agent.memory import MiniRAG
 
 
 @dataclass

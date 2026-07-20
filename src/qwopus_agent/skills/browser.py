@@ -48,7 +48,10 @@ class BrowserAutomationSkill(BaseSkill):
             if action == "open":
                 url = str(request.arguments.get("url", "")).strip()
                 if not url:
-                    return SkillResponse(success=False, content="browser.open requires arguments.url.")
+                    return SkillResponse(
+                        success=False,
+                        content="browser.open requires arguments.url.",
+                    )
                 # 原因：浏览器自动化具体实现可能来自 Playwright、Chrome 插件或桌面工具。
                 # 作用：Skill 只处理动作路由，避免核心 Agent 绑定某个浏览器后端。
                 content = self.provider.open(url)

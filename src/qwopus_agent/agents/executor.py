@@ -42,7 +42,8 @@ class ExecutionResult:
 class Executor:
     """Executes plan steps through registered skills."""
 
-    # Reason: Dependency injection allows tests to provide fake skills and production to auto-discover.
+    # Reason: Dependency injection allows tests to provide fake skills while production can
+    # auto-discover its real skills.
     skill_registry: SkillRegistry
 
     async def execute(self, plan: Plan, context: dict[str, Any] | None = None) -> ExecutionResult:

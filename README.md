@@ -3,14 +3,17 @@
 Qwopus-Agent is a local-first, modular AI Agent framework designed for Apple Silicon Mac
 workflows and MLX-hosted OpenAI-compatible local models.
 
-The project is intentionally interface-first. The first milestone focuses on clean software
-architecture rather than advanced agent behavior:
+The project is interface-first and keeps orchestration, skills, memory, and UI independently
+testable:
 
 - unified LLM abstraction through `BaseLLM`
 - provider-neutral model creation through `LLMConfig` and `LLMRegistry`
 - local MLX model adapter through `LocalMLXLLM`
-- tool abstraction through `BaseTool`
-- minimal Planner, Executor, and Agent Loop skeleton
+- reusable capability abstraction through `BaseSkill` and automatic discovery
+- separate Planner, Executor, and Agent Router
+- supervised Multi-Agent delegation, shared state, parallel waves, debate, and arbitration
+- validated, versioned, persistent Workflow Skill growth
+- real Markdown, Excel, PNG/SVG chart, and PDF report artifacts
 - working module boundaries for memory, reflection, skills, reports, prompts, storage, and logs
 - runnable tests for the core contracts
 
@@ -18,11 +21,11 @@ architecture rather than advanced agent behavior:
 
 ```text
 src/qwopus_agent/
-  agent/        Planner, Executor, and AgentLoop skeleton
+  agents/       Planner, Executor, Router, research, and supervised Multi-Agent orchestration
   llm/          BaseLLM interface and LocalMLXLLM adapter
-  tools/        BaseTool interface and tool registry
-  memory/       MiniRAG facade with local JSONL persistence
-  skills/       Reusable skill system and auto-discovery registry
+  memory/       MiniRAG vectors, persistent knowledge graph, and multi-hop queries
+  skills/       Reusable, auto-discovered, and learned Workflow Skills
+  services/     UI-independent analysis and knowledge lifecycle workflows
   reflection/   Lightweight task reflection evaluator
   reports/      Unified report generation module
   prompts/      Prompt templates and system prompt assets
@@ -36,7 +39,8 @@ logs/           Runtime logs, ignored by Git except .gitkeep
 ```bash
 python3.11 -m venv .venv
 source .venv/bin/activate
-pip install -e ".[dev]"
+pip install -e vendor/MiniRAG-main
+pip install -e ".[dev,ui]"
 pytest
 ```
 
@@ -95,8 +99,8 @@ PYTHONPATH=src python3.11 -m qwopus_agent.integrations.smolagents_smoke \
   "用一句中文回答：你是否已经连接到本地大模型？"
 ```
 
-This smoke test intentionally creates a smolagents `CodeAgent` with no tools. MiniRAG ingestion,
-LLM-based document reasoning, and report generation remain separate milestones.
+This smoke test intentionally creates a smolagents `CodeAgent` with no tools. The Streamlit workflow
+then injects document, pandas sandbox, MiniRAG, graph, and Tavily capabilities as bounded tools.
 
 ## Streamlit Chat And Upload Analysis
 
@@ -117,7 +121,10 @@ The Streamlit page provides:
 - conversation history passed into smolagents through `run_smolagents_chat_turn`
 - upload analysis for PDF, DOCX, Markdown, TXT, CSV, XLSX, and XLS files
 - local pandas spreadsheet inspection with schema, sample rows, and numeric summaries
-- Markdown previews for parsed unstructured documents
+- MinerU-backed PDF/image parsing with Markdown normalization
+- persistent vector and knowledge-graph retrieval with source/page evidence
+- entity-type filtering, directed graph visualization, and DOT download
+- per-source update, deletion, and derived-index rebuild controls
 
 Manual checks:
 
@@ -130,20 +137,35 @@ Manual checks:
 
 Runtime MiniRAG data lives under `storage/minirag`. Uploaded Markdown-normalized documents and safe
 spreadsheet summaries are inserted through the `MiniRAG.insert(document)` facade, and later analysis
-can retrieve existing context through `MiniRAG.search(query)`.
+can retrieve existing context through `MiniRAG.search(query)`. The facade uses MiniRAG's persistent
+NanoVectorDB backend and a local multilingual sentence-transformer, so retrieval does not depend on
+the Gemma, Qwen, or other chat model currently served by the OpenAI-compatible endpoint. The installed
+`minirag-hku` package is linked to `vendor/MiniRAG-main`; Qwopus adds a persistent directed graph layer
+for evidence-bound entities, relations, cross-document aggregation, and bounded multi-hop paths.
 
-Reports are generated through one module, `qwopus_agent.reports.ReportGenerator`, which currently
-creates Markdown, Excel workbooks, a chart manifest, and a minimal PDF artifact under
-`storage/reports`.
+Download the default embedding model once before the first document upload:
 
-Reflection and research orchestration are intentionally lightweight in this milestone:
+```bash
+python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2')"
+```
+
+After that initial download, indexing and search run locally. Set `QWOPUS_EMBEDDING_MODEL` to another
+locally cached sentence-transformer when needed; changing it automatically rebuilds only the derived
+vector index while preserving the original JSONL documents.
+
+Reports are generated through `qwopus_agent.reports.ReportGenerator`, which creates Markdown, Excel
+workbooks, real PNG/SVG charts, and a PDF artifact under `storage/reports`.
+
+Reflection and research orchestration remain independently testable:
 
 - `TaskReflectionEvaluator` checks basic execution quality and trace completeness.
-- `ResearchAgent` reuses `AgentRouter` and reflection instead of introducing browser automation or
-  multi-agent workflows.
+- `ResearchAgent` reuses `AgentRouter` and reflection.
+- `MultiAgentSupervisor` owns delegation, dependency-aware parallel execution, shared state, debate,
+  and conflict arbitration.
+- `SkillGrowthService` extracts repeated successful traces into validated, versioned Workflow Skills.
 
-## Milestone 1 Scope
+## Current Scope
 
-This stage deliberately avoids browser automation, multi-agent systems, and production-grade web
-research. Web search has a provider-independent Skill interface, but a real search provider must be
-injected before it can access external search results.
+Tavily provides live web search through smolagents. A browser provider still needs to be injected for
+full browser automation; the core Browser Skill intentionally does not bind the framework to one
+desktop or browser backend.

@@ -15,7 +15,6 @@ import pandas as pd
 from qwopus_agent.analysis.excel_processing import read_spreadsheet
 from qwopus_agent.documents.parser import ParsedDocument, parse_document
 
-
 SPREADSHEET_EXTENSIONS = {".csv", ".xlsx", ".xls"}
 
 
@@ -118,8 +117,14 @@ def _analyze_spreadsheet(path: Path, user_question: str = "") -> AnalysisResult:
                 f"- Rows: {len(df)}",
                 f"- Columns: {len(df.columns)}",
                 f"- Column names: {', '.join(str(column) for column in df.columns)}",
-                f"- Numeric columns: {', '.join(metadata['sheets'][sheet_name]['numeric_columns']) or 'None'}",
-                f"- Categorical columns: {', '.join(metadata['sheets'][sheet_name]['categorical_columns']) or 'None'}",
+                (
+                    "- Numeric columns: "
+                    f"{', '.join(metadata['sheets'][sheet_name]['numeric_columns']) or 'None'}"
+                ),
+                (
+                    "- Categorical columns: "
+                    f"{', '.join(metadata['sheets'][sheet_name]['categorical_columns']) or 'None'}"
+                ),
                 f"- Header row: {metadata['sheets'][sheet_name].get('header_row', 'default')}",
                 f"- Form pairs: {metadata['sheets'][sheet_name].get('form_pairs', 0)}",
             ]

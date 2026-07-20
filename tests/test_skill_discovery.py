@@ -14,6 +14,7 @@ class SkillDiscoveryTests(unittest.TestCase):
                 "document_parser",
                 "excel_analysis",
                 "excel_schema",
+                "graph_search",
                 "rag_search",
                 "web_search",
             ],

@@ -5,6 +5,7 @@ from __future__ import annotations
 from html import escape
 from pathlib import Path
 
+import pandas as pd
 import streamlit as st
 
 from qwopus_agent.analysis import AnalysisResult
@@ -13,16 +14,28 @@ from qwopus_agent.integrations.smolagents_runtime import (
     check_model_connection,
     resolve_model_settings,
 )
+from qwopus_agent.llm.openai_compatible import OpenAICompatibleLLM
 from qwopus_agent.memory import MiniRAG
+from qwopus_agent.memory.graph_extraction import (
+    CompositeGraphExtractor,
+    LLMGraphExtractor,
+    RuleBasedGraphExtractor,
+)
 from qwopus_agent.reports import GeneratedReport, ReportGenerator
-from qwopus_agent.services import UploadedFileInput, analyze_uploaded_files, start_chat_task
+
+# 原因：Streamlit 热重载期间 services 包可能保留半初始化状态，导致新导出暂时不可见。
+# 作用：UI 直接依赖具体服务模块，避免通过 package barrel 读取缓存属性。
+from qwopus_agent.services.analysis_service import UploadedFileInput, analyze_uploaded_files
+from qwopus_agent.services.chat_service import start_chat_task
+from qwopus_agent.services.knowledge_graph_service import KnowledgeGraphService
+from qwopus_agent.services.knowledge_maintenance_service import KnowledgeMaintenanceService
 from qwopus_agent.utils.conversation_log import append_conversation_event, load_chat_messages
 from qwopus_agent.utils.logging_config import configure_runtime_logging, get_logger
 
 logger = get_logger("ui.streamlit_chat")
 
 
-def _init_session_state() -> None:
+def _init_session_state(settings: SmolagentsModelSettings) -> None:
     if "messages" not in st.session_state:
         st.session_state.messages = load_chat_messages()
     if "analysis_result" not in st.session_state:
@@ -32,11 +45,33 @@ def _init_session_state() -> None:
     if "analysis_report" not in st.session_state:
         st.session_state.analysis_report = None
     if "minirag" not in st.session_state:
-        st.session_state.minirag = MiniRAG()
+        st.session_state.minirag = MiniRAG(
+            graph_extractor=_build_graph_extractor(settings)
+        )
     if "chat_task" not in st.session_state:
         st.session_state.chat_task = None
     if "chat_task_notice" not in st.session_state:
         st.session_state.chat_task_notice = None
+
+
+def _build_graph_extractor(settings: SmolagentsModelSettings) -> CompositeGraphExtractor:
+    def create_llm() -> OpenAICompatibleLLM:
+        current = resolve_model_settings(settings)
+        return OpenAICompatibleLLM(
+            model=current.model_id,
+            base_url=current.base_url,
+            api_key=current.api_key,
+            timeout_seconds=current.timeout_seconds,
+        )
+
+    # 原因：普通文档需要 LLM 抽取自然语言关系，但模型服务与模型 id 会动态变化。
+    # 作用：每批抽取实时解析当前模型，同时保留离线规则抽取作为无网络降级路径。
+    return CompositeGraphExtractor(
+        extractors=(
+            RuleBasedGraphExtractor(),
+            LLMGraphExtractor(llm_factory=create_llm),
+        )
+    )
 
 
 def _render_sidebar(settings: SmolagentsModelSettings) -> None:
@@ -230,7 +265,8 @@ def _report_mime_type(kind: str) -> str:
     return {
         "markdown": "text/markdown",
         "excel": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        "charts": "text/markdown",
+        "chart_png": "image/png",
+        "chart_svg": "image/svg+xml",
         "pdf": "application/pdf",
     }.get(kind, "application/octet-stream")
 
@@ -323,24 +359,107 @@ def _render_upload_analysis(settings: SmolagentsModelSettings) -> None:
             _render_debug_steps(st.session_state.analysis_debug_steps)
 
 
+def _render_knowledge_graph(minirag: MiniRAG) -> None:
+    service = KnowledgeGraphService()
+    st.subheader("知识图谱")
+    entity_types = service.entity_types()
+    controls = st.columns([2, 3])
+    selected_type = controls[0].selectbox(
+        "实体类型",
+        ["全部", *entity_types],
+    )
+    max_nodes = controls[1].slider("最大节点数", min_value=20, max_value=300, value=100)
+    snapshot = service.snapshot(
+        entity_type=None if selected_type == "全部" else selected_type,
+        max_nodes=max_nodes,
+    )
+    evidence_rows = service.evidence_rows(snapshot)
+
+    metrics = st.columns(3)
+    metrics[0].metric("实体", str(len(snapshot.nodes)))
+    metrics[1].metric("关系", str(len(snapshot.edges)))
+    metrics[2].metric(
+        "来源",
+        str(len({str(row["source"]) for row in evidence_rows})),
+    )
+    _render_knowledge_maintenance(minirag)
+    if not snapshot.nodes:
+        st.info("当前筛选条件下暂无图谱数据。")
+        return
+
+    dot = service.to_dot(snapshot)
+    # 原因：图结构必须保留关系方向，普通表格无法直观看出多跳路径。
+    # 作用：Graphviz 在前端绘制有向节点/边，同时 DOT 可下载用于外部审计。
+    st.graphviz_chart(dot, width="stretch")
+    st.download_button(
+        "下载 DOT",
+        data=dot.encode("utf-8"),
+        file_name="qwopus_knowledge_graph.dot",
+        mime="text/vnd.graphviz",
+    )
+    if evidence_rows:
+        with st.expander("关系证据", expanded=False):
+            st.markdown(
+                _dataframe_to_safe_html(pd.DataFrame(evidence_rows)),
+                unsafe_allow_html=True,
+            )
+
+
+
+def _render_knowledge_maintenance(minirag: MiniRAG) -> None:
+    """Render destructive knowledge operations independently from graph availability."""
+    maintenance = KnowledgeMaintenanceService(minirag)
+    with st.expander("知识库维护", expanded=False):
+        sources = maintenance.list_sources()
+        selected_source = st.selectbox(
+            "文件来源",
+            sources or ["暂无来源"],
+            disabled=not sources,
+        )
+        confirm_delete = st.checkbox(
+            "确认删除所选来源",
+            value=False,
+            disabled=not sources,
+        )
+        actions = st.columns(2)
+        # 原因：空图可能来自索引损坏，此时也必须保留重建入口。
+        # 作用：维护区不依赖可视化节点数量，删除仍要求用户显式确认。
+        if actions[0].button(
+            "删除来源",
+            disabled=not sources or not confirm_delete,
+            width="stretch",
+        ):
+            deleted = maintenance.delete_source(selected_source)
+            st.success(f"已删除 {deleted} 条文档记录。")
+            st.rerun()
+        if actions[1].button("重建索引", width="stretch"):
+            with st.spinner("正在从持久化文档重建索引..."):
+                maintenance.rebuild_indexes()
+            st.success("索引重建完成。")
+            st.rerun()
+
+
 def main() -> None:
     configure_runtime_logging()
     logger.info("streamlit_app_started")
     st.set_page_config(page_title="Qwopus-Agent", page_icon="💬", layout="wide")
     st.title("Qwopus-Agent 本地办公助手")
     st.caption(
-        "当前阶段：smolagents 对话 + 文档/Excel 上传分析 + MiniRAG 入库检索。报告生成仍为后续模块。"
+        "当前阶段：smolagents 对话 + 文档/Excel 上传分析 + MiniRAG 语义检索 + 报告下载。"
     )
 
-    _init_session_state()
     # 原因：用户会在同一个服务器地址上频繁切换模型。
     # 作用：Streamlit 每次重跑都从 /models 刷新侧边栏和后续请求使用的模型 id。
     settings = resolve_model_settings(SmolagentsModelSettings.from_env())
+    _init_session_state(settings)
     _render_sidebar(settings)
-    analysis_tab, chat_tab = st.tabs(["文档分析", "对话测试"])
+    analysis_tab, graph_tab, chat_tab = st.tabs(["文档分析", "知识图谱", "对话测试"])
 
     with analysis_tab:
         _render_upload_analysis(settings)
+
+    with graph_tab:
+        _render_knowledge_graph(st.session_state.minirag)
 
     with chat_tab:
         enable_web_search = st.checkbox("联网搜索", value=False)

@@ -42,7 +42,9 @@ class TaskReflectionEvaluator:
             suggestions.append("Ask the executor or model to produce a final answer.")
         elif len(answer.strip()) < self.min_answer_chars:
             observations.append("Final answer is very short.")
-            suggestions.append("Request a more complete answer when the user did not ask for brevity.")
+            suggestions.append(
+                "Request a more complete answer when the user did not ask for brevity."
+            )
         if not step_names:
             observations.append("No execution steps were recorded.")
             suggestions.append("Route the task through Planner and Executor for traceability.")

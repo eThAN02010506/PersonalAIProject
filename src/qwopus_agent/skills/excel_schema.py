@@ -7,7 +7,6 @@ from pathlib import Path
 from typing import Any
 
 from qwopus_agent.analysis.excel_processing import read_spreadsheet
-
 from qwopus_agent.skills.base import BaseSkill, SkillRequest, SkillResponse
 
 

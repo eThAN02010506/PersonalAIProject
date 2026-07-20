@@ -39,7 +39,8 @@ else:
     class SkillRequest(BaseModel):
         """Typed input passed from Executor to a Skill."""
 
-        # Reason: Skills must receive structured inputs so the Executor never depends on ad hoc kwargs.
+        # Reason: Skills receive structured inputs so the Executor never depends on ad hoc
+        # keyword arguments.
         model_config = ConfigDict(frozen=True)
 
         # Role: Natural-language task or search query for the skill.

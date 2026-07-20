@@ -118,9 +118,13 @@ def analyze_uploaded_files(
             )
             debug_steps.append(f"MiniRAG 检索完成：命中 {len(memory_results)} 条已有知识。")
 
-        # 原因：上传后的 Markdown/Excel 安全摘要需要进入统一知识层。
-        # 作用：后续分析可以通过 MiniRAG.search(query) 复用已上传内容。
-        minirag.insert(result.markdown_document)
+        # 原因：合并多文件后再入库会让单个文件无法安全更新或删除。
+        # 作用：每份解析结果按原文件名独立入库，当前 LLM 上下文仍保留合并视图。
+        for file_name, analysis_result in analyzed_results:
+            if analysis_result.markdown_document:
+                minirag.insert(
+                    f"# File: {file_name}\n\n{analysis_result.markdown_document}"
+                )
         # 原因：第八步要求上传内容进入知识层，但主界面不能暴露原始检索内容。
         # 作用：只把入库状态和命中数写入 metadata，供 UI 展示轻量状态。
         result.metadata["minirag_inserted"] = True

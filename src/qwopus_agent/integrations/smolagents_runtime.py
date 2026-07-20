@@ -17,8 +17,6 @@ from typing import Any
 
 from dotenv import load_dotenv
 
-from qwopus_agent.integrations.smolagents_tools import build_tavily_search_tool
-
 load_dotenv()
 
 
@@ -29,6 +27,19 @@ class SmolagentsDependencyError(RuntimeError):
 ChatMessage = dict[str, str]
 CHAT_HISTORY_MAX_MESSAGES = 8
 CHAT_HISTORY_MAX_CHARS = 4000
+
+
+def build_tavily_search_tool(
+    progress_callback: Callable[[str], None] | None = None,
+) -> Any:
+    """Load the Tavily Tool factory only when web search is enabled."""
+    # 原因：普通聊天不需要 Excel、文档或 MiniRAG Tool 依赖。
+    # 作用：关闭联网时避免加载完整工具模块，同时保留可测试的工厂注入点。
+    from qwopus_agent.integrations.smolagents_tools import (
+        build_tavily_search_tool as create_tool,
+    )
+
+    return create_tool(progress_callback=progress_callback)
 
 
 @dataclass(frozen=True)
