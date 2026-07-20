@@ -42,6 +42,35 @@ def build_tavily_search_tool(
     return create_tool(progress_callback=progress_callback)
 
 
+def build_local_knowledge_tools(
+    progress_callback: Callable[[str], None] | None = None,
+) -> list[Any]:
+    """Build chat tools over the persisted MiniRAG and knowledge graph stores."""
+    from qwopus_agent.integrations.smolagents_tools import (
+        build_graph_search_tool,
+        build_minirag_search_tool,
+    )
+    from qwopus_agent.memory import MiniRAG
+    from qwopus_agent.memory.graph_backend import PersistentKnowledgeGraph
+    from qwopus_agent.memory.graph_extraction import RuleBasedGraphExtractor
+    from qwopus_agent.memory.knowledge_graph import (
+        DEFAULT_KNOWLEDGE_GRAPH_PATH,
+        KnowledgeGraphIndex,
+    )
+
+    # 原因：聊天运行在独立 spawn 进程，不能安全复用 Streamlit session 中的原生向量对象。
+    # 作用：每次启用本地知识时从持久化文件加载只属于当前聊天进程的检索实例。
+    minirag = MiniRAG()
+    graph_index = KnowledgeGraphIndex(
+        graph=PersistentKnowledgeGraph(DEFAULT_KNOWLEDGE_GRAPH_PATH),
+        extractor=RuleBasedGraphExtractor(),
+    )
+    return [
+        build_minirag_search_tool(minirag, progress_callback=progress_callback),
+        build_graph_search_tool(graph_index, progress_callback=progress_callback),
+    ]
+
+
 @dataclass(frozen=True)
 class SmolagentsModelSettings:
     """Configuration for OpenAI-compatible model server."""
@@ -316,34 +345,74 @@ def run_agent_chat_turn(
     history: list[ChatMessage],
     settings: SmolagentsModelSettings | None = None,
     enable_web_search: bool = False,
+    enable_local_knowledge: bool = False,
     progress_callback: Callable[[str], None] | None = None,
 ) -> str:
     """Run one chat turn through smolagents as the Agent driver."""
-    tools = (
-        [build_tavily_search_tool(progress_callback=progress_callback)]
-        if enable_web_search
-        else []
-    )
+    tools: list[Any] = []
+    if enable_web_search:
+        tools.append(build_tavily_search_tool(progress_callback=progress_callback))
+    if enable_local_knowledge:
+        tools.extend(build_local_knowledge_tools(progress_callback=progress_callback))
     agent = build_smolagents_tool_calling_agent(settings=settings, tools=tools)
     prompt = format_agent_chat_prompt(
         history=history,
         user_message=user_message,
         enable_web_search=enable_web_search,
+        enable_local_knowledge=enable_local_knowledge,
     )
     if progress_callback is not None:
         progress_callback("planning")
-    # 原因：部分模型会反复调用同一个搜索 Tool，直到耗尽默认步数和上下文。
-    # 作用：一次搜索加一次 final_answer 已足够，保留两步纠错余量并阻止无界循环。
-    result = agent.run(prompt, max_steps=4 if enable_web_search else 2)
+    # 原因：同时启用联网和本地知识时，Agent 可能各调用一次 Tool 后才生成最终答案。
+    # 作用：为必要的两次检索留出收尾步骤，同时继续用硬上限阻止重复调用循环。
+    max_steps = 6 if enable_web_search and enable_local_knowledge else 4
+    run_result = agent.run(
+        prompt,
+        max_steps=max_steps if tools else 2,
+        return_full_result=True,
+    )
+    answer, state, steps = _unpack_agent_run_result(run_result)
+    tool_calls = _extract_agent_tool_calls(steps)
+    final_answer = _extract_final_answer(answer)
+
+    local_tool_used = bool({"rag_search", "graph_search"}.intersection(tool_calls))
+    needs_refinement = (
+        not final_answer
+        or _looks_like_tool_observation(final_answer)
+        or state == "max_steps_error"
+        or (local_tool_used and len(final_answer) < 80)
+    )
+    if needs_refinement:
+        # 原因：部分本地模型能正确调用检索 Tool，却会把最终答案压缩成一句并遗漏来源。
+        # 作用：只对不完整结果保留现有 Observation 收敛一次，正常回答不增加模型延迟。
+        retry_result = agent.run(
+            (
+                "Continue from the existing tool observations and answer the original user "
+                "question now. Do not repeat a successful tool call. Return only a complete "
+                "natural-language final answer in the user's language. State the conclusion, "
+                "explain the relevant relationship or evidence, and explicitly cite every "
+                "available local source file and page. Never expose Observation, Thought, tool "
+                "logs, or drafts."
+            ),
+            reset=False,
+            max_steps=2,
+            return_full_result=True,
+        )
+        retry_answer, _, _ = _unpack_agent_run_result(retry_result)
+        final_answer = _extract_final_answer(retry_answer)
+
     if progress_callback is not None:
         progress_callback("completed")
-    return _extract_final_answer(str(result))
+    if not final_answer or _looks_like_tool_observation(final_answer):
+        raise RuntimeError("smolagents did not produce a final chat answer after tool execution.")
+    return final_answer
 
 
 def format_agent_chat_prompt(
     history: list[ChatMessage],
     user_message: str,
     enable_web_search: bool,
+    enable_local_knowledge: bool = False,
 ) -> str:
     """Build a single task prompt for smolagents Agent chat."""
     lines = [
@@ -364,11 +433,6 @@ def format_agent_chat_prompt(
             "answer directly, then explain key facts, context or practical implications, and "
             "include available source links. Do not reduce the answer to a short bullet list."
         ),
-        (
-            "Chat cannot automatically access previously uploaded files or MiniRAG. "
-            "Ask the user to upload files on the document analysis page when their content "
-            "is needed."
-        ),
     ]
     if enable_web_search:
         # 原因：部分模型会把“详细回答”仍压缩成几条短句，尤其是中文输出。
@@ -386,6 +450,23 @@ def format_agent_chat_prompt(
         )
     else:
         lines.append("Internet search is disabled; do not claim that you searched the web.")
+
+    if enable_local_knowledge:
+        # 原因：语义检索和图路径检索解决不同问题，模型需要明确的工具选择边界。
+        # 作用：内容问题使用 rag_search，实体关系问题使用 graph_search，并在检索后总结。
+        lines.append(
+            "Previously uploaded local knowledge is available. Use rag_search for semantic "
+            "document evidence. Use graph_search for named-entity relationships, cross-document "
+            "links, or multi-hop paths. Do not call both unless both evidence types are necessary. "
+            "After a successful Observation, synthesize it into the final answer and cite the "
+            "available local source names or pages; never expose raw Observation text."
+        )
+    else:
+        lines.append(
+            "Local knowledge access is disabled. Chat cannot access previously uploaded files or "
+            "MiniRAG; ask the user to enable local knowledge or upload files on the document "
+            "analysis page when their content is needed."
+        )
 
     if history:
         lines.append("\nRECENT CONVERSATION:")

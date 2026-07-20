@@ -102,6 +102,7 @@ def _start_user_input(
     user_input: str,
     settings: SmolagentsModelSettings,
     enable_web_search: bool = False,
+    enable_local_knowledge: bool = False,
 ) -> None:
     logger.info("chat_message_received length=%s", len(user_input))
     st.session_state.messages.append({"role": "user", "content": user_input})
@@ -120,6 +121,7 @@ def _start_user_input(
         history=history,
         settings=settings,
         enable_web_search=enable_web_search,
+        enable_local_knowledge=enable_local_knowledge,
     )
     st.rerun()
 
@@ -165,6 +167,7 @@ def _render_chat_progress() -> None:
         "connecting": "正在启动 Agent",
         "planning": "正在规划工具调用",
         "searching": "正在通过 Tavily 搜索",
+        "retrieving": "正在检索本地知识库",
         "generating": "正在生成最终答案",
     }
     label = phase_labels.get(phase, "正在处理")
@@ -462,7 +465,11 @@ def main() -> None:
         _render_knowledge_graph(st.session_state.minirag)
 
     with chat_tab:
-        enable_web_search = st.checkbox("联网搜索", value=False)
+        chat_options = st.columns(2)
+        enable_web_search = chat_options[0].toggle("联网搜索", value=False)
+        # 原因：本地文件可能包含敏感信息，聊天不应在用户不知情时自动检索。
+        # 作用：用户显式开启后，smolagents 才能选择 MiniRAG 或知识图谱 Tool。
+        enable_local_knowledge = chat_options[1].toggle("使用本地知识库", value=False)
         _render_history()
         _render_chat_notice()
         _render_chat_progress()
@@ -475,6 +482,7 @@ def main() -> None:
                 user_input,
                 settings,
                 enable_web_search=enable_web_search,
+                enable_local_knowledge=enable_local_knowledge,
             )
 
 

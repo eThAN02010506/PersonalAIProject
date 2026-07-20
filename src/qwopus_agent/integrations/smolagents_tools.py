@@ -17,6 +17,7 @@ from qwopus_agent.analysis.pandas_sandbox import execute_pandas_code
 
 if TYPE_CHECKING:
     from qwopus_agent.memory import MiniRAG
+    from qwopus_agent.memory.knowledge_graph import KnowledgeGraphIndex
 
 
 @dataclass
@@ -242,6 +243,7 @@ def build_minirag_search_tool(
     minirag: MiniRAG,
     max_results: int = 3,
     max_chars: int = 6000,
+    progress_callback: Callable[[str], None] | None = None,
 ) -> Any:
     """Expose MiniRAG.search(query) as a bounded smolagents Tool."""
     Tool = _smolagents_tool_class()
@@ -261,6 +263,8 @@ def build_minirag_search_tool(
         output_type = "string"
 
         def forward(self, query: str) -> str:
+            if progress_callback is not None:
+                progress_callback("retrieving")
             results = minirag.search(query)[:max_results]
             if not results:
                 return "No relevant MiniRAG results."
@@ -270,13 +274,90 @@ def build_minirag_search_tool(
             ]
             # 原因：知识库可能含有多份长文档，检索 Tool 不能把所有原文灌入一次推理。
             # 作用：限制结果数量和总长度，同时保持 MiniRAG 对外仍只有 search(query)。
-            return _bounded_text(
+            bounded = _bounded_text(
                 "\n\n".join(sections),
                 max_chars=max_chars,
                 truncation_message="[MiniRAG results truncated by the tool.]",
             )
+            if progress_callback is not None:
+                progress_callback("generating")
+            return bounded
 
     return MiniRAGSearchTool()
+
+
+def build_graph_search_tool(
+    index: KnowledgeGraphIndex,
+    max_hops: int = 4,
+    max_results: int = 5,
+    max_chars: int = 6000,
+    progress_callback: Callable[[str], None] | None = None,
+) -> Any:
+    """Expose bounded persistent graph traversal as a smolagents Tool."""
+    Tool = _smolagents_tool_class()
+
+    class KnowledgeGraphSearchTool(Tool):  # type: ignore[misc, valid-type]
+        name = "graph_search"
+        description = (
+            "Search explicit entity relationships, cross-document evidence, and multi-hop "
+            "paths in the persistent local knowledge graph. Use this instead of rag_search "
+            "when the question asks how named entities are related."
+        )
+        inputs = {
+            "query": {
+                "type": "string",
+                "description": "A relationship or graph-path question containing entity names.",
+            }
+        }
+        output_type = "string"
+
+        def forward(self, query: str) -> str:
+            if progress_callback is not None:
+                progress_callback("retrieving")
+            paths = index.search(query, max_hops=max_hops, limit=max_results)
+            if not paths:
+                return "No matching knowledge-graph path was found."
+
+            # 原因：Agent 需要关系方向和出处才能可靠回答多跳问题，不能只返回节点名称。
+            # 作用：把每条路径及其原文证据压缩为有上限的 Markdown Observation。
+            sections = [
+                _render_graph_path(path, number=number)
+                for number, path in enumerate(paths, start=1)
+            ]
+            bounded = _bounded_text(
+                "\n\n".join(sections),
+                max_chars=max_chars,
+                truncation_message="[Knowledge-graph results truncated by the tool.]",
+            )
+            if progress_callback is not None:
+                progress_callback("generating")
+            return bounded
+
+    return KnowledgeGraphSearchTool()
+
+
+def _render_graph_path(path: Any, *, number: int) -> str:
+    """Render one graph path with directed edges and auditable citations."""
+    names_by_id = dict(zip(path.entity_ids, path.entity_names, strict=False))
+    edges = [
+        (
+            f"{names_by_id[relation.source_id]} -[{relation.relation}]-> "
+            f"{names_by_id[relation.target_id]}"
+        )
+        for relation in path.relations
+    ]
+    evidence_lines = []
+    for evidence in path.evidence:
+        citation = evidence.source
+        if evidence.page is not None:
+            citation += f", page {evidence.page}"
+        evidence_lines.append(f"- [{citation}] {evidence.text}")
+    return (
+        f"## Knowledge Graph Path {number}\n\n"
+        + "\n".join(f"- {edge}" for edge in edges)
+        + "\n\n### Evidence\n\n"
+        + "\n".join(evidence_lines)
+    )
 
 
 def _format_tavily_results(payload: dict[str, Any], max_results: int) -> str:

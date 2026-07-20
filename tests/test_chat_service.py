@@ -13,6 +13,7 @@ class ChatServiceTests(unittest.TestCase):
         settings = SmolagentsModelSettings(model_id="test", base_url="http://local/v1")
 
         def fake_run_agent_chat_turn(**kwargs):
+            self.assertTrue(kwargs["enable_local_knowledge"])
             kwargs["progress_callback"]("planning")
             kwargs["progress_callback"]("completed")
             return "finished reply"
@@ -27,6 +28,7 @@ class ChatServiceTests(unittest.TestCase):
                 "question",
                 [],
                 settings,
+                True,
                 True,
             )
 

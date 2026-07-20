@@ -13,9 +13,14 @@ from qwopus_agent.integrations.smolagents_tools import (
     build_document_parser_tool,
     build_excel_analysis_tool,
     build_excel_schema_tool,
+    build_graph_search_tool,
     build_minirag_search_tool,
     build_tavily_search_tool,
 )
+from qwopus_agent.memory.graph_backend import PersistentKnowledgeGraph
+from qwopus_agent.memory.graph_extraction import RuleBasedGraphExtractor
+from qwopus_agent.memory.graph_models import GraphChunk
+from qwopus_agent.memory.knowledge_graph import KnowledgeGraphIndex
 from tests.minirag_fakes import make_test_minirag
 
 
@@ -132,6 +137,39 @@ class SmolagentsToolsTests(unittest.TestCase):
 
         self.assertIn("MiniRAG Result 1", result)
         self.assertIn("local project knowledge", result)
+
+    def test_graph_tool_returns_directed_path_and_source_evidence(self) -> None:
+        fake_module = types.SimpleNamespace(Tool=FakeTool)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            index = KnowledgeGraphIndex(
+                graph=PersistentKnowledgeGraph(Path(tmpdir) / "knowledge_graph.json"),
+                extractor=RuleBasedGraphExtractor(),
+            )
+            index.insert(
+                (
+                    GraphChunk(
+                        id="chunk-1",
+                        document_id="doc-1",
+                        source="ownership.pdf",
+                        page="4",
+                        content=(
+                            "[[Company A|Organization]] -[owns]-> "
+                            "[[Company B|Organization]]"
+                        ),
+                    ),
+                )
+            )
+            phases: list[str] = []
+            with patch.dict(sys.modules, {"smolagents": fake_module}):
+                tool = build_graph_search_tool(index, progress_callback=phases.append)
+
+            result = tool.forward("How is Company A related to Company B?")
+
+        # 原因：聊天中的关系问题必须通过真实图遍历，而不是依赖向量结果碰巧包含整条路径。
+        # 作用：锁定有向边、文件页码证据及 UI 检索进度三个可观察结果。
+        self.assertIn("Company A -[owns]-> Company B", result)
+        self.assertIn("ownership.pdf, page 4", result)
+        self.assertEqual(phases, ["retrieving", "generating"])
 
 
 if __name__ == "__main__":

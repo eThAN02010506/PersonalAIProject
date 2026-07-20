@@ -81,6 +81,7 @@ def start_chat_task(
     history: list[ChatMessage],
     settings: SmolagentsModelSettings,
     enable_web_search: bool,
+    enable_local_knowledge: bool = False,
 ) -> BackgroundChatTask:
     """Start one cancelable Agent request in a spawned process."""
     context = multiprocessing.get_context("spawn")
@@ -95,6 +96,7 @@ def start_chat_task(
             history,
             settings,
             enable_web_search,
+            enable_local_knowledge,
         ),
         daemon=True,
     )
@@ -114,6 +116,7 @@ def _run_chat_task(
     history: list[ChatMessage],
     settings: SmolagentsModelSettings,
     enable_web_search: bool,
+    enable_local_knowledge: bool = False,
 ) -> None:
     """Run the synchronous Agent inside the cancelable worker process."""
 
@@ -126,6 +129,7 @@ def _run_chat_task(
             history=history,
             settings=settings,
             enable_web_search=enable_web_search,
+            enable_local_knowledge=enable_local_knowledge,
             progress_callback=report_progress,
         )
     except Exception as exc:

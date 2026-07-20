@@ -164,6 +164,103 @@ class SmolagentsRuntimeTests(unittest.TestCase):
         self.assertIn("Use tavily_search", FakeToolCallingAgent.last_instance.prompt)
         self.assertEqual(FakeToolCallingAgent.last_instance.run_kwargs["max_steps"], 4)
 
+    def test_run_agent_chat_turn_injects_local_knowledge_tools_when_enabled(self) -> None:
+        settings = SmolagentsModelSettings(
+            model_id="any-model",
+            base_url="http://127.0.0.1:8080/v1",
+        )
+        fake_tools = [object(), object()]
+
+        with patch(
+            "qwopus_agent.integrations.smolagents_runtime.build_local_knowledge_tools",
+            return_value=fake_tools,
+        ):
+            run_agent_chat_turn(
+                user_message="Company A 和 Company B 有什么关系？",
+                history=[],
+                settings=settings,
+                enable_local_knowledge=True,
+            )
+
+        # 原因：Streamlit 开关只负责授权，工具选择必须继续由 smolagents 驱动。
+        # 作用：证明本地知识开启后同时提供语义检索和图路径检索，并保留步数上限。
+        self.assertEqual(FakeToolCallingAgent.last_instance.tools, fake_tools)
+        self.assertIn("Use rag_search", FakeToolCallingAgent.last_instance.prompt)
+        self.assertIn("Use graph_search", FakeToolCallingAgent.last_instance.prompt)
+        self.assertEqual(FakeToolCallingAgent.last_instance.run_kwargs["max_steps"], 4)
+
+    def test_run_agent_chat_turn_allows_both_web_and_local_tools(self) -> None:
+        settings = SmolagentsModelSettings(
+            model_id="any-model",
+            base_url="http://127.0.0.1:8080/v1",
+        )
+        web_tool = object()
+        local_tools = [object(), object()]
+
+        with (
+            patch(
+                "qwopus_agent.integrations.smolagents_runtime.build_tavily_search_tool",
+                return_value=web_tool,
+            ),
+            patch(
+                "qwopus_agent.integrations.smolagents_runtime.build_local_knowledge_tools",
+                return_value=local_tools,
+            ),
+        ):
+            run_agent_chat_turn(
+                user_message="Compare local project facts with current web information.",
+                history=[],
+                settings=settings,
+                enable_web_search=True,
+                enable_local_knowledge=True,
+            )
+
+        self.assertEqual(FakeToolCallingAgent.last_instance.tools, [web_tool, *local_tools])
+        self.assertEqual(FakeToolCallingAgent.last_instance.run_kwargs["max_steps"], 6)
+
+    def test_run_agent_chat_turn_refines_short_local_knowledge_answer(self) -> None:
+        settings = SmolagentsModelSettings(
+            model_id="any-model",
+            base_url="http://127.0.0.1:8080/v1",
+        )
+        FakeToolCallingAgent.queued_results = [
+            types.SimpleNamespace(
+                output="Planner 路由到 work",
+                state="success",
+                steps=[
+                    {
+                        "step_number": 1,
+                        "tool_calls": [{"function": {"name": "graph_search"}}],
+                    }
+                ],
+            ),
+            types.SimpleNamespace(
+                output=(
+                    "Planner 通过 routes 关系把任务路由到 work。"
+                    "该关系来自 agent_notes.txt 中的原文证据。"
+                ),
+                state="success",
+                steps=[],
+            ),
+        ]
+
+        with patch(
+            "qwopus_agent.integrations.smolagents_runtime.build_local_knowledge_tools",
+            return_value=[object(), object()],
+        ):
+            result = run_agent_chat_turn(
+                user_message="说明 Planner 和 work 的关系并注明来源",
+                history=[],
+                settings=settings,
+                enable_local_knowledge=True,
+            )
+
+        # 原因：真实模型曾正确检索图谱，却只返回一句没有来源的答案。
+        # 作用：锁定短答案会基于既有 Observation 收敛一次，且不会重置 Agent memory。
+        self.assertIn("agent_notes.txt", result)
+        self.assertFalse(FakeToolCallingAgent.last_instance.run_kwargs["reset"])
+        self.assertEqual(FakeToolCallingAgent.last_instance.run_kwargs["max_steps"], 2)
+
     def test_format_agent_chat_prompt_keeps_recent_history(self) -> None:
         prompt = format_agent_chat_prompt(
             history=[{"role": "user", "content": "上一句"}],
@@ -182,6 +279,7 @@ class SmolagentsRuntimeTests(unittest.TestCase):
         # 作用：锁定多语言跟随与详细回答这两个 Prompt 行为约束。
         self.assertIn("Do not default to Chinese or English", prompt)
         self.assertIn("Do not reduce the answer to a short bullet list", prompt)
+        self.assertIn("Local knowledge access is disabled", prompt)
 
     def test_format_agent_chat_prompt_bounds_history_characters(self) -> None:
         prompt = format_agent_chat_prompt(
