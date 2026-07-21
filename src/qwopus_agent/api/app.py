@@ -15,6 +15,7 @@ from fastapi.staticfiles import StaticFiles
 
 from qwopus_agent.services.agent_orchestrator import AgentOrchestrator
 from qwopus_agent.services.orchestration_models import OrchestrationFile, OrchestrationRequest
+from qwopus_agent.utils.debug_store import DEFAULT_DEBUG_DIRECTORY, append_debug_record
 
 if TYPE_CHECKING:
     from qwopus_agent.memory import MiniRAG
@@ -43,10 +44,12 @@ def create_app(
     repository: ConversationRepository | None = None,
     minirag: MiniRAG | None = None,
     model_runtime: RuntimeModelController | None = None,
+    debug_directory: Path | None = None,
 ) -> FastAPI:
     """Build an independently testable API application."""
     repo = repository or ConversationRepository()
-    runs = ChatRunRegistry(repo)
+    debug_path = debug_directory if debug_directory is not None else DEFAULT_DEBUG_DIRECTORY
+    runs = ChatRunRegistry(repo, debug_directory=debug_path)
     memory = minirag
     memory_lock = Lock()
     runtime = model_runtime or RuntimeModelController()
@@ -196,6 +199,16 @@ def create_app(
             minirag=get_minirag(),
         )
         result = await asyncio.to_thread(orchestrator.run_sync, request)
+        # 原因：文档分析是同步 API 路径，不经过 ChatRunRegistry 的完成回调。
+        # 作用：把 MinerU/MiniRAG/Agent 的内部步骤写给只读 Console，同时不进入 AnalysisView。
+        append_debug_record(
+            source="document",
+            status="completed" if result.success else "failed",
+            result=result.final_answer,
+            trace=result.trace,
+            debug_runs=result.debug_runs,
+            directory=debug_path,
+        )
         if not result.success:
             raise HTTPException(status_code=500, detail=result.final_answer)
         reports = []

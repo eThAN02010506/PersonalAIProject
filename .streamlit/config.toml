@@ -1,4 +1,7 @@
 [server]
+# 原因：Debug Console 包含原始 Prompt、文档片段和 Tool Observation。
+# 作用：默认只允许本机访问，避免 Streamlit 将敏感调试信息暴露到局域网。
+address = "127.0.0.1"
 headless = true
 fileWatcherType = "none"
 

@@ -11,7 +11,7 @@ from pathlib import Path
 def main() -> None:
     """Launch Streamlit with native-library safety defaults."""
     project_root = Path(__file__).resolve().parents[3]
-    app_path = project_root / "src" / "qwopus_agent" / "ui" / "streamlit_chat.py"
+    app_path = project_root / "src" / "qwopus_agent" / "ui" / "streamlit_debug_console.py"
 
     env = os.environ.copy()
     src_path = str(project_root / "src")

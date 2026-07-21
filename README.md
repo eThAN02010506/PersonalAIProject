@@ -165,46 +165,41 @@ PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python -m unittest tests.test_model_run
 cd frontend && pnpm run lint && pnpm run build
 ```
 
-## Streamlit Chat And Upload Analysis
+## Streamlit Debug Console
 
-After the smoke test passes, verify multi-turn conversation and local upload analysis through
-Streamlit:
+Streamlit is a read-only local developer console. Chat, document analysis, MiniRAG, MinerU, reports,
+and knowledge-graph workflows stay behind the formal FastAPI/React application:
 
 ```bash
 pip install -e ".[dev,ui]"
 python -m mlx_lm.server --model ~/Desktop/model/gemma-4-12B-it-qat-OptiQ-4bit --port 8080
-PYTHONPATH=src streamlit run src/qwopus_agent/ui/streamlit_chat.py
+PYTHONPATH=src streamlit run src/qwopus_agent/ui/streamlit_debug_console.py
 ```
 
-The Streamlit page provides:
+The Streamlit debug console provides:
 
-- sidebar model configuration and connection check
-- multi-turn chat via `st.chat_message` and `st.chat_input`
-- conversation history passed into smolagents through `run_smolagents_chat_turn`
-- upload analysis for PDF, DOCX, Markdown, TXT, CSV, XLSX, and XLS files
-- local pandas spreadsheet inspection with schema, sample rows, and numeric summaries
-- MinerU-backed PDF/image parsing with Markdown normalization
-- persistent vector and knowledge-graph retrieval with source/page evidence
-- entity-type filtering, directed graph visualization, and DOT download
-- per-source update, deletion, and derived-index rebuild controls
-- a local-only Debug Console with safe orchestration events, complete smolagents prompts, raw model
-  outputs, Tool arguments, Tool Observations, step errors, JSON trace downloads, and runtime logs
+- current model identity and an explicit connection probe
+- persisted backend orchestration events and final run status
+- complete smolagents prompts, raw model outputs, Tool arguments, Tool Observations, and step errors
+- downloadable JSON traces and rotating runtime logs
+- a link back to the formal React frontend; no chat, upload, graph-maintenance, or report actions
 
 The Debug Console intentionally exposes more information than the primary React application and may
 contain full local document excerpts. Use it only on a trusted local machine. It displays the raw
 fields returned by smolagents and the current model server; it cannot display hidden reasoning that
 the model/provider did not return. FastAPI `RunView` and `AnalysisView` do not serialize raw debug
 runs, so the primary React frontend continues to receive only final answers, citations, and safe
-process events.
+process events. FastAPI writes internal records atomically under `logs/debug_runs/`; Streamlit only
+reads those files and does not initialize MiniRAG, MinerU, Torch, or an Agent worker.
+The project Streamlit configuration binds the console to `127.0.0.1` and keeps the newest 200 raw
+run records so sensitive diagnostics are local and storage remains bounded.
 
 Manual checks:
 
-1. Click "检测模型连接" and confirm the MLX server is online.
-2. Send "你好，请用中文自我介绍" and confirm a response appears.
-3. Ask "上一句你说了什么？" and confirm the reply uses prior context.
-4. Upload a CSV or Excel file and confirm schema/sample/numeric summary tables render.
-5. Upload a TXT, Markdown, PDF, or DOCX file and confirm the Markdown preview renders.
-6. Stop the MLX server and confirm the UI shows a clear offline error.
+1. Send a message or analyze a document in the React application at `http://127.0.0.1:8010/`.
+2. Open `http://localhost:8502/` and click "Refresh".
+3. Confirm the matching backend run shows its safe trace, raw steps, Tool calls, and Observations.
+4. Click "Check model connection" and confirm the currently selected model server is online.
 
 Runtime MiniRAG data lives under `storage/minirag`. Uploaded Markdown-normalized documents and safe
 spreadsheet summaries are inserted through the `MiniRAG.insert(document)` facade, and later analysis
