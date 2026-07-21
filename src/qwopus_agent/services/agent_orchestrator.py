@@ -17,6 +17,7 @@ from qwopus_agent.agents.multi_agent import (
     MultiAgentSupervisor,
 )
 from qwopus_agent.integrations.smolagents_runtime import (
+    AgentDebugRun,
     ChatAgentRun,
     SmolagentsModelSettings,
     run_agent_chat_turn_with_debug,
@@ -58,6 +59,7 @@ class _CapabilityResult:
     analysis_result: AnalysisResult | None = None
     report: GeneratedReport | None = None
     error: str | None = None
+    debug_runs: tuple[AgentDebugRun, ...] = ()
 
 
 @dataclass
@@ -140,6 +142,7 @@ class AgentOrchestrator:
             trace=tuple(trace),
             analysis_result=capability.analysis_result,
             report=capability.report,
+            debug_runs=capability.debug_runs,
         )
 
     async def _run_supervised(
@@ -179,7 +182,7 @@ class AgentOrchestrator:
                 "shared_state": {"request": request.model_dump(exclude={"uploaded_files"})},
             },
         )
-        citations, analysis_result, report = _collect_artifacts(run)
+        citations, analysis_result, report, debug_runs = _collect_artifacts(run)
         answer = _append_citations(run.final_answer, citations, request.objective)
         return OrchestrationResult(
             success=bool(answer.strip()) and any(item.success for item in run.runs),
@@ -190,6 +193,7 @@ class AgentOrchestrator:
             analysis_result=analysis_result,
             report=report,
             multi_agent_run=run,
+            debug_runs=debug_runs,
         )
 
     def _build_agents(
@@ -304,6 +308,7 @@ class AgentOrchestrator:
             content=run.answer,
             confidence=0.72 if web or local else 0.65,
             citations=citations,
+            debug_runs=run.debug_runs,
         )
 
     async def _document_capability(
@@ -363,6 +368,7 @@ class AgentOrchestrator:
             confidence=0.8,
             citations=citations,
             analysis_result=outcome.result,
+            debug_runs=tuple(getattr(outcome, "debug_runs", ())),
         )
 
     async def _synthesis_capability(
@@ -564,10 +570,16 @@ def _citations_from_chat(run: ChatAgentRun) -> tuple[SourceCitation, ...]:
 
 def _collect_artifacts(
     run: MultiAgentRun,
-) -> tuple[tuple[SourceCitation, ...], AnalysisResult | None, GeneratedReport | None]:
+) -> tuple[
+    tuple[SourceCitation, ...],
+    AnalysisResult | None,
+    GeneratedReport | None,
+    tuple[AgentDebugRun, ...],
+]:
     citations: list[SourceCitation] = []
     analysis_result = None
     report = None
+    debug_runs: list[AgentDebugRun] = []
     for named_run in run.runs:
         result = named_run.result
         if not isinstance(result, _CapabilityResult):
@@ -575,7 +587,8 @@ def _collect_artifacts(
         citations.extend(result.citations)
         analysis_result = result.analysis_result or analysis_result
         report = result.report or report
-    return _deduplicate_citations(citations), analysis_result, report
+        debug_runs.extend(result.debug_runs)
+    return _deduplicate_citations(citations), analysis_result, report, tuple(debug_runs)
 
 
 def _deduplicate_citations(citations: list[SourceCitation]) -> tuple[SourceCitation, ...]:

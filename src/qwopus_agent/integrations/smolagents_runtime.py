@@ -103,6 +103,18 @@ class SmolagentsModelSettings:
 
 
 @dataclass(frozen=True)
+class AgentDebugRun:
+    """One complete local smolagents run retained only for the debug console."""
+
+    label: str
+    prompt: str
+    max_steps: int
+    state: str | None
+    output: str
+    steps: tuple[dict[str, Any], ...] = ()
+
+
+@dataclass(frozen=True)
 class DocumentAnalysisRun:
     """Document analysis answer with a UI-visible debug trace."""
 
@@ -111,6 +123,8 @@ class DocumentAnalysisRun:
     debug_steps: list[str]
 
     tool_calls: list[str] = field(default_factory=list)
+
+    debug_runs: tuple[AgentDebugRun, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -121,6 +135,7 @@ class ChatAgentRun:
     tool_calls: tuple[str, ...] = ()
     observations: tuple[str, ...] = ()
     state: str | None = None
+    debug_runs: tuple[AgentDebugRun, ...] = ()
 
 
 def _models_endpoint(base_url: str) -> str:
@@ -395,12 +410,23 @@ def run_agent_chat_turn_with_debug(
     # 原因：部分模型会忽略提示并重复调用已经成功的检索 Tool，直到耗尽较大的步数上限。
     # 作用：单类检索只允许一次调用加一次收尾；两类检索最多各调用一次再收尾。
     max_steps = 3 if enable_web_search and enable_local_knowledge else 2
+    run_max_steps = max_steps if tools else 2
     run_result = agent.run(
         prompt,
-        max_steps=max_steps if tools else 2,
+        max_steps=run_max_steps,
         return_full_result=True,
     )
     answer, state, steps = _unpack_agent_run_result(run_result)
+    debug_runs = [
+        _build_agent_debug_run(
+            label="chat",
+            prompt=prompt,
+            max_steps=run_max_steps,
+            state=state,
+            output=answer,
+            steps=steps,
+        )
+    ]
     tool_calls = _extract_agent_tool_calls(steps)
     observations = _extract_agent_observations(steps)
     final_answer = _extract_final_answer(answer)
@@ -417,20 +443,31 @@ def run_agent_chat_turn_with_debug(
         # 原因：继续复用带 Tool 的 Agent 仍可能无视提示并再次检索，造成长时间循环。
         # 作用：把已取得的 Observation 交给无工具 finalizer，只允许它生成最终自然语言答案。
         finalizer = build_smolagents_tool_calling_agent(settings=settings, tools=[])
+        retry_prompt = (
+            f"Original user question:\n{user_message}\n\n"
+            f"Available tool evidence:\n{evidence[:12_000]}\n\n"
+            "Answer the original user question now. Return only a complete "
+            "natural-language final answer in the user's language. State the conclusion, "
+            "explain the relevant relationship or evidence, and explicitly cite every "
+            "available local source file and page. Never expose Observation, Thought, tool "
+            "logs, or drafts."
+        )
         retry_result = finalizer.run(
-            (
-                f"Original user question:\n{user_message}\n\n"
-                f"Available tool evidence:\n{evidence[:12_000]}\n\n"
-                "Answer the original user question now. Return only a complete "
-                "natural-language final answer in the user's language. State the conclusion, "
-                "explain the relevant relationship or evidence, and explicitly cite every "
-                "available local source file and page. Never expose Observation, Thought, tool "
-                "logs, or drafts."
-            ),
+            retry_prompt,
             max_steps=2,
             return_full_result=True,
         )
         retry_answer, retry_state, retry_steps = _unpack_agent_run_result(retry_result)
+        debug_runs.append(
+            _build_agent_debug_run(
+                label="chat_finalizer",
+                prompt=retry_prompt,
+                max_steps=2,
+                state=retry_state,
+                output=retry_answer,
+                steps=retry_steps,
+            )
+        )
         tool_calls.extend(_extract_agent_tool_calls(retry_steps))
         observations.extend(_extract_agent_observations(retry_steps))
         state = retry_state or state
@@ -440,13 +477,14 @@ def run_agent_chat_turn_with_debug(
         progress_callback("completed")
     if not final_answer or _looks_like_tool_observation(final_answer):
         raise RuntimeError("smolagents did not produce a final chat answer after tool execution.")
-    # 原因：Orchestrator 需要知道实际使用了哪些能力和来源，但 UI 不能看到模型推理。
-    # 作用：只返回最终答案、Tool 名称和 Tool Observation，丢弃 Thought 与模型草稿。
+    # 原因：正式界面只应看到安全结果，但本地 Debug Console 需要复现模型与 Tool 交互。
+    # 作用：安全字段继续供业务编排使用，原始步骤放入独立 debug_runs，API 不序列化它。
     return ChatAgentRun(
         answer=final_answer,
         tool_calls=tuple(dict.fromkeys(tool_calls)),
         observations=tuple(dict.fromkeys(observations)),
         state=state,
+        debug_runs=tuple(debug_runs),
     )
 
 
@@ -584,6 +622,16 @@ def run_smolagents_file_analysis_with_debug(
         return_full_result=True,
     )
     answer, state, steps = _unpack_agent_run_result(run_result)
+    debug_runs = [
+        _build_agent_debug_run(
+            label="file_analysis",
+            prompt=prompt,
+            max_steps=max_steps,
+            state=state,
+            output=answer,
+            steps=steps,
+        )
+    ]
     tool_calls = _extract_agent_tool_calls(steps)
     debug_steps = _agent_debug_steps(state=state, steps=steps, tool_calls=tool_calls)
     required_tools = _required_file_tools(
@@ -611,23 +659,35 @@ def run_smolagents_file_analysis_with_debug(
             debug_steps.append("Agent 尚未形成最终答案，保留工具上下文后触发收敛步骤。")
         missing_tool_instruction = ", ".join(sorted(missing_tools)) or "none"
         missing_file_instruction = ", ".join(sorted(missing_files)) or "none"
+        retry_prompt = (
+            "Continue from the existing tool observations and answer the original "
+            "user question now. "
+            f"Before answering, call every missing required tool: {missing_tool_instruction}. "
+            f"Read every missing file with document_parser exactly once: "
+            f"{missing_file_instruction}. "
+            "For excel_analysis, generate restricted pandas code from the existing "
+            "excel_schema observation. Return only a complete natural-language final "
+            "answer. Do not repeat Observation, tool output, Thought, code drafts, or "
+            "internal steps. Follow the language of the user's question."
+        )
+        retry_max_steps = min(max(len(missing_files) + len(missing_tools) + 2, 3), 12)
         retry_result = agent.run(
-            (
-                "Continue from the existing tool observations and answer the original "
-                "user question now. "
-                f"Before answering, call every missing required tool: {missing_tool_instruction}. "
-                f"Read every missing file with document_parser exactly once: "
-                f"{missing_file_instruction}. "
-                "For excel_analysis, generate restricted pandas code from the existing "
-                "excel_schema observation. Return only a complete natural-language final "
-                "answer. Do not repeat Observation, tool output, Thought, code drafts, or "
-                "internal steps. Follow the language of the user's question."
-            ),
+            retry_prompt,
             reset=False,
-            max_steps=min(max(len(missing_files) + len(missing_tools) + 2, 3), 12),
+            max_steps=retry_max_steps,
             return_full_result=True,
         )
         retry_answer, retry_state, retry_steps = _unpack_agent_run_result(retry_result)
+        debug_runs.append(
+            _build_agent_debug_run(
+                label="file_analysis_refinement",
+                prompt=retry_prompt,
+                max_steps=retry_max_steps,
+                state=retry_state,
+                output=retry_answer,
+                steps=retry_steps,
+            )
+        )
         retry_tool_calls = _extract_agent_tool_calls(retry_steps)
         tool_calls.extend(retry_tool_calls)
         inspected_files.update(_extract_inspected_file_names(retry_steps))
@@ -656,6 +716,7 @@ def run_smolagents_file_analysis_with_debug(
         answer=final_answer,
         debug_steps=debug_steps,
         tool_calls=list(dict.fromkeys(tool_calls)),
+        debug_runs=tuple(debug_runs),
     )
 
 
@@ -739,6 +800,51 @@ def _unpack_agent_run_result(run_result: Any) -> tuple[str, str | None, list[dic
         steps = getattr(run_result, "steps", None)
         return str(output or ""), str(state) if state is not None else None, steps or []
     return str(run_result), None, []
+
+
+def _build_agent_debug_run(
+    *,
+    label: str,
+    prompt: str,
+    max_steps: int,
+    state: str | None,
+    output: str,
+    steps: list[dict[str, Any]],
+) -> AgentDebugRun:
+    """Copy a JSON-safe raw run so the local debug console can inspect every step."""
+    # 原因：smolagents step 中可能混入 Pydantic 对象或其他不可序列化值。
+    # 作用：保留完整可读内容，同时确保 spawn Queue 和 JSON 下载都能稳定传输。
+    normalized_steps = tuple(
+        {
+            str(key): _normalize_debug_value(value)
+            for key, value in step.items()
+        }
+        if isinstance(step, dict)
+        else {"value": _normalize_debug_value(step)}
+        for step in steps
+    )
+    return AgentDebugRun(
+        label=label,
+        prompt=prompt,
+        max_steps=max_steps,
+        state=state,
+        output=output,
+        steps=normalized_steps,
+    )
+
+
+def _normalize_debug_value(value: Any) -> Any:
+    """Convert nested debug values to JSON-safe primitives without dropping content."""
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    if isinstance(value, dict):
+        return {str(key): _normalize_debug_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_normalize_debug_value(item) for item in value]
+    model_dump = getattr(value, "model_dump", None)
+    if callable(model_dump):
+        return _normalize_debug_value(model_dump(mode="json"))
+    return str(value)
 
 
 def _extract_agent_tool_calls(steps: list[dict[str, Any]]) -> list[str]:

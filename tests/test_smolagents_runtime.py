@@ -308,6 +308,14 @@ class SmolagentsRuntimeTests(unittest.TestCase):
             ("[ownership.pdf, page 4] Company A owns Company B",),
         )
         self.assertNotIn("private reasoning", "".join(result.observations))
+        # 原因：业务结果必须保持脱敏，但 Debug Console 需要定位模型为什么选择该 Tool。
+        # 作用：锁定原始 model_output 只进入独立 debug_runs，不会污染最终答案或引用提取。
+        self.assertEqual(result.debug_runs[0].label, "chat")
+        self.assertEqual(
+            result.debug_runs[0].steps[0]["model_output"],
+            "private reasoning",
+        )
+        self.assertNotIn("private reasoning", result.answer)
 
     def test_format_agent_chat_prompt_keeps_recent_history(self) -> None:
         prompt = format_agent_chat_prompt(
@@ -383,6 +391,11 @@ class SmolagentsRuntimeTests(unittest.TestCase):
         self.assertEqual(result.answer, "完整文件总结")
         self.assertEqual(result.tool_calls, ["document_parser"])
         self.assertTrue(any("document_parser" in step for step in result.debug_steps))
+        self.assertEqual(result.debug_runs[0].prompt.splitlines()[0], (
+            "You are Qwopus-Agent's uploaded-file analysis agent."
+        ))
+        self.assertEqual(result.debug_runs[0].state, "success")
+        self.assertEqual(result.debug_runs[0].steps[0]["step_number"], 1)
 
     def test_file_analysis_agent_retries_raw_observation(self) -> None:
         settings = SmolagentsModelSettings(

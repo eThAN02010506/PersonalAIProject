@@ -2,7 +2,10 @@ import queue
 import unittest
 from unittest.mock import Mock, patch
 
-from qwopus_agent.integrations.smolagents_runtime import SmolagentsModelSettings
+from qwopus_agent.integrations.smolagents_runtime import (
+    AgentDebugRun,
+    SmolagentsModelSettings,
+)
 from qwopus_agent.services.chat_service import BackgroundChatTask, _run_chat_task
 from qwopus_agent.services.orchestration_models import (
     OrchestrationResult,
@@ -34,6 +37,16 @@ class ChatServiceTests(unittest.TestCase):
                     ),
                 ),
                 citations=(SourceCitation(kind="local", source="notes.txt"),),
+                debug_runs=(
+                    AgentDebugRun(
+                        label="knowledge",
+                        prompt="question",
+                        max_steps=2,
+                        state="success",
+                        output="finished reply",
+                        steps=({"observations": "raw local evidence"},),
+                    ),
+                ),
             )
 
         with patch(
@@ -54,6 +67,9 @@ class ChatServiceTests(unittest.TestCase):
         self.assertEqual(payload[:2], ("completed", "finished reply"))
         self.assertEqual(payload[2][0]["tool"], "graph_search")
         self.assertEqual(payload[3][0]["source"], "notes.txt")
+        # 原因：spawn 子进程不能把 UI 对象或不可序列化 runtime 对象直接传回主进程。
+        # 作用：验证完整调试运行已转换为普通 dict，并保留 Tool Observation。
+        self.assertEqual(payload[4][0]["steps"][0]["observations"], "raw local evidence")
         self.assertEqual(progress_queue.get_nowait(), "planning")
         self.assertEqual(progress_queue.get_nowait(), "completed")
 

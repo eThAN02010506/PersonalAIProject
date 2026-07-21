@@ -83,6 +83,9 @@ class ApiTests(unittest.TestCase):
             )
 
         self.assertEqual(response.status_code, 200)
+        # 原因：raw debug 可能包含完整文件正文，只允许本地 Streamlit 调试台读取。
+        # 作用：锁定 FastAPI 正式响应不会把内部 debug_runs 暴露给 React 或其他客户端。
+        self.assertNotIn("debug_runs", response.json())
         request = orchestrator.run_sync.call_args.args[0]
         self.assertEqual(request.uploaded_files[0].name, "sample.txt")
         self.assertEqual(request.uploaded_files[0].content, b"real bytes")

@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import json
+from dataclasses import asdict, is_dataclass
 from html import escape
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
 import streamlit as st
@@ -45,6 +48,7 @@ from qwopus_agent.utils.conversation_log import (
 from qwopus_agent.utils.logging_config import configure_runtime_logging, get_logger
 
 logger = get_logger("ui.streamlit_chat")
+RUNTIME_LOG_PATH = Path("logs/qwopus_agent.log")
 
 
 def _init_session_state(settings: SmolagentsModelSettings) -> None:
@@ -62,6 +66,8 @@ def _init_session_state(settings: SmolagentsModelSettings) -> None:
         st.session_state.analysis_result = None
     if "analysis_debug_steps" not in st.session_state:
         st.session_state.analysis_debug_steps = []
+    if "analysis_debug_runs" not in st.session_state:
+        st.session_state.analysis_debug_runs = []
     if "analysis_report" not in st.session_state:
         st.session_state.analysis_report = None
     if "minirag" not in st.session_state:
@@ -74,6 +80,8 @@ def _init_session_state(settings: SmolagentsModelSettings) -> None:
         st.session_state.chat_task_notice = None
     if "chat_trace" not in st.session_state:
         st.session_state.chat_trace = []
+    if "chat_debug_runs" not in st.session_state:
+        st.session_state.chat_debug_runs = []
     if "chat_task_conversation_id" not in st.session_state:
         st.session_state.chat_task_conversation_id = None
 
@@ -155,6 +163,7 @@ def _activate_conversation(conversation_id: str) -> None:
     st.session_state.active_conversation_id = conversation_id
     st.session_state.messages = load_chat_messages(conversation_id=conversation_id)
     st.session_state.chat_trace = []
+    st.session_state.chat_debug_runs = []
     st.session_state.chat_task_notice = None
 
 
@@ -187,6 +196,7 @@ def _start_user_input(
         st.markdown(user_input)
 
     history = st.session_state.messages[:-1]
+    st.session_state.chat_debug_runs = []
     # 原因：同步 agent.run() 会阻塞 Streamlit，生成期间无法显示进度或响应停止按钮。
     # 作用：Agent 在独立进程运行，UI 保持可重跑并能安全终止当前本地任务。
     st.session_state.chat_task = start_chat_task(
@@ -232,6 +242,7 @@ def _render_chat_progress() -> None:
         if result.status == "completed":
             st.session_state.messages.append({"role": "assistant", "content": result.content})
             st.session_state.chat_trace = list(result.trace)
+            st.session_state.chat_debug_runs = list(result.debug_runs)
             logger.info("chat_message_completed reply_length=%s", len(result.content))
             append_conversation_event(
                 "chat_message",
@@ -245,6 +256,7 @@ def _render_chat_progress() -> None:
                 f"对话调用失败：{result.content}",
             )
             st.session_state.chat_trace = list(result.trace)
+            st.session_state.chat_debug_runs = list(result.debug_runs)
         st.rerun()
 
     phase_labels = {
@@ -322,6 +334,118 @@ def _render_debug_steps(debug_steps: list[str]) -> None:
     with st.expander("分析过程", expanded=False):
         for index, step in enumerate(debug_steps, start=1):
             st.markdown(f"**Step {index}.** {step}")
+
+
+def _debug_run_payload(debug_run: Any) -> dict[str, Any]:
+    """Normalize a dataclass or worker-process dict for Streamlit and JSON download."""
+    if isinstance(debug_run, dict):
+        return debug_run
+    if is_dataclass(debug_run):
+        return asdict(debug_run)
+    return {"value": str(debug_run)}
+
+
+def _render_agent_debug_runs(debug_runs: list[Any], key_prefix: str) -> None:
+    """Render raw smolagents runs only inside the local Debug Console."""
+    if not debug_runs:
+        st.info("当前还没有完整 Agent 调试记录。完成一次运行后会显示在这里。")
+        return
+
+    payloads = [_debug_run_payload(run) for run in debug_runs]
+    # 原因：长 Observation 在页面中逐项复制容易丢失或截断。
+    # 作用：提供完整 JSON 下载，同时页面仍按运行轮次和步骤组织原始字段。
+    st.download_button(
+        "下载完整 Agent Trace (JSON)",
+        data=json.dumps(payloads, ensure_ascii=False, indent=2, default=str).encode("utf-8"),
+        file_name=f"qwopus_{key_prefix}_agent_trace.json",
+        mime="application/json",
+        key=f"download_{key_prefix}_agent_trace",
+    )
+
+    for run_index, run in enumerate(payloads, start=1):
+        label = str(run.get("label") or f"run_{run_index}")
+        state = str(run.get("state") or "unknown")
+        steps = run.get("steps") if isinstance(run.get("steps"), list | tuple) else []
+        with st.container(border=True):
+            st.markdown(f"### Run {run_index}: `{label}`")
+            st.caption(
+                f"state={state} · max_steps={run.get('max_steps', '?')} · "
+                f"recorded_steps={len(steps)}"
+            )
+            with st.expander("完整 Prompt", expanded=False):
+                st.code(str(run.get("prompt") or ""), language="text", wrap_lines=True)
+            with st.expander("Run 原始输出", expanded=False):
+                st.code(str(run.get("output") or ""), language="text", wrap_lines=True)
+            if not steps:
+                st.caption("模型运行结果没有提供 step records。")
+            for step_index, step in enumerate(steps, start=1):
+                step_payload = step if isinstance(step, dict) else {"value": step}
+                step_number = step_payload.get("step_number", step_index)
+                with st.expander(f"Step {step_number} · 完整原始记录", expanded=False):
+                    model_output = step_payload.get("model_output")
+                    if model_output:
+                        st.markdown("**Model output / reasoning draft**")
+                        st.code(str(model_output), language="text", wrap_lines=True)
+                    if step_payload.get("tool_calls"):
+                        st.markdown("**Tool calls / arguments**")
+                        st.json(step_payload["tool_calls"], expanded=True)
+                    if step_payload.get("observations"):
+                        st.markdown("**Tool Observation**")
+                        st.code(
+                            str(step_payload["observations"]),
+                            language="text",
+                            wrap_lines=True,
+                        )
+                    if step_payload.get("error"):
+                        st.error(str(step_payload["error"]))
+                    st.markdown("**All recorded fields**")
+                    st.json(step_payload, expanded=False)
+
+
+def _render_debug_console(settings: SmolagentsModelSettings) -> None:
+    """Render the local-only diagnostics surface for completed Agent runs."""
+    st.subheader("Debug Console")
+    st.warning(
+        "这里可能包含完整文件片段、Tool Observation、模型原始输出与推理草稿。"
+        "仅应在可信的本机调试环境中使用；未由模型服务返回的隐藏思维不会被伪造。"
+    )
+    status_columns = st.columns(3)
+    status_columns[0].metric("当前模型", Path(settings.model_id).name)
+    status_columns[1].metric("模型地址", settings.base_url)
+    task = st.session_state.get("chat_task")
+    status_columns[2].metric(
+        "Agent 任务",
+        f"{task.refresh_phase()} · {task.elapsed_seconds:.0f}s" if task else "空闲",
+    )
+
+    chat_debug_tab, analysis_debug_tab, log_tab = st.tabs(
+        ["Chat Agent", "Document Agent", "Runtime Logs"]
+    )
+    with chat_debug_tab:
+        st.markdown("#### 安全编排轨迹")
+        _render_chat_trace(True)
+        st.markdown("#### 原始 smolagents 运行")
+        _render_agent_debug_runs(st.session_state.chat_debug_runs, "chat")
+
+    with analysis_debug_tab:
+        st.markdown("#### 文档编排轨迹")
+        _render_debug_steps(st.session_state.analysis_debug_steps)
+        st.markdown("#### 原始 smolagents 运行")
+        _render_agent_debug_runs(st.session_state.analysis_debug_runs, "document")
+
+    with log_tab:
+        if not RUNTIME_LOG_PATH.is_file():
+            st.info("运行日志尚未生成。")
+        else:
+            log_text = RUNTIME_LOG_PATH.read_text(encoding="utf-8", errors="replace")
+            st.download_button(
+                "下载完整运行日志",
+                data=log_text.encode("utf-8"),
+                file_name=RUNTIME_LOG_PATH.name,
+                mime="text/plain",
+            )
+            st.caption("页面显示最近 500 行；下载文件包含全部日志。")
+            st.code("\n".join(log_text.splitlines()[-500:]), language="text", wrap_lines=True)
 
 
 def _generate_analysis_report(result: AnalysisResult) -> GeneratedReport:
@@ -441,6 +565,7 @@ def _render_upload_analysis(settings: SmolagentsModelSettings) -> None:
 
         with st.spinner("正在保存并分析文件..."):
             try:
+                st.session_state.analysis_debug_runs = []
                 # 原因：文件入口不能继续绕过统一编排层直接调用 AnalysisService。
                 # 作用：单文件保持快速路径，组合/报告请求自动升级为 Supervisor 流程。
                 outcome = AgentOrchestrator(
@@ -468,6 +593,9 @@ def _render_upload_analysis(settings: SmolagentsModelSettings) -> None:
                     event.message
                     for event in outcome.trace
                     if event.message
+                ]
+                st.session_state.analysis_debug_runs = [
+                    _debug_run_payload(debug_run) for debug_run in outcome.debug_runs
                 ]
                 st.session_state.analysis_report = outcome.report
                 st.success(f"已完成分析：{len(uploaded_files)} 个文件")
@@ -575,7 +703,9 @@ def main() -> None:
     settings = resolve_model_settings(SmolagentsModelSettings.from_env())
     _init_session_state(settings)
     _render_sidebar(settings)
-    analysis_tab, graph_tab, chat_tab = st.tabs(["文档分析", "知识图谱", "对话测试"])
+    analysis_tab, graph_tab, chat_tab, debug_tab = st.tabs(
+        ["文档分析", "知识图谱", "对话测试", "Debug Console"]
+    )
 
     with analysis_tab:
         _render_upload_analysis(settings)
@@ -605,6 +735,9 @@ def main() -> None:
                 enable_web_search=enable_web_search,
                 enable_local_knowledge=enable_local_knowledge,
             )
+
+    with debug_tab:
+        _render_debug_console(settings)
 
 
 if __name__ == "__main__":

@@ -15,6 +15,7 @@ import pandas as pd
 from qwopus_agent.analysis import AnalysisResult, analyze_uploaded_file
 from qwopus_agent.documents import save_uploaded_bytes
 from qwopus_agent.integrations.smolagents_runtime import (
+    AgentDebugRun,
     SmolagentsModelSettings,
     check_model_connection,
     resolve_model_settings,
@@ -52,6 +53,8 @@ class UploadAnalysisOutcome:
 
     analyzed_file_names: list[str] = field(default_factory=list)
 
+    debug_runs: tuple[AgentDebugRun, ...] = ()
+
 
 def analyze_uploaded_files(
     uploaded_files: list[UploadedFileInput],
@@ -68,6 +71,7 @@ def analyze_uploaded_files(
     document_contexts: dict[str, str] = {}
     spreadsheet_contexts: dict[str, str] = {}
     spreadsheet_paths: dict[str, Path] = {}
+    debug_runs: list[AgentDebugRun] = []
 
     for uploaded_file in uploaded_files:
         logger.info(
@@ -165,6 +169,7 @@ def analyze_uploaded_files(
                 len(analysis_run.answer),
             )
             debug_steps.extend(analysis_run.debug_steps)
+            debug_runs.extend(analysis_run.debug_runs)
             result = AnalysisResult(
                 markdown_summary=result.markdown_summary,
                 tables=result.tables,
@@ -198,6 +203,7 @@ def analyze_uploaded_files(
         result=result,
         debug_steps=debug_steps,
         analyzed_file_names=[file_name for file_name, _ in analyzed_results],
+        debug_runs=tuple(debug_runs),
     )
 
 

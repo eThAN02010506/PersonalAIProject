@@ -8,6 +8,7 @@ import pandas as pd
 
 from qwopus_agent.analysis import AnalysisResult
 from qwopus_agent.integrations.smolagents_runtime import (
+    AgentDebugRun,
     DocumentAnalysisRun,
     SmolagentsModelSettings,
 )
@@ -102,6 +103,16 @@ class AnalysisServiceTests(unittest.TestCase):
                     answer="Final answer uses prior MiniRAG context.",
                     debug_steps=["fake model finished"],
                     tool_calls=["document_parser", "rag_search"],
+                    debug_runs=(
+                        AgentDebugRun(
+                            label="file_analysis",
+                            prompt="analyze revenue.txt",
+                            max_steps=4,
+                            state="success",
+                            output="Final answer uses prior MiniRAG context.",
+                            steps=({"observations": "raw document text"},),
+                        ),
+                    ),
                 )
 
             with (
@@ -143,6 +154,10 @@ class AnalysisServiceTests(unittest.TestCase):
             self.assertEqual(captured["tool_names"], ["document_parser", "rag_search"])
             self.assertIn("Prior MiniRAG note", captured["rag_result"])
             self.assertTrue(outcome.result.metadata["minirag_context_used"])
+            self.assertEqual(
+                outcome.debug_runs[0].steps[0]["observations"],
+                "raw document text",
+            )
             self.assertTrue(
                 minirag.search("Current uploaded")[0].startswith("[Source: revenue.txt]")
             )

@@ -4,7 +4,12 @@ from unittest.mock import patch
 import pandas as pd
 
 from qwopus_agent.analysis import AnalysisResult
-from qwopus_agent.ui.streamlit_chat import _generate_analysis_report, _report_mime_type
+from qwopus_agent.integrations.smolagents_runtime import AgentDebugRun
+from qwopus_agent.ui.streamlit_chat import (
+    _debug_run_payload,
+    _generate_analysis_report,
+    _report_mime_type,
+)
 
 
 class StreamlitReportDownloadTests(unittest.TestCase):
@@ -39,6 +44,28 @@ class StreamlitReportDownloadTests(unittest.TestCase):
         self.assertEqual(_report_mime_type("pdf"), "application/pdf")
         self.assertEqual(_report_mime_type("chart_png"), "image/png")
         self.assertEqual(_report_mime_type("chart_svg"), "image/svg+xml")
+
+    def test_debug_run_payload_preserves_raw_step_fields(self) -> None:
+        debug_run = AgentDebugRun(
+            label="document",
+            prompt="inspect notes.pdf",
+            max_steps=4,
+            state="success",
+            output="final answer",
+            steps=(
+                {
+                    "model_output": "reasoning draft",
+                    "tool_calls": [{"function": {"name": "document_parser"}}],
+                    "observations": "raw document observation",
+                },
+            ),
+        )
+
+        # 原因：Streamlit session 同时接收当前进程 dataclass 和后台进程 dict。
+        # 作用：验证 Debug Console 统一转换后不丢失模型草稿、Tool 或 Observation。
+        payload = _debug_run_payload(debug_run)
+        self.assertEqual(payload["steps"][0]["model_output"], "reasoning draft")
+        self.assertEqual(payload["steps"][0]["observations"], "raw document observation")
 
     def _temporary_output_dir(self):
         from pathlib import Path

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import multiprocessing
 import time
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from queue import Empty
 from typing import Any, Literal
 
@@ -26,6 +26,7 @@ class ChatTaskResult:
     content: str
     trace: tuple[dict[str, Any], ...] = ()
     citations: tuple[dict[str, Any], ...] = ()
+    debug_runs: tuple[dict[str, Any], ...] = ()
 
 
 @dataclass
@@ -67,11 +68,13 @@ class BackgroundChatTask:
         status, content = payload[:2]
         trace = tuple(payload[2]) if len(payload) > 2 else ()
         citations = tuple(payload[3]) if len(payload) > 3 else ()
+        debug_runs = tuple(payload[4]) if len(payload) > 4 else ()
         return ChatTaskResult(
             status=status,
             content=str(content),
             trace=trace,
             citations=citations,
+            debug_runs=debug_runs,
         )
 
     def cancel(self) -> None:
@@ -160,5 +163,6 @@ def _run_chat_task(
                 result.final_answer,
                 [event.model_dump(mode="json") for event in result.trace],
                 [citation.model_dump(mode="json") for citation in result.citations],
+                [asdict(debug_run) for debug_run in result.debug_runs],
             )
         )

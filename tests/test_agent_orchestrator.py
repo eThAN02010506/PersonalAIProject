@@ -8,6 +8,7 @@ import pandas as pd
 
 from qwopus_agent.analysis import AnalysisResult
 from qwopus_agent.integrations.smolagents_runtime import (
+    AgentDebugRun,
     ChatAgentRun,
     SmolagentsModelSettings,
 )
@@ -31,7 +32,20 @@ class AgentOrchestratorTests(unittest.TestCase):
 
         def fake_chat(**kwargs):
             calls.append(kwargs)
-            return ChatAgentRun(answer="direct answer", state="success")
+            return ChatAgentRun(
+                answer="direct answer",
+                state="success",
+                debug_runs=(
+                    AgentDebugRun(
+                        label="chat",
+                        prompt="hello",
+                        max_steps=2,
+                        state="success",
+                        output="direct answer",
+                        steps=({"model_output": "raw planner draft"},),
+                    ),
+                ),
+            )
 
         request = OrchestrationRequest(
             objective="hello",
@@ -48,6 +62,10 @@ class AgentOrchestratorTests(unittest.TestCase):
         self.assertEqual(result.final_answer, "direct answer")
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0]["history"], [{"role": "user", "content": "earlier"}])
+        # 原因：Debug Console 依赖 Orchestrator 传递 raw run，而正式答案仍是独立字符串。
+        # 作用：锁定单 Agent 快速路径不会丢失调试步骤或把草稿拼进 final_answer。
+        self.assertEqual(result.debug_runs[0].steps[0]["model_output"], "raw planner draft")
+        self.assertNotIn("raw planner draft", result.final_answer)
 
     def test_web_and_local_knowledge_use_supervisor_and_merge_citations(self) -> None:
         calls: list[tuple[bool, bool, str]] = []

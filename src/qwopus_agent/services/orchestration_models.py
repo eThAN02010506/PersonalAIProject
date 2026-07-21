@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field
 if TYPE_CHECKING:
     from qwopus_agent.agents.multi_agent import MultiAgentRun
     from qwopus_agent.analysis import AnalysisResult
+    from qwopus_agent.integrations.smolagents_runtime import AgentDebugRun
     from qwopus_agent.reports import GeneratedReport
 
 
@@ -82,3 +83,6 @@ class OrchestrationResult:
     analysis_result: AnalysisResult | None = None
     report: GeneratedReport | None = None
     multi_agent_run: MultiAgentRun | None = None
+    # 原因：本地调试台需要完整 Agent 步骤，但公开 API 与正式前端不能自动暴露这些内容。
+    # 作用：把 raw debug 作为内部结果旁路传递；FastAPI response models 明确忽略该字段。
+    debug_runs: tuple[AgentDebugRun, ...] = ()

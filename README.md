@@ -184,6 +184,15 @@ The Streamlit page provides:
 - persistent vector and knowledge-graph retrieval with source/page evidence
 - entity-type filtering, directed graph visualization, and DOT download
 - per-source update, deletion, and derived-index rebuild controls
+- a local-only Debug Console with safe orchestration events, complete smolagents prompts, raw model
+  outputs, Tool arguments, Tool Observations, step errors, JSON trace downloads, and runtime logs
+
+The Debug Console intentionally exposes more information than the primary React application and may
+contain full local document excerpts. Use it only on a trusted local machine. It displays the raw
+fields returned by smolagents and the current model server; it cannot display hidden reasoning that
+the model/provider did not return. FastAPI `RunView` and `AnalysisView` do not serialize raw debug
+runs, so the primary React frontend continues to receive only final answers, citations, and safe
+process events.
 
 Manual checks:
 
