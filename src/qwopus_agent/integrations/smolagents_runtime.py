@@ -113,6 +113,16 @@ class DocumentAnalysisRun:
     tool_calls: list[str] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class ChatAgentRun:
+    """Safe structured result from one smolagents chat run."""
+
+    answer: str
+    tool_calls: tuple[str, ...] = ()
+    observations: tuple[str, ...] = ()
+    state: str | None = None
+
+
 def _models_endpoint(base_url: str) -> str:
     return f"{base_url.rstrip('/')}/models"
 
@@ -349,6 +359,25 @@ def run_agent_chat_turn(
     progress_callback: Callable[[str], None] | None = None,
 ) -> str:
     """Run one chat turn through smolagents as the Agent driver."""
+    return run_agent_chat_turn_with_debug(
+        user_message=user_message,
+        history=history,
+        settings=settings,
+        enable_web_search=enable_web_search,
+        enable_local_knowledge=enable_local_knowledge,
+        progress_callback=progress_callback,
+    ).answer
+
+
+def run_agent_chat_turn_with_debug(
+    user_message: str,
+    history: list[ChatMessage],
+    settings: SmolagentsModelSettings | None = None,
+    enable_web_search: bool = False,
+    enable_local_knowledge: bool = False,
+    progress_callback: Callable[[str], None] | None = None,
+) -> ChatAgentRun:
+    """Run chat and retain only the safe Tool metadata needed by orchestration."""
     tools: list[Any] = []
     if enable_web_search:
         tools.append(build_tavily_search_tool(progress_callback=progress_callback))
@@ -363,9 +392,9 @@ def run_agent_chat_turn(
     )
     if progress_callback is not None:
         progress_callback("planning")
-    # 原因：同时启用联网和本地知识时，Agent 可能各调用一次 Tool 后才生成最终答案。
-    # 作用：为必要的两次检索留出收尾步骤，同时继续用硬上限阻止重复调用循环。
-    max_steps = 6 if enable_web_search and enable_local_knowledge else 4
+    # 原因：部分模型会忽略提示并重复调用已经成功的检索 Tool，直到耗尽较大的步数上限。
+    # 作用：单类检索只允许一次调用加一次收尾；两类检索最多各调用一次再收尾。
+    max_steps = 3 if enable_web_search and enable_local_knowledge else 2
     run_result = agent.run(
         prompt,
         max_steps=max_steps if tools else 2,
@@ -373,6 +402,7 @@ def run_agent_chat_turn(
     )
     answer, state, steps = _unpack_agent_run_result(run_result)
     tool_calls = _extract_agent_tool_calls(steps)
+    observations = _extract_agent_observations(steps)
     final_answer = _extract_final_answer(answer)
 
     local_tool_used = bool({"rag_search", "graph_search"}.intersection(tool_calls))
@@ -383,29 +413,41 @@ def run_agent_chat_turn(
         or (local_tool_used and len(final_answer) < 80)
     )
     if needs_refinement:
-        # 原因：部分本地模型能正确调用检索 Tool，却会把最终答案压缩成一句并遗漏来源。
-        # 作用：只对不完整结果保留现有 Observation 收敛一次，正常回答不增加模型延迟。
-        retry_result = agent.run(
+        evidence = "\n\n".join(observations) or final_answer or "No usable tool evidence."
+        # 原因：继续复用带 Tool 的 Agent 仍可能无视提示并再次检索，造成长时间循环。
+        # 作用：把已取得的 Observation 交给无工具 finalizer，只允许它生成最终自然语言答案。
+        finalizer = build_smolagents_tool_calling_agent(settings=settings, tools=[])
+        retry_result = finalizer.run(
             (
-                "Continue from the existing tool observations and answer the original user "
-                "question now. Do not repeat a successful tool call. Return only a complete "
+                f"Original user question:\n{user_message}\n\n"
+                f"Available tool evidence:\n{evidence[:12_000]}\n\n"
+                "Answer the original user question now. Return only a complete "
                 "natural-language final answer in the user's language. State the conclusion, "
                 "explain the relevant relationship or evidence, and explicitly cite every "
                 "available local source file and page. Never expose Observation, Thought, tool "
                 "logs, or drafts."
             ),
-            reset=False,
             max_steps=2,
             return_full_result=True,
         )
-        retry_answer, _, _ = _unpack_agent_run_result(retry_result)
+        retry_answer, retry_state, retry_steps = _unpack_agent_run_result(retry_result)
+        tool_calls.extend(_extract_agent_tool_calls(retry_steps))
+        observations.extend(_extract_agent_observations(retry_steps))
+        state = retry_state or state
         final_answer = _extract_final_answer(retry_answer)
 
     if progress_callback is not None:
         progress_callback("completed")
     if not final_answer or _looks_like_tool_observation(final_answer):
         raise RuntimeError("smolagents did not produce a final chat answer after tool execution.")
-    return final_answer
+    # 原因：Orchestrator 需要知道实际使用了哪些能力和来源，但 UI 不能看到模型推理。
+    # 作用：只返回最终答案、Tool 名称和 Tool Observation，丢弃 Thought 与模型草稿。
+    return ChatAgentRun(
+        answer=final_answer,
+        tool_calls=tuple(dict.fromkeys(tool_calls)),
+        observations=tuple(dict.fromkeys(observations)),
+        state=state,
+    )
 
 
 def format_agent_chat_prompt(
@@ -531,7 +573,9 @@ def run_smolagents_file_analysis_with_debug(
         spreadsheet_names=spreadsheet_names,
         user_question=user_question,
     )
-    max_steps = min(max(8, len(file_names) * 2 + 4), 20)
+    # 原因：固定至少八步会让不遵循提示的模型反复读取同一文件，显著增加等待时间。
+    # 作用：按文件数提供一次读取和收尾预算，遗漏文件由下方精确校验触发补充轮。
+    max_steps = min(max(len(file_names) + 2, 4), 12)
     # 原因：上传分析需要由 smolagents 自己选择解析、RAG 或 Excel 沙箱工具。
     # 作用：返回完整运行状态供可选调试区审计，主界面仍只使用最终 answer。
     run_result = agent.run(
@@ -547,9 +591,17 @@ def run_smolagents_file_analysis_with_debug(
         spreadsheet_names=spreadsheet_names,
     )
     missing_tools = required_tools.difference(tool_calls)
+    parser_files = set(file_names).difference(spreadsheet_names)
+    inspected_files = _extract_inspected_file_names(steps)
+    missing_files = parser_files.difference(inspected_files)
 
     final_answer = _extract_final_answer(answer)
-    if not final_answer or _looks_like_tool_observation(final_answer) or missing_tools:
+    if (
+        not final_answer
+        or _looks_like_tool_observation(final_answer)
+        or missing_tools
+        or missing_files
+    ):
         # 原因：少数模型会把最后一次 Tool Observation 当作回答，或者在步数内没有调用 final_answer。
         # 作用：保留同一个 Agent memory 再收敛一轮，禁止原始工具输出进入 Streamlit 主结果。
         if missing_tools:
@@ -558,23 +610,27 @@ def run_smolagents_file_analysis_with_debug(
         else:
             debug_steps.append("Agent 尚未形成最终答案，保留工具上下文后触发收敛步骤。")
         missing_tool_instruction = ", ".join(sorted(missing_tools)) or "none"
+        missing_file_instruction = ", ".join(sorted(missing_files)) or "none"
         retry_result = agent.run(
             (
                 "Continue from the existing tool observations and answer the original "
                 "user question now. "
                 f"Before answering, call every missing required tool: {missing_tool_instruction}. "
+                f"Read every missing file with document_parser exactly once: "
+                f"{missing_file_instruction}. "
                 "For excel_analysis, generate restricted pandas code from the existing "
                 "excel_schema observation. Return only a complete natural-language final "
                 "answer. Do not repeat Observation, tool output, Thought, code drafts, or "
                 "internal steps. Follow the language of the user's question."
             ),
             reset=False,
-            max_steps=3,
+            max_steps=min(max(len(missing_files) + len(missing_tools) + 2, 3), 12),
             return_full_result=True,
         )
         retry_answer, retry_state, retry_steps = _unpack_agent_run_result(retry_result)
         retry_tool_calls = _extract_agent_tool_calls(retry_steps)
         tool_calls.extend(retry_tool_calls)
+        inspected_files.update(_extract_inspected_file_names(retry_steps))
         debug_steps.extend(
             _agent_debug_steps(
                 state=retry_state,
@@ -589,6 +645,10 @@ def run_smolagents_file_analysis_with_debug(
     if missing_tools:
         missing_names = ", ".join(sorted(missing_tools))
         raise RuntimeError(f"smolagents did not call required file tools: {missing_names}.")
+    missing_files = parser_files.difference(inspected_files)
+    if missing_files:
+        missing_names = ", ".join(sorted(missing_files))
+        raise RuntimeError(f"smolagents did not inspect uploaded files: {missing_names}.")
     if not final_answer or _looks_like_tool_observation(final_answer):
         raise RuntimeError("smolagents did not produce a final answer after tool execution.")
 
@@ -694,6 +754,44 @@ def _extract_agent_tool_calls(steps: list[dict[str, Any]]) -> list[str]:
             if isinstance(function, dict) and isinstance(function.get("name"), str):
                 names.append(function["name"])
     return names
+
+
+def _extract_agent_observations(steps: list[dict[str, Any]]) -> list[str]:
+    """Return observations produced by non-final tools without model thoughts."""
+    observations: list[str] = []
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        tool_names = _extract_agent_tool_calls([step])
+        observation = step.get("observations")
+        if (
+            isinstance(observation, str)
+            and observation.strip()
+            and any(name != "final_answer" for name in tool_names)
+        ):
+            observations.append(observation.strip())
+    return observations
+
+
+def _extract_inspected_file_names(steps: list[dict[str, Any]]) -> set[str]:
+    """Return file names passed to document_parser Tool calls."""
+    inspected: set[str] = set()
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        for tool_call in step.get("tool_calls") or []:
+            function = tool_call.get("function") if isinstance(tool_call, dict) else None
+            if not isinstance(function, dict) or function.get("name") != "document_parser":
+                continue
+            arguments = function.get("arguments")
+            if isinstance(arguments, str):
+                try:
+                    arguments = json.loads(arguments)
+                except json.JSONDecodeError:
+                    continue
+            if isinstance(arguments, dict) and isinstance(arguments.get("file_name"), str):
+                inspected.add(arguments["file_name"])
+    return inspected
 
 
 def _required_file_tools(file_names: list[str], spreadsheet_names: list[str]) -> set[str]:

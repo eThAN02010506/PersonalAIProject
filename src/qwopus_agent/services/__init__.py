@@ -6,6 +6,13 @@ from importlib import import_module
 from typing import Any
 
 _EXPORTS = {
+    "AgentOrchestrator": ("agent_orchestrator", "AgentOrchestrator"),
+    "ConversationTurn": ("orchestration_models", "ConversationTurn"),
+    "OrchestrationFile": ("orchestration_models", "OrchestrationFile"),
+    "OrchestrationRequest": ("orchestration_models", "OrchestrationRequest"),
+    "OrchestrationResult": ("orchestration_models", "OrchestrationResult"),
+    "ProcessEvent": ("orchestration_models", "ProcessEvent"),
+    "SourceCitation": ("orchestration_models", "SourceCitation"),
     "UploadedFileInput": ("analysis_service", "UploadedFileInput"),
     "UploadAnalysisOutcome": ("analysis_service", "UploadAnalysisOutcome"),
     "analyze_uploaded_files": ("analysis_service", "analyze_uploaded_files"),

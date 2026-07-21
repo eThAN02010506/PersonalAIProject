@@ -25,10 +25,14 @@ from qwopus_agent.reports import GeneratedReport, ReportGenerator
 
 # 原因：Streamlit 热重载期间 services 包可能保留半初始化状态，导致新导出暂时不可见。
 # 作用：UI 直接依赖具体服务模块，避免通过 package barrel 读取缓存属性。
-from qwopus_agent.services.analysis_service import UploadedFileInput, analyze_uploaded_files
+from qwopus_agent.services.agent_orchestrator import AgentOrchestrator
 from qwopus_agent.services.chat_service import start_chat_task
 from qwopus_agent.services.knowledge_graph_service import KnowledgeGraphService
 from qwopus_agent.services.knowledge_maintenance_service import KnowledgeMaintenanceService
+from qwopus_agent.services.orchestration_models import (
+    OrchestrationFile,
+    OrchestrationRequest,
+)
 from qwopus_agent.utils.conversation_log import append_conversation_event, load_chat_messages
 from qwopus_agent.utils.logging_config import configure_runtime_logging, get_logger
 
@@ -52,6 +56,8 @@ def _init_session_state(settings: SmolagentsModelSettings) -> None:
         st.session_state.chat_task = None
     if "chat_task_notice" not in st.session_state:
         st.session_state.chat_task_notice = None
+    if "chat_trace" not in st.session_state:
+        st.session_state.chat_trace = []
 
 
 def _build_graph_extractor(settings: SmolagentsModelSettings) -> CompositeGraphExtractor:
@@ -89,6 +95,7 @@ def _render_sidebar(settings: SmolagentsModelSettings) -> None:
 
         if st.button("清空对话", width="stretch"):
             st.session_state.messages = []
+            st.session_state.chat_trace = []
             st.rerun()
 
 
@@ -150,6 +157,7 @@ def _render_chat_progress() -> None:
         st.session_state.chat_task = None
         if result.status == "completed":
             st.session_state.messages.append({"role": "assistant", "content": result.content})
+            st.session_state.chat_trace = list(result.trace)
             logger.info("chat_message_completed reply_length=%s", len(result.content))
             append_conversation_event(
                 "chat_message",
@@ -161,6 +169,7 @@ def _render_chat_progress() -> None:
                 "error",
                 f"对话调用失败：{result.content}",
             )
+            st.session_state.chat_trace = list(result.trace)
         st.rerun()
 
     phase_labels = {
@@ -168,6 +177,7 @@ def _render_chat_progress() -> None:
         "planning": "正在规划工具调用",
         "searching": "正在通过 Tavily 搜索",
         "retrieving": "正在检索本地知识库",
+        "analyzing": "正在分析上传文件",
         "generating": "正在生成最终答案",
     }
     label = phase_labels.get(phase, "正在处理")
@@ -179,6 +189,22 @@ def _render_chat_progress() -> None:
             st.session_state.chat_task_notice = ("warning", "已停止本次生成。")
             logger.info("chat_generation_cancelled")
             st.rerun()
+
+
+def _render_chat_trace(show_process: bool) -> None:
+    """Render only safe orchestration events when explicitly requested."""
+    if not show_process or not st.session_state.chat_trace:
+        return
+    with st.expander("执行过程", expanded=False):
+        for index, event in enumerate(st.session_state.chat_trace, start=1):
+            parts = [str(event.get("agent") or "orchestrator"), str(event.get("status") or "")]
+            if event.get("tool"):
+                parts.append(f"Tool: {event['tool']}")
+            if event.get("duration_seconds") is not None:
+                parts.append(f"{float(event['duration_seconds']):.2f}s")
+            message = str(event.get("message") or "").strip()
+            suffix = f" — {message}" if message else ""
+            st.markdown(f"**{index}.** {' · '.join(parts)}{suffix}")
 
 
 def _render_analysis_result(result: AnalysisResult) -> None:
@@ -328,7 +354,9 @@ def _render_upload_analysis(settings: SmolagentsModelSettings) -> None:
     )
     # 原因：主界面默认只呈现最终答案，但用户需要时可以查看可审计的分析过程。
     # 作用：把工具调用、检索命中、模型重试等过程信息放到用户可选区域。
-    show_debug = st.checkbox("显示分析过程", value=False)
+    analysis_options = st.columns(2)
+    show_debug = analysis_options[0].toggle("显示分析过程", value=False)
+    generate_report = analysis_options[1].toggle("分析完成后生成报告", value=False)
 
     if st.button("开始本地分析", type="primary", width="stretch"):
         if not uploaded_files:
@@ -337,21 +365,36 @@ def _render_upload_analysis(settings: SmolagentsModelSettings) -> None:
 
         with st.spinner("正在保存并分析文件..."):
             try:
-                outcome = analyze_uploaded_files(
-                    uploaded_files=[
-                        UploadedFileInput(
+                # 原因：文件入口不能继续绕过统一编排层直接调用 AnalysisService。
+                # 作用：单文件保持快速路径，组合/报告请求自动升级为 Supervisor 流程。
+                outcome = AgentOrchestrator(
+                    settings=settings,
+                    minirag=st.session_state.minirag,
+                ).run_sync(
+                    OrchestrationRequest(
+                        objective=user_question,
+                        uploaded_files=tuple(
+                            OrchestrationFile(
                             name=uploaded_file.name,
                             content=uploaded_file.getvalue(),
                         )
-                        for uploaded_file in uploaded_files
-                    ],
-                    user_question=user_question,
-                    settings=settings,
-                    minirag=st.session_state.minirag,
+                            for uploaded_file in uploaded_files
+                        ),
+                        generate_report=generate_report,
+                        report_title="Qwopus Analysis Report",
+                        report_basename="qwopus_analysis_report",
+                    )
                 )
-                st.session_state.analysis_result = outcome.result
-                st.session_state.analysis_debug_steps = outcome.debug_steps
-                st.success(f"已完成分析：{len(outcome.analyzed_file_names)} 个文件")
+                if not outcome.success or outcome.analysis_result is None:
+                    raise RuntimeError(outcome.final_answer)
+                st.session_state.analysis_result = outcome.analysis_result
+                st.session_state.analysis_debug_steps = [
+                    event.message
+                    for event in outcome.trace
+                    if event.message
+                ]
+                st.session_state.analysis_report = outcome.report
+                st.success(f"已完成分析：{len(uploaded_files)} 个文件")
             except Exception as exc:
                 logger.exception("analysis_failed")
                 st.error(f"分析失败：{exc}")
@@ -465,14 +508,16 @@ def main() -> None:
         _render_knowledge_graph(st.session_state.minirag)
 
     with chat_tab:
-        chat_options = st.columns(2)
+        chat_options = st.columns(3)
         enable_web_search = chat_options[0].toggle("联网搜索", value=False)
         # 原因：本地文件可能包含敏感信息，聊天不应在用户不知情时自动检索。
         # 作用：用户显式开启后，smolagents 才能选择 MiniRAG 或知识图谱 Tool。
         enable_local_knowledge = chat_options[1].toggle("使用本地知识库", value=False)
+        show_chat_process = chat_options[2].toggle("显示执行过程", value=False)
         _render_history()
         _render_chat_notice()
         _render_chat_progress()
+        _render_chat_trace(show_chat_process)
         user_input = st.chat_input(
             "输入你的问题...",
             disabled=st.session_state.chat_task is not None,

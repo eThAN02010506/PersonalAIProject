@@ -8,10 +8,11 @@ from dataclasses import dataclass
 from queue import Empty
 from typing import Any, Literal
 
-from qwopus_agent.integrations.smolagents_runtime import (
-    ChatMessage,
-    SmolagentsModelSettings,
-    run_agent_chat_turn,
+from qwopus_agent.integrations.smolagents_runtime import ChatMessage, SmolagentsModelSettings
+from qwopus_agent.services.agent_orchestrator import AgentOrchestrator
+from qwopus_agent.services.orchestration_models import (
+    ConversationTurn,
+    OrchestrationRequest,
 )
 
 ChatTaskStatus = Literal["completed", "failed"]
@@ -23,6 +24,8 @@ class ChatTaskResult:
 
     status: ChatTaskStatus
     content: str
+    trace: tuple[dict[str, Any], ...] = ()
+    citations: tuple[dict[str, Any], ...] = ()
 
 
 @dataclass
@@ -50,7 +53,7 @@ class BackgroundChatTask:
     def poll_result(self) -> ChatTaskResult | None:
         """Return a terminal result without blocking the UI."""
         try:
-            status, content = self.result_queue.get_nowait()
+            payload = self.result_queue.get_nowait()
         except Empty:
             if self.process.is_alive():
                 return None
@@ -61,7 +64,15 @@ class BackgroundChatTask:
             )
 
         self.process.join(timeout=0.1)
-        return ChatTaskResult(status=status, content=str(content))
+        status, content = payload[:2]
+        trace = tuple(payload[2]) if len(payload) > 2 else ()
+        citations = tuple(payload[3]) if len(payload) > 3 else ()
+        return ChatTaskResult(
+            status=status,
+            content=str(content),
+            trace=trace,
+            citations=citations,
+        )
 
     def cancel(self) -> None:
         """Terminate the local worker so the UI stops waiting immediately."""
@@ -124,15 +135,30 @@ def _run_chat_task(
         progress_queue.put(phase)
 
     try:
-        reply = run_agent_chat_turn(
-            user_message=user_message,
-            history=history,
-            settings=settings,
-            enable_web_search=enable_web_search,
-            enable_local_knowledge=enable_local_knowledge,
+        # 原因：聊天、联网和本地知识不能继续绕过统一任务入口各自运行。
+        # 作用：后台进程只负责生命周期，所有路由与 Multi-Agent 决策交给 Orchestrator。
+        result = AgentOrchestrator(settings=settings).run_sync(
+            OrchestrationRequest(
+                objective=user_message,
+                history=tuple(
+                    ConversationTurn(role=item["role"], content=item["content"])
+                    for item in history
+                    if item.get("role") in {"user", "assistant"} and item.get("content")
+                ),
+                enable_web_search=enable_web_search,
+                enable_local_knowledge=enable_local_knowledge,
+            ),
             progress_callback=report_progress,
         )
     except Exception as exc:
         result_queue.put(("failed", f"{type(exc).__name__}: {exc}"))
     else:
-        result_queue.put(("completed", reply))
+        status = "completed" if result.success else "failed"
+        result_queue.put(
+            (
+                status,
+                result.final_answer,
+                [event.model_dump(mode="json") for event in result.trace],
+                [citation.model_dump(mode="json") for citation in result.citations],
+            )
+        )

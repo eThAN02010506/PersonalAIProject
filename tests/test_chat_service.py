@@ -4,6 +4,11 @@ from unittest.mock import Mock, patch
 
 from qwopus_agent.integrations.smolagents_runtime import SmolagentsModelSettings
 from qwopus_agent.services.chat_service import BackgroundChatTask, _run_chat_task
+from qwopus_agent.services.orchestration_models import (
+    OrchestrationResult,
+    ProcessEvent,
+    SourceCitation,
+)
 
 
 class ChatServiceTests(unittest.TestCase):
@@ -12,15 +17,28 @@ class ChatServiceTests(unittest.TestCase):
         progress_queue: queue.Queue = queue.Queue()
         settings = SmolagentsModelSettings(model_id="test", base_url="http://local/v1")
 
-        def fake_run_agent_chat_turn(**kwargs):
-            self.assertTrue(kwargs["enable_local_knowledge"])
-            kwargs["progress_callback"]("planning")
-            kwargs["progress_callback"]("completed")
-            return "finished reply"
+        def fake_orchestrator_run(_self, request, progress_callback=None):
+            self.assertTrue(request.enable_local_knowledge)
+            progress_callback("planning")
+            progress_callback("completed")
+            return OrchestrationResult(
+                success=True,
+                final_answer="finished reply",
+                route="multi_agent",
+                trace=(
+                    ProcessEvent(
+                        phase="tool_call",
+                        status="completed",
+                        agent="knowledge_agent",
+                        tool="graph_search",
+                    ),
+                ),
+                citations=(SourceCitation(kind="local", source="notes.txt"),),
+            )
 
         with patch(
-            "qwopus_agent.services.chat_service.run_agent_chat_turn",
-            side_effect=fake_run_agent_chat_turn,
+            "qwopus_agent.services.chat_service.AgentOrchestrator.run_sync",
+            new=fake_orchestrator_run,
         ):
             _run_chat_task(
                 result_queue,
@@ -32,7 +50,10 @@ class ChatServiceTests(unittest.TestCase):
                 True,
             )
 
-        self.assertEqual(result_queue.get_nowait(), ("completed", "finished reply"))
+        payload = result_queue.get_nowait()
+        self.assertEqual(payload[:2], ("completed", "finished reply"))
+        self.assertEqual(payload[2][0]["tool"], "graph_search")
+        self.assertEqual(payload[3][0]["source"], "notes.txt")
         self.assertEqual(progress_queue.get_nowait(), "planning")
         self.assertEqual(progress_queue.get_nowait(), "completed")
 
@@ -42,7 +63,7 @@ class ChatServiceTests(unittest.TestCase):
         settings = SmolagentsModelSettings(model_id="test", base_url="http://local/v1")
 
         with patch(
-            "qwopus_agent.services.chat_service.run_agent_chat_turn",
+            "qwopus_agent.services.chat_service.AgentOrchestrator.run_sync",
             side_effect=TimeoutError("model timed out"),
         ):
             _run_chat_task(
@@ -54,7 +75,7 @@ class ChatServiceTests(unittest.TestCase):
                 False,
             )
 
-        status, content = result_queue.get_nowait()
+        status, content = result_queue.get_nowait()[:2]
         self.assertEqual(status, "failed")
         self.assertIn("model timed out", content)
 

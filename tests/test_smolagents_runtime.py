@@ -15,6 +15,7 @@ from qwopus_agent.integrations.smolagents_runtime import (
     format_file_analysis_agent_prompt,
     resolve_model_settings,
     run_agent_chat_turn,
+    run_agent_chat_turn_with_debug,
     run_smolagents_chat_turn,
     run_smolagents_file_analysis_with_debug,
 )
@@ -162,7 +163,7 @@ class SmolagentsRuntimeTests(unittest.TestCase):
 
         self.assertEqual(FakeToolCallingAgent.last_instance.tools, [fake_tool])
         self.assertIn("Use tavily_search", FakeToolCallingAgent.last_instance.prompt)
-        self.assertEqual(FakeToolCallingAgent.last_instance.run_kwargs["max_steps"], 4)
+        self.assertEqual(FakeToolCallingAgent.last_instance.run_kwargs["max_steps"], 2)
 
     def test_run_agent_chat_turn_injects_local_knowledge_tools_when_enabled(self) -> None:
         settings = SmolagentsModelSettings(
@@ -187,7 +188,7 @@ class SmolagentsRuntimeTests(unittest.TestCase):
         self.assertEqual(FakeToolCallingAgent.last_instance.tools, fake_tools)
         self.assertIn("Use rag_search", FakeToolCallingAgent.last_instance.prompt)
         self.assertIn("Use graph_search", FakeToolCallingAgent.last_instance.prompt)
-        self.assertEqual(FakeToolCallingAgent.last_instance.run_kwargs["max_steps"], 4)
+        self.assertEqual(FakeToolCallingAgent.last_instance.run_kwargs["max_steps"], 2)
 
     def test_run_agent_chat_turn_allows_both_web_and_local_tools(self) -> None:
         settings = SmolagentsModelSettings(
@@ -216,7 +217,7 @@ class SmolagentsRuntimeTests(unittest.TestCase):
             )
 
         self.assertEqual(FakeToolCallingAgent.last_instance.tools, [web_tool, *local_tools])
-        self.assertEqual(FakeToolCallingAgent.last_instance.run_kwargs["max_steps"], 6)
+        self.assertEqual(FakeToolCallingAgent.last_instance.run_kwargs["max_steps"], 3)
 
     def test_run_agent_chat_turn_refines_short_local_knowledge_answer(self) -> None:
         settings = SmolagentsModelSettings(
@@ -231,6 +232,7 @@ class SmolagentsRuntimeTests(unittest.TestCase):
                     {
                         "step_number": 1,
                         "tool_calls": [{"function": {"name": "graph_search"}}],
+                        "observations": "[agent_notes.txt] Planner routes work.",
                     }
                 ],
             ),
@@ -256,10 +258,56 @@ class SmolagentsRuntimeTests(unittest.TestCase):
             )
 
         # 原因：真实模型曾正确检索图谱，却只返回一句没有来源的答案。
-        # 作用：锁定短答案会基于既有 Observation 收敛一次，且不会重置 Agent memory。
+        # 作用：锁定短答案会基于既有 Observation 交给无工具 Agent 收敛，杜绝重复检索。
         self.assertIn("agent_notes.txt", result)
-        self.assertFalse(FakeToolCallingAgent.last_instance.run_kwargs["reset"])
+        self.assertEqual(FakeToolCallingAgent.last_instance.tools, [])
+        self.assertIn("[agent_notes.txt]", FakeToolCallingAgent.last_instance.prompt)
         self.assertEqual(FakeToolCallingAgent.last_instance.run_kwargs["max_steps"], 2)
+
+    def test_detailed_chat_result_keeps_tool_metadata_without_thoughts(self) -> None:
+        settings = SmolagentsModelSettings(
+            model_id="any-model",
+            base_url="http://127.0.0.1:8080/v1",
+        )
+        FakeToolCallingAgent.queued_results = [
+            types.SimpleNamespace(
+                output="The relationship is supported by ownership.pdf.",
+                state="success",
+                steps=[
+                    {
+                        "step_number": 1,
+                        "model_output": "private reasoning",
+                        "tool_calls": [{"function": {"name": "graph_search"}}],
+                        "observations": "[ownership.pdf, page 4] Company A owns Company B",
+                    },
+                    {
+                        "step_number": 2,
+                        "tool_calls": [{"function": {"name": "final_answer"}}],
+                        "observations": "The relationship is supported by ownership.pdf.",
+                    },
+                ],
+            )
+        ]
+
+        with patch(
+            "qwopus_agent.integrations.smolagents_runtime.build_local_knowledge_tools",
+            return_value=[object(), object()],
+        ):
+            result = run_agent_chat_turn_with_debug(
+                user_message="How are Company A and Company B related?",
+                history=[],
+                settings=settings,
+                enable_local_knowledge=True,
+            )
+
+        # 原因：统一编排需要引用与 Tool 审计信息，但不能取得模型的 Thought。
+        # 作用：确保详细结果只保留非 final_answer Tool 的 Observation 和名称。
+        self.assertEqual(result.tool_calls, ("graph_search", "final_answer"))
+        self.assertEqual(
+            result.observations,
+            ("[ownership.pdf, page 4] Company A owns Company B",),
+        )
+        self.assertNotIn("private reasoning", "".join(result.observations))
 
     def test_format_agent_chat_prompt_keeps_recent_history(self) -> None:
         prompt = format_agent_chat_prompt(
@@ -309,7 +357,14 @@ class SmolagentsRuntimeTests(unittest.TestCase):
                 steps=[
                     {
                         "step_number": 1,
-                        "tool_calls": [{"function": {"name": "document_parser", "arguments": {}}}],
+                        "tool_calls": [
+                            {
+                                "function": {
+                                    "name": "document_parser",
+                                    "arguments": {"file_name": "notes.txt"},
+                                }
+                            }
+                        ],
                     }
                 ],
             )
@@ -336,7 +391,14 @@ class SmolagentsRuntimeTests(unittest.TestCase):
         )
         tool_step = {
             "step_number": 1,
-            "tool_calls": [{"function": {"name": "document_parser", "arguments": {}}}],
+            "tool_calls": [
+                {
+                    "function": {
+                        "name": "document_parser",
+                        "arguments": {"file_name": "notes.txt"},
+                    }
+                }
+            ],
         }
         FakeToolCallingAgent.queued_results = [
             types.SimpleNamespace(
@@ -361,6 +423,60 @@ class SmolagentsRuntimeTests(unittest.TestCase):
 
         self.assertEqual(result.answer, "这是最终总结。")
         self.assertNotIn("Observation", result.answer)
+
+    def test_file_analysis_agent_requires_each_uploaded_file_to_be_inspected(self) -> None:
+        settings = SmolagentsModelSettings(
+            model_id="any-model",
+            base_url="http://127.0.0.1:8080/v1",
+        )
+        FakeToolCallingAgent.queued_results = [
+            types.SimpleNamespace(
+                output="Only the first file was read.",
+                state="max_steps_error",
+                steps=[
+                    {
+                        "tool_calls": [
+                            {
+                                "function": {
+                                    "name": "document_parser",
+                                    "arguments": '{"file_name": "first.txt"}',
+                                }
+                            }
+                        ]
+                    }
+                ],
+            ),
+            types.SimpleNamespace(
+                output="Both files were summarized.",
+                state="success",
+                steps=[
+                    {
+                        "tool_calls": [
+                            {
+                                "function": {
+                                    "name": "document_parser",
+                                    "arguments": {"file_name": "second.txt"},
+                                }
+                            }
+                        ]
+                    }
+                ],
+            ),
+        ]
+
+        result = run_smolagents_file_analysis_with_debug(
+            file_names=["first.txt", "second.txt"],
+            spreadsheet_names=[],
+            user_question="Summarize both files.",
+            tools=[object()],
+            settings=settings,
+        )
+
+        # 原因：只检查 Tool 名称会把“重复读取同一文件”误判为完成多文件分析。
+        # 作用：验证补充轮明确读取遗漏文件后，runtime 才接受最终答案。
+        self.assertEqual(result.answer, "Both files were summarized.")
+        self.assertIn("second.txt", FakeToolCallingAgent.last_instance.prompt)
+        self.assertEqual(FakeToolCallingAgent.last_instance.run_kwargs["max_steps"], 3)
 
     def test_file_analysis_agent_rejects_answer_without_file_inspection(self) -> None:
         settings = SmolagentsModelSettings(
