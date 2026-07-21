@@ -33,7 +33,10 @@ export type AnalysisResult = {
 
 export type Health = {
   status: string;
+  mode: "remote" | "local";
   model_online: boolean;
   message: string;
   model: string;
+  base_url: string;
+  local_model_path?: string;
 };

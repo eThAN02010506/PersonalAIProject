@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import { AgentRuntimeProvider } from "./components/AgentRuntimeProvider";
 import { ChatThread } from "./components/ChatThread";
 import { DocumentWorkspace } from "./components/DocumentWorkspace";
+import { ModelSettingsDialog } from "./components/ModelSettingsDialog";
 import { RunInspector } from "./components/RunInspector";
 import { Sidebar } from "./components/Sidebar";
 import { api, waitForRun } from "./lib/api";
@@ -26,6 +27,7 @@ export default function App() {
   const [runView, setRunView] = useState<RunView | null>(null);
   const [phase, setPhase] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [modelSettingsOpen, setModelSettingsOpen] = useState(false);
 
   const refreshConversations = useCallback(async () => {
     const items = await api.listConversations();
@@ -178,6 +180,7 @@ export default function App() {
           setRunView(null);
         }}
         onDelete={(id) => void deleteConversation(id)}
+        onConfigureModel={() => setModelSettingsOpen(true)}
       />
       {sidebarOpen && <button className="sidebar-backdrop" onClick={() => setSidebarOpen(false)} />}
 
@@ -250,6 +253,12 @@ export default function App() {
           <DocumentWorkspace />
         )}
       </main>
+      <ModelSettingsDialog
+        open={modelSettingsOpen}
+        health={health}
+        onClose={() => setModelSettingsOpen(false)}
+        onSaved={setHealth}
+      />
     </div>
   );
 }

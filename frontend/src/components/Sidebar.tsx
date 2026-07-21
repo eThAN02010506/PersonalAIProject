@@ -1,4 +1,4 @@
-import { Bot, Bug, MessageSquare, Plus, Trash2, X } from "lucide-react";
+import { Bot, Bug, MessageSquare, Plus, Settings2, Trash2, X } from "lucide-react";
 
 import type { Conversation, Health } from "../lib/types";
 
@@ -11,6 +11,7 @@ type SidebarProps = {
   onCreate: () => void;
   onSelect: (id: string) => void;
   onDelete: (id: string) => void;
+  onConfigureModel: () => void;
 };
 
 export function Sidebar({
@@ -22,6 +23,7 @@ export function Sidebar({
   onCreate,
   onSelect,
   onDelete,
+  onConfigureModel,
 }: SidebarProps) {
   return (
     <aside className={`sidebar ${open ? "open" : ""}`}>
@@ -60,9 +62,19 @@ export function Sidebar({
       </nav>
 
       <div className="sidebar-footer">
-        <div className="model-status" title={health?.message ?? "Checking model"}>
-          <span className={`status-dot ${health?.model_online ? "online" : ""}`} />
-          <span>{health?.model ?? "Checking model"}</span>
+        <div className="model-status-row">
+          <div className="model-status" title={health?.message ?? "Checking model"}>
+            <span className={`status-dot ${health?.model_online ? "online" : ""}`} />
+            <span>{health?.model ?? "Checking model"}</span>
+          </div>
+          <button
+            className="icon-button model-settings-button"
+            type="button"
+            onClick={onConfigureModel}
+            title="Model connection"
+          >
+            <Settings2 size={15} />
+          </button>
         </div>
         <a
           className="debug-link"

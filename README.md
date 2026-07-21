@@ -147,9 +147,12 @@ AgentOrchestrator + smolagents
 - Document analysis searches existing MiniRAG knowledge, inserts each newly normalized document into
   `storage/minirag/`, and gives smolagents bounded document, pandas, and MiniRAG tools. The browser only
   receives the final answer, citations, safe process events, and generated report links.
-- The OpenAI-compatible endpoint is read from the existing environment configuration. The current
-  model identifier is resolved from the server for each run, so changing Gemma, Qwopus, Qwen, or
-  another compatible model does not require a frontend code change.
+- The initial OpenAI-compatible endpoint is read from the existing environment configuration. The
+  model settings dialog can switch the runtime address without modifying `.env`, and the current
+  model identifier is resolved from the selected server for each run.
+- Local MLX mode accepts an existing model directory, discovers `mlx_lm.server` from the model
+  parent `.venv` or current environment, starts it on a free loopback port, and stops only that child
+  process when the API exits. Arbitrary compatible models can still be used through Remote API mode.
 
 Conversations are persisted in `storage/qwopus.db`, and existing Streamlit JSONL history is imported
 once when that database is first created. Streamlit remains available at its own port as a debugging
@@ -158,7 +161,7 @@ console; the production React application links to it but does not depend on Str
 Verify the new boundary with:
 
 ```bash
-PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python -m unittest tests.test_api
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python -m unittest tests.test_model_runtime tests.test_api
 cd frontend && pnpm run lint && pnpm run build
 ```
 

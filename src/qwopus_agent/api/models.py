@@ -77,3 +77,23 @@ class AnalysisView(BaseModel):
     citations: list[dict[str, Any]] = Field(default_factory=list)
     trace: list[dict[str, Any]] = Field(default_factory=list)
     reports: list[dict[str, str]] = Field(default_factory=list)
+
+
+class ModelSettingsUpdate(BaseModel):
+    """Request to select a remote endpoint or launch a local MLX model."""
+
+    mode: Literal["remote", "local"]
+    base_url: str | None = None
+    model_path: str | None = None
+
+
+class ModelSettingsView(BaseModel):
+    """Current runtime model selection and connection state."""
+
+    status: Literal["ok"] = "ok"
+    mode: Literal["remote", "local"]
+    model_online: bool
+    message: str
+    model: str
+    base_url: str
+    local_model_path: str | None = None

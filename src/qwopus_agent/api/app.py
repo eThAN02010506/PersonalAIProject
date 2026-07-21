@@ -13,17 +13,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from qwopus_agent.integrations.smolagents_runtime import (
-    SmolagentsModelSettings,
-    check_model_connection,
-    resolve_model_settings,
-)
 from qwopus_agent.services.agent_orchestrator import AgentOrchestrator
 from qwopus_agent.services.orchestration_models import OrchestrationFile, OrchestrationRequest
 
 if TYPE_CHECKING:
     from qwopus_agent.memory import MiniRAG
 
+from .model_runtime import ModelRuntimeError, RuntimeModelController, RuntimeModelStatus
 from .models import (
     AnalysisView,
     ChatStartRequest,
@@ -31,6 +27,8 @@ from .models import (
     ConversationUpdate,
     ConversationView,
     MessageView,
+    ModelSettingsUpdate,
+    ModelSettingsView,
     RunStarted,
     RunView,
 )
@@ -44,12 +42,14 @@ FRONTEND_DIRECTORY = Path("frontend/dist")
 def create_app(
     repository: ConversationRepository | None = None,
     minirag: MiniRAG | None = None,
+    model_runtime: RuntimeModelController | None = None,
 ) -> FastAPI:
     """Build an independently testable API application."""
     repo = repository or ConversationRepository()
     runs = ChatRunRegistry(repo)
     memory = minirag
     memory_lock = Lock()
+    runtime = model_runtime or RuntimeModelController()
 
     def get_minirag() -> MiniRAG:
         nonlocal memory
@@ -67,11 +67,17 @@ def create_app(
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
         repo.initialize()
-        yield
+        try:
+            yield
+        finally:
+            # 原因：本地 MLX 由 FastAPI 启动后不应在应用退出时成为孤儿进程。
+            # 作用：只终止本控制器拥有的子进程，不影响用户手工启动的模型服务。
+            runtime.close()
 
     api = FastAPI(title="Qwopus-Agent API", version="0.1.0", lifespan=lifespan)
     api.state.repository = repo
     api.state.runs = runs
+    api.state.model_runtime = runtime
     api.add_middleware(
         CORSMiddleware,
         allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
@@ -80,16 +86,28 @@ def create_app(
         allow_headers=["*"],
     )
 
-    @api.get("/api/health")
-    async def health() -> dict[str, object]:
-        online, message = await asyncio.to_thread(check_model_connection)
-        current = resolve_model_settings(SmolagentsModelSettings.from_env())
-        return {
-            "status": "ok",
-            "model_online": online,
-            "message": message,
-            "model": current.model_id,
-        }
+    @api.get("/api/health", response_model=ModelSettingsView)
+    async def health() -> ModelSettingsView:
+        return _model_settings_view(await asyncio.to_thread(runtime.status))
+
+    @api.get("/api/model-settings", response_model=ModelSettingsView)
+    async def model_settings() -> ModelSettingsView:
+        return _model_settings_view(await asyncio.to_thread(runtime.status))
+
+    @api.put("/api/model-settings", response_model=ModelSettingsView)
+    async def update_model_settings(payload: ModelSettingsUpdate) -> ModelSettingsView:
+        try:
+            if payload.mode == "remote":
+                if not payload.base_url:
+                    raise ModelRuntimeError("Model address is required for remote mode.")
+                status = await asyncio.to_thread(runtime.configure_remote, payload.base_url)
+            else:
+                if not payload.model_path:
+                    raise ModelRuntimeError("Model path is required for local mode.")
+                status = await asyncio.to_thread(runtime.configure_local, payload.model_path)
+        except ModelRuntimeError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return _model_settings_view(status)
 
     @api.get("/api/conversations", response_model=list[ConversationView])
     def conversations() -> list[ConversationView]:
@@ -130,7 +148,7 @@ def create_app(
         run_id = runs.start(
             conversation_id,
             payload.content,
-            resolve_model_settings(SmolagentsModelSettings.from_env()),
+            runtime.current_settings(),
             enable_web_search=payload.enable_web_search,
             enable_local_knowledge=payload.enable_local_knowledge,
         )
@@ -174,7 +192,7 @@ def create_app(
             report_basename="qwopus_web_analysis",
         )
         orchestrator = AgentOrchestrator(
-            resolve_model_settings(SmolagentsModelSettings.from_env()),
+            runtime.current_settings(),
             minirag=get_minirag(),
         )
         result = await asyncio.to_thread(orchestrator.run_sync, request)
@@ -225,6 +243,17 @@ def create_app(
 def _conversation_title(content: str) -> str:
     title = " ".join(content.split())
     return title if len(title) <= 48 else f"{title[:47]}…"
+
+
+def _model_settings_view(status: RuntimeModelStatus) -> ModelSettingsView:
+    return ModelSettingsView(
+        mode=status.mode,
+        model_online=status.online,
+        message=status.message,
+        model=status.settings.model_id,
+        base_url=status.settings.base_url,
+        local_model_path=status.local_model_path,
+    )
 
 
 app = create_app()

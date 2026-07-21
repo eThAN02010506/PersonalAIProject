@@ -6,7 +6,9 @@ from unittest.mock import MagicMock, patch
 from fastapi.testclient import TestClient
 
 from qwopus_agent.api.app import create_app
+from qwopus_agent.api.model_runtime import RuntimeModelStatus
 from qwopus_agent.api.repository import ConversationRepository
+from qwopus_agent.integrations.smolagents_runtime import SmolagentsModelSettings
 from qwopus_agent.services.orchestration_models import OrchestrationResult
 
 
@@ -19,8 +21,27 @@ class ApiTests(unittest.TestCase):
         self.repository = ConversationRepository(database_path, import_legacy=False)
         # 原因：API 边界单元测试不应加载或写入用户真实的 storage/minirag 索引。
         # 作用：注入隔离替身；真实 MinerU/MiniRAG 链路由端到端用例单独验证。
+        self.model_settings = SmolagentsModelSettings(
+            model_id="test-model",
+            base_url="http://127.0.0.1:9999/v1",
+        )
+        self.model_status = RuntimeModelStatus(
+            mode="remote",
+            settings=self.model_settings,
+            online=True,
+            message="online",
+        )
+        self.model_runtime = MagicMock()
+        self.model_runtime.current_settings.return_value = self.model_settings
+        self.model_runtime.status.return_value = self.model_status
+        self.model_runtime.configure_remote.return_value = self.model_status
+        self.model_runtime.configure_local.return_value = self.model_status
         self.client_context = TestClient(
-            create_app(self.repository, minirag=MagicMock())
+            create_app(
+                self.repository,
+                minirag=MagicMock(),
+                model_runtime=self.model_runtime,
+            )
         )
         self.client = self.client_context.__enter__()
 
@@ -60,7 +81,20 @@ class ApiTests(unittest.TestCase):
         self.assertIn("/api/conversations/{conversation_id}/runs", schema["paths"])
         self.assertIn("/api/runs/{run_id}", schema["paths"])
         self.assertIn("/api/analysis", schema["paths"])
+        self.assertIn("/api/model-settings", schema["paths"])
         self.assertIn("/api/reports/{filename}", schema["paths"])
+
+    def test_model_settings_switches_remote_endpoint_without_env_changes(self) -> None:
+        response = self.client.put(
+            "/api/model-settings",
+            json={"mode": "remote", "base_url": "http://192.168.1.97:8001/v1"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["base_url"], self.model_settings.base_url)
+        self.model_runtime.configure_remote.assert_called_once_with(
+            "http://192.168.1.97:8001/v1"
+        )
 
     def test_analysis_reads_uploaded_bytes_before_orchestration(self) -> None:
         orchestrator = MagicMock()

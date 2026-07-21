@@ -18,6 +18,17 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 export const api = {
   health: () => request<Health>("/api/health"),
 
+  updateModelSettings: (payload: {
+    mode: "remote" | "local";
+    base_url?: string;
+    model_path?: string;
+  }) =>
+    request<Health>("/api/model-settings", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    }),
+
   listConversations: () => request<Conversation[]>("/api/conversations"),
 
   createConversation: (title = "New chat") =>
