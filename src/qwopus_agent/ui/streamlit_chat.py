@@ -33,15 +33,31 @@ from qwopus_agent.services.orchestration_models import (
     OrchestrationFile,
     OrchestrationRequest,
 )
-from qwopus_agent.utils.conversation_log import append_conversation_event, load_chat_messages
+from qwopus_agent.utils.conversation_log import (
+    append_conversation_event,
+    conversation_title,
+    create_conversation,
+    delete_conversation,
+    list_conversations,
+    load_chat_messages,
+    rename_conversation,
+)
 from qwopus_agent.utils.logging_config import configure_runtime_logging, get_logger
 
 logger = get_logger("ui.streamlit_chat")
 
 
 def _init_session_state(settings: SmolagentsModelSettings) -> None:
-    if "messages" not in st.session_state:
-        st.session_state.messages = load_chat_messages()
+    if st.session_state.get("conversation_state_version") != 1:
+        conversations = list_conversations()
+        active_id = (
+            conversations[0].conversation_id if conversations else create_conversation()
+        )
+        # 原因：旧版把全部日志加载成一条会话，热重载后内存中仍可能保留混合消息。
+        # 作用：升级时只加载当前会话，并用版本标记避免每次页面重跑重复初始化。
+        st.session_state.active_conversation_id = active_id
+        st.session_state.messages = load_chat_messages(conversation_id=active_id)
+        st.session_state.conversation_state_version = 1
     if "analysis_result" not in st.session_state:
         st.session_state.analysis_result = None
     if "analysis_debug_steps" not in st.session_state:
@@ -58,6 +74,8 @@ def _init_session_state(settings: SmolagentsModelSettings) -> None:
         st.session_state.chat_task_notice = None
     if "chat_trace" not in st.session_state:
         st.session_state.chat_trace = []
+    if "chat_task_conversation_id" not in st.session_state:
+        st.session_state.chat_task_conversation_id = None
 
 
 def _build_graph_extractor(settings: SmolagentsModelSettings) -> CompositeGraphExtractor:
@@ -82,6 +100,43 @@ def _build_graph_extractor(settings: SmolagentsModelSettings) -> CompositeGraphE
 
 def _render_sidebar(settings: SmolagentsModelSettings) -> None:
     with st.sidebar:
+        busy = st.session_state.chat_task is not None
+        if st.button(
+            "新对话",
+            icon=":material/edit_square:",
+            width="stretch",
+            disabled=busy,
+        ):
+            _activate_conversation(create_conversation())
+            st.rerun()
+
+        st.caption("对话记录")
+        conversations = list_conversations()
+        active_id = st.session_state.active_conversation_id
+        for conversation in conversations[:30]:
+            if st.button(
+                conversation.title,
+                key=f"conversation_{conversation.conversation_id}",
+                type="primary" if conversation.conversation_id == active_id else "secondary",
+                width="stretch",
+                disabled=busy,
+            ):
+                _activate_conversation(conversation.conversation_id)
+                st.rerun()
+
+        if st.button(
+            "删除当前对话",
+            icon=":material/delete:",
+            width="stretch",
+            disabled=busy,
+        ):
+            delete_conversation(active_id)
+            remaining = list_conversations()
+            next_id = remaining[0].conversation_id if remaining else create_conversation()
+            _activate_conversation(next_id)
+            st.rerun()
+
+        st.divider()
         st.header("模型配置")
         st.text(f"模型：{settings.model_id}")
         st.text(f"地址：{settings.base_url}")
@@ -93,10 +148,14 @@ def _render_sidebar(settings: SmolagentsModelSettings) -> None:
             else:
                 st.error(message)
 
-        if st.button("清空对话", width="stretch"):
-            st.session_state.messages = []
-            st.session_state.chat_trace = []
-            st.rerun()
+
+
+def _activate_conversation(conversation_id: str) -> None:
+    """Switch all chat-specific UI state to one persisted conversation."""
+    st.session_state.active_conversation_id = conversation_id
+    st.session_state.messages = load_chat_messages(conversation_id=conversation_id)
+    st.session_state.chat_trace = []
+    st.session_state.chat_task_notice = None
 
 
 def _render_history() -> None:
@@ -112,11 +171,18 @@ def _start_user_input(
     enable_local_knowledge: bool = False,
 ) -> None:
     logger.info("chat_message_received length=%s", len(user_input))
+    conversation_id = st.session_state.active_conversation_id
+    first_message = not st.session_state.messages
     st.session_state.messages.append({"role": "user", "content": user_input})
     append_conversation_event(
         "chat_message",
         {"role": "user", "content": user_input},
+        conversation_id=conversation_id,
     )
+    if first_message:
+        # 原因：ChatGPT 式列表需要可辨识标题，但为标题额外调用 LLM 会增加延迟。
+        # 作用：首条问题在本地生成短标题，立即持久化并显示在侧边栏。
+        rename_conversation(conversation_id, conversation_title(user_input))
     with st.chat_message("user"):
         st.markdown(user_input)
 
@@ -130,6 +196,9 @@ def _start_user_input(
         enable_web_search=enable_web_search,
         enable_local_knowledge=enable_local_knowledge,
     )
+    # 原因：后台模型返回时 Streamlit 可能已经发生多次重跑。
+    # 作用：固定记录任务发起会话，保证助手回复不会串到其他对话。
+    st.session_state.chat_task_conversation_id = conversation_id
     st.rerun()
 
 
@@ -155,6 +224,11 @@ def _render_chat_progress() -> None:
     result = task.poll_result()
     if result is not None:
         st.session_state.chat_task = None
+        conversation_id = (
+            st.session_state.chat_task_conversation_id
+            or st.session_state.active_conversation_id
+        )
+        st.session_state.chat_task_conversation_id = None
         if result.status == "completed":
             st.session_state.messages.append({"role": "assistant", "content": result.content})
             st.session_state.chat_trace = list(result.trace)
@@ -162,6 +236,7 @@ def _render_chat_progress() -> None:
             append_conversation_event(
                 "chat_message",
                 {"role": "assistant", "content": result.content},
+                conversation_id=conversation_id,
             )
         else:
             logger.error("chat_call_failed error=%s", result.content)
@@ -186,6 +261,7 @@ def _render_chat_progress() -> None:
         if st.button("停止生成", key="stop_chat_generation", type="secondary"):
             task.cancel()
             st.session_state.chat_task = None
+            st.session_state.chat_task_conversation_id = None
             st.session_state.chat_task_notice = ("warning", "已停止本次生成。")
             logger.info("chat_generation_cancelled")
             st.rerun()
