@@ -1,0 +1,7 @@
+packages:
+  - "."
+
+allowBuilds:
+  # 原因：Vite 依赖 esbuild 的平台二进制安装脚本，pnpm 11 默认会拦截未声明的构建脚本。
+  # 作用：仅允许已审计的 esbuild 执行安装，其他依赖仍保持构建脚本禁用。
+  esbuild: true

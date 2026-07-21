@@ -21,6 +21,7 @@ testable:
 
 ```text
 src/qwopus_agent/
+  api/          FastAPI boundary, SQLite conversations, background runs, and SPA hosting
   agents/       Planner, Executor, Router, research, and supervised Multi-Agent orchestration
   llm/          BaseLLM interface and LocalMLXLLM adapter
   memory/       MiniRAG vectors, persistent knowledge graph, and multi-hop queries
@@ -29,6 +30,7 @@ src/qwopus_agent/
   reflection/   Lightweight task reflection evaluator
   reports/      Unified report generation module
   prompts/      Prompt templates and system prompt assets
+frontend/       React, assistant-ui, Vite, and the production chat/document workspace
 tests/          Unit tests for first-stage architecture
 storage/        Runtime data, ignored by Git except .gitkeep
 logs/           Runtime logs, ignored by Git except .gitkeep
@@ -40,7 +42,7 @@ logs/           Runtime logs, ignored by Git except .gitkeep
 python3.11 -m venv .venv
 source .venv/bin/activate
 pip install -e vendor/MiniRAG-main
-pip install -e ".[dev,ui]"
+pip install -e ".[dev,ui,api,documents]"
 pytest
 ```
 
@@ -102,13 +104,70 @@ PYTHONPATH=src python3.11 -m qwopus_agent.integrations.smolagents_smoke \
 This smoke test intentionally creates a smolagents `CodeAgent` with no tools. The Streamlit workflow
 then injects document, pandas sandbox, MiniRAG, graph, and Tavily capabilities as bounded tools.
 
+## Primary React Application
+
+The primary application uses FastAPI with a React/assistant-ui frontend while reusing the same
+`AgentOrchestrator`, MinerU, MiniRAG, knowledge graph, Skills, and reports:
+
+```bash
+pip install -e ".[api,documents]"
+cd frontend
+pnpm install
+pnpm run build
+cd ..
+PYTHONPATH=src python -m uvicorn qwopus_agent.api.app:app --host 127.0.0.1 --port 8010
+```
+
+Open `http://127.0.0.1:8010`. The API serves `frontend/dist` in this production-style mode. For
+frontend hot reload, run the API on port 8000 and `pnpm run dev` in `frontend`; Vite proxies `/api`
+to port 8000.
+
+The application boundaries are intentional:
+
+```text
+React + assistant-ui
+        |
+        v
+FastAPI API + SQLite conversations
+        |
+        v
+AgentOrchestrator + smolagents
+        |
+        +--> MinerU -> Markdown -> document/excel Skills
+        +--> persistent MiniRAG + knowledge graph
+        +--> Tavily, Multi-Agent, reports, reflection, and learned Skills
+```
+
+- React renders chat, document analysis, citations, run status, and report downloads. It never calls
+  the model server or parses documents directly.
+- FastAPI owns HTTP validation, conversation persistence, background run polling, uploads, and SPA
+  hosting. Business decisions remain in `AgentOrchestrator` and the existing services.
+- PDF, DOCX, PNG, and JPEG inputs continue through MinerU when available, with the established local
+  fallback behavior. All unstructured content is normalized to Markdown before downstream use.
+- Document analysis searches existing MiniRAG knowledge, inserts each newly normalized document into
+  `storage/minirag/`, and gives smolagents bounded document, pandas, and MiniRAG tools. The browser only
+  receives the final answer, citations, safe process events, and generated report links.
+- The OpenAI-compatible endpoint is read from the existing environment configuration. The current
+  model identifier is resolved from the server for each run, so changing Gemma, Qwopus, Qwen, or
+  another compatible model does not require a frontend code change.
+
+Conversations are persisted in `storage/qwopus.db`, and existing Streamlit JSONL history is imported
+once when that database is first created. Streamlit remains available at its own port as a debugging
+console; the production React application links to it but does not depend on Streamlit Session State.
+
+Verify the new boundary with:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python -m unittest tests.test_api
+cd frontend && pnpm run lint && pnpm run build
+```
+
 ## Streamlit Chat And Upload Analysis
 
 After the smoke test passes, verify multi-turn conversation and local upload analysis through
 Streamlit:
 
 ```bash
-cp .env.example .env
 pip install -e ".[dev,ui]"
 python -m mlx_lm.server --model ~/Desktop/model/gemma-4-12B-it-qat-OptiQ-4bit --port 8080
 PYTHONPATH=src streamlit run src/qwopus_agent/ui/streamlit_chat.py

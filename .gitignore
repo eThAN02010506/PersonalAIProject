@@ -10,6 +10,11 @@ htmlcov/
 .idea/
 .env.local
 
+# 原因：前端依赖和 Vite 构建产物可由锁文件稳定重建，不应进入 Git。
+# 作用：只提交 React 源码与 pnpm 锁文件，避免仓库被本地平台文件污染。
+frontend/node_modules/
+frontend/dist/
+
 logs/*
 !logs/.gitkeep
 storage/*
