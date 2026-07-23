@@ -8,9 +8,17 @@ from unittest.mock import patch
 
 import pandas as pd
 
+from qwopus_agent.documents import (
+    build_document_structure,
+    chunk_document_structure,
+    summarize_document,
+)
 from qwopus_agent.integrations.smolagents_tools import (
     TavilySearchConfig,
-    build_document_parser_tool,
+    build_document_outline_tool,
+    build_document_search_tool,
+    build_document_section_tool,
+    build_document_summary_tool,
     build_excel_analysis_tool,
     build_excel_schema_tool,
     build_graph_search_tool,
@@ -84,15 +92,45 @@ class SmolagentsToolsTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "TAVILY_API_KEY"):
                 tool.forward("OpenAI")
 
-    def test_document_parser_tool_reads_only_registered_document(self) -> None:
+    def test_document_tools_use_outline_search_and_section_without_prefix_truncation(self) -> None:
         fake_module = types.SimpleNamespace(Tool=FakeTool)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            markdown = (
+                "# Introduction\n\nOpening content.\n\n"
+                "# Final Findings\n\nThe decisive answer is at the end."
+            )
+            structure = chunk_document_structure(
+                build_document_structure(markdown, source="notes.txt")
+            )
+            minirag = make_test_minirag(Path(tmpdir) / "documents.jsonl")
+            minirag.insert(
+                f"# File: notes.txt\n\n{markdown}",
+                document_id=structure.document_id,
+            )
 
-        with patch.dict(sys.modules, {"smolagents": fake_module}):
-            tool = build_document_parser_tool({"notes.txt": "local parsed content"})
+            with patch.dict(sys.modules, {"smolagents": fake_module}):
+                outline = build_document_outline_tool({"notes.txt": structure})
+                search = build_document_search_tool(
+                    minirag,
+                    {"notes.txt": structure},
+                    min_relevance=0.25,
+                )
+                section = build_document_section_tool({"notes.txt": structure})
+                summary = build_document_summary_tool(
+                    {"notes.txt": summarize_document(structure)}
+                )
 
-        self.assertEqual(tool.forward("notes.txt"), "local parsed content")
+            final_section = structure.sections[-1]
+            self.assertIn("Final Findings", outline.forward("notes.txt"))
+            self.assertIn("decisive answer", search.forward("notes.txt", "decisive answer"))
+            section_result = section.forward("notes.txt", final_section.id)
+            summary_result = summary.forward("notes.txt")
+
+        self.assertIn("decisive answer", section_result)
+        self.assertIn("decisive answer", summary_result)
+        self.assertIn("remaining_chunks=0", section_result)
         with self.assertRaisesRegex(ValueError, "Unknown file_name"):
-            tool.forward("../secret.txt")
+            outline.forward("../secret.txt")
 
     def test_excel_schema_tool_bounds_safe_context(self) -> None:
         fake_module = types.SimpleNamespace(Tool=FakeTool)

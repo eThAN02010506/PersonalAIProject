@@ -9,6 +9,7 @@ from hashlib import blake2b
 from typing import Protocol
 
 import numpy as np
+from numpy.typing import NDArray
 
 from qwopus_agent.memory.graph_backend import PersistentKnowledgeGraph
 from qwopus_agent.memory.graph_models import EntityCandidate, EntityRecord
@@ -17,7 +18,7 @@ from qwopus_agent.memory.graph_models import EntityCandidate, EntityRecord
 class EntityEmbeddingBackend(Protocol):
     """Small injected contract used only for optional semantic entity matching."""
 
-    def encode(self, texts: Sequence[str]) -> np.ndarray:
+    def encode(self, texts: Sequence[str]) -> NDArray[np.float32]:
         """Encode entity names into comparable vectors."""
 
 
@@ -75,15 +76,16 @@ class EntityResolver:
 
         if self.embedding_backend is None or not compatible:
             return None
-        return self._semantic_match(name, compatible)
+        return self._semantic_match(name, compatible, self.embedding_backend)
 
     def _semantic_match(
         self,
         name: str,
         entities: Sequence[EntityRecord],
+        embedding_backend: EntityEmbeddingBackend,
     ) -> EntityRecord | None:
         candidate_names = [name, *(entity.canonical_name for entity in entities)]
-        vectors = np.asarray(self.embedding_backend.encode(candidate_names), dtype=np.float32)
+        vectors = np.asarray(embedding_backend.encode(candidate_names), dtype=np.float32)
         if vectors.shape[0] != len(candidate_names):
             return None
         query = _normalized_vector(vectors[0])
@@ -134,6 +136,6 @@ def _unique_aliases(canonical_name: str, aliases: Sequence[str]) -> tuple[str, .
     return tuple(result)
 
 
-def _normalized_vector(vector: np.ndarray) -> np.ndarray:
+def _normalized_vector(vector: NDArray[np.float32]) -> NDArray[np.float32]:
     norm = float(np.linalg.norm(vector))
     return vector if norm == 0 else vector / norm

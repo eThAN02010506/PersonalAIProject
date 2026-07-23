@@ -50,7 +50,8 @@ def _render_raw_runs(debug_runs: list[dict[str, Any]]) -> None:
         return
     for run_index, run in enumerate(debug_runs, start=1):
         label = str(run.get("label") or f"run_{run_index}")
-        steps = run.get("steps") if isinstance(run.get("steps"), list) else []
+        raw_steps = run.get("steps")
+        steps: list[Any] = raw_steps if isinstance(raw_steps, list) else []
         st.markdown(f"#### Raw run {run_index}: `{label}`")
         st.caption(
             f"state={run.get('state', 'unknown')} · max_steps={run.get('max_steps', '?')} · "

@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import re
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -15,6 +15,7 @@ from qwopus_agent.agents.multi_agent import (
     DelegationPlan,
     MultiAgentRun,
     MultiAgentSupervisor,
+    RunnableAgent,
 )
 from qwopus_agent.integrations.smolagents_runtime import (
     AgentDebugRun,
@@ -66,7 +67,7 @@ class _CapabilityResult:
 class _FunctionAgent:
     """Small adapter that makes an injected async function a RunnableAgent."""
 
-    handler: Callable[[str, dict[str, Any]], Any]
+    handler: Callable[[str, dict[str, Any]], Awaitable[Any]]
 
     async def run(self, question: str, context: dict[str, Any] | None = None) -> Any:
         return await self.handler(question, context or {})
@@ -201,7 +202,7 @@ class AgentOrchestrator:
         request: OrchestrationRequest,
         trace: list[ProcessEvent],
         progress_callback: ProgressCallback | None,
-    ) -> dict[str, _FunctionAgent]:
+    ) -> dict[str, RunnableAgent]:
         async def chat_handler(
             name: str,
             question: str,
@@ -224,7 +225,7 @@ class AgentOrchestrator:
                 ),
             )
 
-        agents: dict[str, _FunctionAgent] = {}
+        agents: dict[str, RunnableAgent] = {}
         if request.uploaded_files:
             agents["document_agent"] = _FunctionAgent(
                 lambda _question, _context: self._guarded(
@@ -282,6 +283,7 @@ class AgentOrchestrator:
             settings=self.settings,
             enable_web_search=web,
             enable_local_knowledge=local,
+            min_source_relevance=request.min_source_relevance,
             progress_callback=progress_callback,
         )
         citations = _citations_from_chat(run)
@@ -340,6 +342,9 @@ class AgentOrchestrator:
             user_question=request.objective,
             settings=self.settings,
             minirag=self.minirag,
+            min_source_relevance=request.min_source_relevance,
+            selected_sections=request.selected_sections,
+            analysis_mode=request.analysis_mode,
         )
         answer = outcome.result.llm_analysis or outcome.result.markdown_summary
         citations = tuple(
@@ -474,7 +479,7 @@ class AgentOrchestrator:
         self,
         agent_name: str,
         trace: list[ProcessEvent],
-        operation: Callable[[], Any],
+        operation: Callable[[], Awaitable[_CapabilityResult]],
     ) -> _CapabilityResult:
         try:
             return await operation()

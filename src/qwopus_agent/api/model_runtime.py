@@ -6,10 +6,12 @@ import os
 import shutil
 import socket
 import subprocess
+import sys
 import time
 from dataclasses import dataclass, replace
 from pathlib import Path
 from threading import Lock, RLock
+from typing import BinaryIO, Literal
 from urllib.parse import urlparse, urlunparse
 
 from qwopus_agent.integrations.smolagents_runtime import (
@@ -29,7 +31,7 @@ class ModelRuntimeError(RuntimeError):
 class RuntimeModelStatus:
     """Current model selection returned to HTTP and UI layers."""
 
-    mode: str
+    mode: Literal["remote", "local"]
     settings: SmolagentsModelSettings
     online: bool
     message: str
@@ -46,10 +48,10 @@ class RuntimeModelController:
         startup_timeout_seconds: int = 300,
     ) -> None:
         self._settings = settings or SmolagentsModelSettings.from_env()
-        self._mode = "remote"
+        self._mode: Literal["remote", "local"] = "remote"
         self._local_model_path: Path | None = None
         self._local_process: subprocess.Popen[bytes] | None = None
-        self._local_log_handle = None
+        self._local_log_handle: BinaryIO | None = None
         self._startup_timeout_seconds = startup_timeout_seconds
         self._state_lock = RLock()
         self._configuration_lock = Lock()
@@ -211,7 +213,7 @@ def _find_mlx_server(model_path: Path) -> Path:
     candidates = [
         Path(configured).expanduser() if configured else None,
         model_path.parent / ".venv/bin/mlx_lm.server",
-        Path(os.sys.executable).with_name("mlx_lm.server"),
+        Path(sys.executable).with_name("mlx_lm.server"),
     ]
     discovered = shutil.which("mlx_lm.server")
     if discovered:

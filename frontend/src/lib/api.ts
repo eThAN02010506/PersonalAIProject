@@ -49,7 +49,11 @@ export const api = {
   startRun: (
     conversationId: string,
     content: string,
-    options: { enableWebSearch: boolean; enableLocalKnowledge: boolean },
+    options: {
+      enableWebSearch: boolean;
+      enableLocalKnowledge: boolean;
+      minSourceRelevance: number;
+    },
   ) =>
     request<{ run_id: string; status: "running" }>(
       `/api/conversations/${conversationId}/runs`,
@@ -60,6 +64,7 @@ export const api = {
           content,
           enable_web_search: options.enableWebSearch,
           enable_local_knowledge: options.enableLocalKnowledge,
+          min_source_relevance: options.minSourceRelevance,
         }),
       },
     ),
@@ -69,11 +74,21 @@ export const api = {
   cancelRun: (runId: string) =>
     request<RunView>(`/api/runs/${runId}`, { method: "DELETE" }),
 
-  analyze: (files: File[], question: string, generateReport: boolean) => {
+  analyze: (
+    files: File[],
+    question: string,
+    generateReport: boolean,
+    minSourceRelevance: number,
+    analysisMode: "question" | "section" | "full",
+    selectedSections: Record<string, string[]>,
+  ) => {
     const form = new FormData();
     for (const file of files) form.append("files", file);
     form.append("question", question);
     form.append("generate_report", String(generateReport));
+    form.append("min_source_relevance", String(minSourceRelevance));
+    form.append("analysis_mode", analysisMode);
+    form.append("selected_sections", JSON.stringify(selectedSections));
     return request<AnalysisResult>("/api/analysis", { method: "POST", body: form });
   },
 };

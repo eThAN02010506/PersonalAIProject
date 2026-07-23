@@ -5,9 +5,11 @@ from unittest.mock import MagicMock, patch
 
 from fastapi.testclient import TestClient
 
+from qwopus_agent.analysis import AnalysisResult
 from qwopus_agent.api.app import create_app
 from qwopus_agent.api.model_runtime import RuntimeModelStatus
 from qwopus_agent.api.repository import ConversationRepository
+from qwopus_agent.documents import build_document_structure, chunk_document_structure
 from qwopus_agent.integrations.smolagents_runtime import AgentDebugRun, SmolagentsModelSettings
 from qwopus_agent.services.orchestration_models import OrchestrationResult
 from qwopus_agent.utils.debug_store import load_debug_records
@@ -87,6 +89,18 @@ class ApiTests(unittest.TestCase):
         self.assertIn("/api/model-settings", schema["paths"])
         self.assertIn("/api/reports/{filename}", schema["paths"])
 
+    def test_analysis_rejects_malformed_section_scope(self) -> None:
+        response = self.client.post(
+            "/api/analysis",
+            files={"files": ("sample.txt", b"content", "text/plain")},
+            data={"selected_sections": '{"document":"section-as-string"}'},
+        )
+
+        # 原因：宽松解析会把字符串 section id 拆成字符列表并绕过预期范围。
+        # 作用：在创建 OrchestrationRequest 前拒绝形状错误的 multipart 字段。
+        self.assertEqual(response.status_code, 422)
+        self.assertEqual(response.json()["detail"], "Invalid selected sections.")
+
     def test_model_settings_switches_remote_endpoint_without_env_changes(self) -> None:
         response = self.client.put(
             "/api/model-settings",
@@ -100,11 +114,19 @@ class ApiTests(unittest.TestCase):
         )
 
     def test_analysis_reads_uploaded_bytes_before_orchestration(self) -> None:
+        structure = chunk_document_structure(
+            build_document_structure("# Overview\nReal body", source="sample.txt")
+        )
         orchestrator = MagicMock()
         orchestrator.run_sync.return_value = OrchestrationResult(
             success=True,
             final_answer="Analyzed",
             route="single_agent",
+            analysis_result=AnalysisResult(
+                markdown_summary="# Summary",
+                markdown_document="# Overview\nReal body",
+                document_structures=(structure,),
+            ),
             debug_runs=(
                 AgentDebugRun(
                     label="document",
@@ -120,19 +142,31 @@ class ApiTests(unittest.TestCase):
         # 原因：该测试只验证 FastAPI 上传边界，真实 MinerU/MiniRAG 由端到端测试负责。
         # 作用：防止 await 生成式再次把 UploadFile 变成不可迭代的 async_generator。
         with patch(
-            "qwopus_agent.api.app.AgentOrchestrator",
+            "qwopus_agent.api.routes.analysis.AgentOrchestrator",
             return_value=orchestrator,
         ):
             response = self.client.post(
                 "/api/analysis",
                 files={"files": ("sample.txt", b"real bytes", "text/plain")},
-                data={"question": "Summarize"},
+                data={
+                    "question": "Summarize",
+                    "min_source_relevance": "0.8",
+                    "analysis_mode": "section",
+                    "selected_sections": (
+                        f'{{"{structure.document_id}":["{structure.sections[0].id}"]}}'
+                    ),
+                },
             )
 
         self.assertEqual(response.status_code, 200)
         # 原因：raw debug 可能包含完整文件正文，只允许本地 Streamlit 调试台读取。
         # 作用：锁定 FastAPI 正式响应不会把内部 debug_runs 暴露给 React 或其他客户端。
         self.assertNotIn("debug_runs", response.json())
+        self.assertEqual(response.json()["documents"][0]["source"], "sample.txt")
+        self.assertEqual(
+            response.json()["documents"][0]["sections"][0]["title"],
+            "Overview",
+        )
         # 原因：正式响应必须脱敏，但独立 Console 仍要接收同一次文档运行的原始记录。
         # 作用：验证 API 边界同时满足“不外泄”和“可调试”两个方向。
         debug_records = load_debug_records(directory=self.debug_directory)
@@ -144,6 +178,12 @@ class ApiTests(unittest.TestCase):
         request = orchestrator.run_sync.call_args.args[0]
         self.assertEqual(request.uploaded_files[0].name, "sample.txt")
         self.assertEqual(request.uploaded_files[0].content, b"real bytes")
+        self.assertEqual(request.min_source_relevance, 0.8)
+        self.assertEqual(request.analysis_mode, "section")
+        self.assertEqual(
+            request.selected_sections[structure.document_id],
+            (structure.sections[0].id,),
+        )
 
 
 if __name__ == "__main__":

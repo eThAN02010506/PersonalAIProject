@@ -43,11 +43,9 @@ class ChatRunRegistry:
         *,
         enable_web_search: bool,
         enable_local_knowledge: bool,
+        min_source_relevance: float = 0.55,
     ) -> str:
-        history = [
-            {"role": message.role, "content": message.content}
-            for message in self.repository.list_messages(conversation_id)
-        ]
+        history = self.repository.build_model_history(conversation_id)
         self.repository.add_message(conversation_id, "user", content)
         task = start_chat_task(
             user_message=content,
@@ -55,6 +53,7 @@ class ChatRunRegistry:
             settings=settings,
             enable_web_search=enable_web_search,
             enable_local_knowledge=enable_local_knowledge,
+            min_source_relevance=min_source_relevance,
         )
         run_id = uuid4().hex
         with self._lock:

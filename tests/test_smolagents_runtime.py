@@ -368,7 +368,7 @@ class SmolagentsRuntimeTests(unittest.TestCase):
                         "tool_calls": [
                             {
                                 "function": {
-                                    "name": "document_parser",
+                                    "name": "document_search",
                                     "arguments": {"file_name": "notes.txt"},
                                 }
                             }
@@ -389,8 +389,8 @@ class SmolagentsRuntimeTests(unittest.TestCase):
         # 原因：自然语言答案不能证明模型真的读取了上传文件。
         # 作用：断言 runtime 记录了文件 Tool 调用，并且只返回最终答案。
         self.assertEqual(result.answer, "完整文件总结")
-        self.assertEqual(result.tool_calls, ["document_parser"])
-        self.assertTrue(any("document_parser" in step for step in result.debug_steps))
+        self.assertEqual(result.tool_calls, ["document_search"])
+        self.assertTrue(any("document_search" in step for step in result.debug_steps))
         self.assertEqual(result.debug_runs[0].prompt.splitlines()[0], (
             "You are Qwopus-Agent's uploaded-file analysis agent."
         ))
@@ -407,7 +407,7 @@ class SmolagentsRuntimeTests(unittest.TestCase):
             "tool_calls": [
                 {
                     "function": {
-                        "name": "document_parser",
+                        "name": "document_search",
                         "arguments": {"file_name": "notes.txt"},
                     }
                 }
@@ -451,7 +451,7 @@ class SmolagentsRuntimeTests(unittest.TestCase):
                         "tool_calls": [
                             {
                                 "function": {
-                                    "name": "document_parser",
+                                    "name": "document_search",
                                     "arguments": '{"file_name": "first.txt"}',
                                 }
                             }
@@ -467,7 +467,7 @@ class SmolagentsRuntimeTests(unittest.TestCase):
                         "tool_calls": [
                             {
                                 "function": {
-                                    "name": "document_parser",
+                                    "name": "document_search",
                                     "arguments": {"file_name": "second.txt"},
                                 }
                             }
@@ -501,7 +501,7 @@ class SmolagentsRuntimeTests(unittest.TestCase):
             types.SimpleNamespace(output="仍然猜测", state="success", steps=[]),
         ]
 
-        with self.assertRaisesRegex(RuntimeError, "required file tools"):
+        with self.assertRaisesRegex(RuntimeError, "did not inspect uploaded files"):
             run_smolagents_file_analysis_with_debug(
                 file_names=["notes.txt"],
                 spreadsheet_names=[],
@@ -563,6 +563,19 @@ class SmolagentsRuntimeTests(unittest.TestCase):
         self.assertIn("excel_analysis", prompt)
         self.assertIn("按地区汇总收入", prompt)
 
+    def test_format_file_analysis_prompt_routes_full_summary_to_hierarchy(self) -> None:
+        prompt = format_file_analysis_agent_prompt(
+            file_names=["manual.pdf"],
+            spreadsheet_names=[],
+            user_question="",
+            analysis_mode="full",
+        )
+
+        # 原因：全文模式不能通过扩大 prompt 把完整大文档直接交给模型。
+        # 作用：锁定 Agent 先使用分层摘要 Tool、再按需检索证据的调用策略。
+        self.assertIn("document_summary first", prompt)
+        self.assertIn("Summarize the uploaded files.", prompt)
+
     def test_format_chat_prompt_includes_history_and_latest_user_message(self) -> None:
         history = [
             {"role": "user", "content": "你好"},
@@ -602,7 +615,7 @@ class SmolagentsRuntimeTests(unittest.TestCase):
         self.assertEqual(messages[1], {"role": "user", "content": "你好"})
         self.assertEqual(messages[2], {"role": "user", "content": "请继续"})
 
-    @patch("qwopus_agent.integrations.smolagents_runtime.urllib.request.urlopen")
+    @patch("qwopus_agent.integrations.smolagents_model.urllib.request.urlopen")
     def test_check_model_connection_reports_online(self, mock_urlopen) -> None:
         mock_response = mock_urlopen.return_value.__enter__.return_value
         mock_response.status = 200
@@ -619,7 +632,7 @@ class SmolagentsRuntimeTests(unittest.TestCase):
         self.assertIn("模型服务在线", message)
         self.assertIn("live-model.gguf", message)
 
-    @patch("qwopus_agent.integrations.smolagents_runtime.urllib.request.urlopen")
+    @patch("qwopus_agent.integrations.smolagents_model.urllib.request.urlopen")
     def test_resolve_model_settings_uses_live_server_model(self, mock_urlopen) -> None:
         mock_response = mock_urlopen.return_value.__enter__.return_value
         mock_response.status = 200
@@ -638,7 +651,7 @@ class SmolagentsRuntimeTests(unittest.TestCase):
         self.assertEqual(resolved.model_id, "C:\\models\\current-model.gguf")
         self.assertEqual(resolved.base_url, settings.base_url)
 
-    @patch("qwopus_agent.integrations.smolagents_runtime.urllib.request.urlopen")
+    @patch("qwopus_agent.integrations.smolagents_model.urllib.request.urlopen")
     def test_check_model_connection_reports_offline(self, mock_urlopen) -> None:
         import urllib.error
 

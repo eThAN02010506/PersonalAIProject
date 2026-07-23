@@ -21,10 +21,12 @@ testable:
 
 ```text
 src/qwopus_agent/
-  api/          FastAPI boundary, SQLite conversations, background runs, and SPA hosting
+  api/          FastAPI app composition, focused route modules, SQLite conversations, and runs
   agents/       Planner, Executor, Router, research, and supervised Multi-Agent orchestration
+  documents/    Markdown normalization, section structure, chunking, summaries, and local storage
+  integrations/ smolagents execution, model discovery, debug normalization, and Tool adapters
   llm/          BaseLLM interface and LocalMLXLLM adapter
-  memory/       MiniRAG vectors, persistent knowledge graph, and multi-hop queries
+  memory/       MiniRAG facade, JSONL records, retrieval ranking, graph, and multi-hop queries
   skills/       Reusable, auto-discovered, and learned Workflow Skills
   services/     UI-independent analysis and knowledge lifecycle workflows
   reflection/   Lightweight task reflection evaluator
@@ -141,12 +143,16 @@ AgentOrchestrator + smolagents
 - React renders chat, document analysis, citations, run status, and report downloads. It never calls
   the model server or parses documents directly.
 - FastAPI owns HTTP validation, conversation persistence, background run polling, uploads, and SPA
-  hosting. Business decisions remain in `AgentOrchestrator` and the existing services.
+  hosting. Model, conversation, document-analysis, and report routes are registered independently;
+  business decisions remain in `AgentOrchestrator` and the existing services.
 - PDF, DOCX, PNG, and JPEG inputs continue through MinerU when available, with the established local
   fallback behavior. All unstructured content is normalized to Markdown before downstream use.
 - Document analysis searches existing MiniRAG knowledge, inserts each newly normalized document into
   `storage/minirag/`, and gives smolagents bounded document, pandas, and MiniRAG tools. The browser only
   receives the final answer, citations, safe process events, and generated report links.
+- Long documents are structured by heading and page, chunked with section provenance, and summarized
+  hierarchically. The React document workspace can target a question, selected sections, or the whole
+  document without sending the complete source to the model.
 - The initial OpenAI-compatible endpoint is read from the existing environment configuration. The
   model settings dialog can switch the runtime address without modifying `.env`, and the current
   model identifier is resolved from the selected server for each run.
@@ -162,7 +168,9 @@ Verify the new boundary with:
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python -m unittest tests.test_model_runtime tests.test_api
-cd frontend && pnpm run lint && pnpm run build
+MYPY_CACHE_DIR=/tmp/qwopus-mypy-cache mypy src/qwopus_agent
+ruff check src tests
+cd frontend && pnpm run build
 ```
 
 ## Streamlit Debug Console

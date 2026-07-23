@@ -6,7 +6,7 @@ import multiprocessing
 import time
 from dataclasses import asdict, dataclass
 from queue import Empty
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from qwopus_agent.integrations.smolagents_runtime import ChatMessage, SmolagentsModelSettings
 from qwopus_agent.services.agent_orchestrator import AgentOrchestrator
@@ -96,6 +96,7 @@ def start_chat_task(
     settings: SmolagentsModelSettings,
     enable_web_search: bool,
     enable_local_knowledge: bool = False,
+    min_source_relevance: float = 0.55,
 ) -> BackgroundChatTask:
     """Start one cancelable Agent request in a spawned process."""
     context = multiprocessing.get_context("spawn")
@@ -111,6 +112,7 @@ def start_chat_task(
             settings,
             enable_web_search,
             enable_local_knowledge,
+            min_source_relevance,
         ),
         daemon=True,
     )
@@ -131,6 +133,7 @@ def _run_chat_task(
     settings: SmolagentsModelSettings,
     enable_web_search: bool,
     enable_local_knowledge: bool = False,
+    min_source_relevance: float = 0.55,
 ) -> None:
     """Run the synchronous Agent inside the cancelable worker process."""
 
@@ -144,12 +147,16 @@ def _run_chat_task(
             OrchestrationRequest(
                 objective=user_message,
                 history=tuple(
-                    ConversationTurn(role=item["role"], content=item["content"])
+                    ConversationTurn(
+                        role=cast(Literal["user", "assistant"], item["role"]),
+                        content=item["content"],
+                    )
                     for item in history
                     if item.get("role") in {"user", "assistant"} and item.get("content")
                 ),
                 enable_web_search=enable_web_search,
                 enable_local_knowledge=enable_local_knowledge,
+                min_source_relevance=min_source_relevance,
             ),
             progress_callback=report_progress,
         )

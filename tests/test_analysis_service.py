@@ -7,6 +7,7 @@ from unittest.mock import patch
 import pandas as pd
 
 from qwopus_agent.analysis import AnalysisResult
+from qwopus_agent.documents import build_document_structure, chunk_document_structure
 from qwopus_agent.integrations.smolagents_runtime import (
     AgentDebugRun,
     DocumentAnalysisRun,
@@ -14,12 +15,76 @@ from qwopus_agent.integrations.smolagents_runtime import (
 )
 from qwopus_agent.services.analysis_service import (
     UploadedFileInput,
+    _scope_sections_by_file,
     analyze_uploaded_files,
 )
 from tests.minirag_fakes import make_test_minirag
 
 
 class AnalysisServiceTests(unittest.TestCase):
+    def test_section_scope_accepts_document_id_and_includes_descendants(self) -> None:
+        structure = chunk_document_structure(
+            build_document_structure(
+                "# Parent\nIntro\n## Child\nDetail\n# Other\nIgnore",
+                source="manual.md",
+            )
+        )
+        parent = structure.sections[0]
+
+        # 原因：前端提交 document_id，而 Tool Registry 以文件名保存当前文档。
+        # 作用：锁定 id 映射和父章节后代展开，防止章节模式遗漏子标题内容。
+        scope = _scope_sections_by_file(
+            {"manual.md": structure},
+            {structure.document_id: (parent.id,)},
+        )
+
+        self.assertEqual(len(scope["manual.md"]), 2)
+        self.assertNotIn(structure.sections[-1].id, scope["manual.md"])
+
+        with self.assertRaisesRegex(ValueError, "Unknown section selection"):
+            _scope_sections_by_file(
+                {"manual.md": structure},
+                {structure.document_id: ("stale-section-id",)},
+            )
+
+    def test_section_mode_rejects_an_empty_selection(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "notes.txt"
+            local_result = AnalysisResult(
+                markdown_summary="# Local Summary",
+                metadata={"source_type": "text"},
+                markdown_document="# Notes\nScoped content",
+            )
+            minirag = make_test_minirag(Path(tmpdir) / "documents.jsonl")
+
+            with (
+                patch(
+                    "qwopus_agent.services.analysis_service.save_uploaded_bytes",
+                    return_value=SimpleNamespace(original_name=path.name, path=path),
+                ),
+                patch(
+                    "qwopus_agent.services.analysis_service.analyze_uploaded_file",
+                    return_value=local_result,
+                ),
+                patch(
+                    "qwopus_agent.services.analysis_service.resolve_model_settings",
+                    side_effect=lambda current: current,
+                ),
+                self.assertRaisesRegex(ValueError, "requires at least one"),
+            ):
+                # 原因：章节模式没有选择时，空 allow-list 在 Tool 层等同于允许全文。
+                # 作用：锁定服务边界必须拒绝请求，不能静默扩大读取范围。
+                analyze_uploaded_files(
+                    uploaded_files=[UploadedFileInput(name=path.name, content=b"notes")],
+                    user_question="Summarize",
+                    settings=SmolagentsModelSettings(
+                        model_id="test-model",
+                        base_url="http://127.0.0.1:9999/v1",
+                    ),
+                    minirag=minirag,
+                    analysis_mode="section",
+                )
+
     def test_analyze_uploaded_files_runs_without_streamlit(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             minirag = make_test_minirag(Path(tmpdir) / "documents.jsonl")
@@ -97,12 +162,14 @@ class AnalysisServiceTests(unittest.TestCase):
             def fake_llm(**kwargs):
                 tools = kwargs["tools"]
                 captured["tool_names"] = [tool.name for tool in tools]
+                document_tool = next(tool for tool in tools if tool.name == "document_search")
+                captured["document_result"] = document_tool.forward("revenue.txt", "revenue")
                 rag_tool = next(tool for tool in tools if tool.name == "rag_search")
                 captured["rag_result"] = rag_tool.forward("revenue")
                 return DocumentAnalysisRun(
                     answer="Final answer uses prior MiniRAG context.",
                     debug_steps=["fake model finished"],
-                    tool_calls=["document_parser", "rag_search"],
+                    tool_calls=["document_search", "rag_search"],
                     debug_runs=(
                         AgentDebugRun(
                             label="file_analysis",
@@ -144,6 +211,7 @@ class AnalysisServiceTests(unittest.TestCase):
                     user_question="revenue",
                     settings=settings,
                     minirag=minirag,
+                    min_source_relevance=0.25,
                 )
 
             self.assertEqual(
@@ -151,7 +219,17 @@ class AnalysisServiceTests(unittest.TestCase):
             )
             self.assertEqual(outcome.result.metadata["minirag_search_hits"], 1)
             self.assertTrue(outcome.result.metadata["minirag_inserted"])
-            self.assertEqual(captured["tool_names"], ["document_parser", "rag_search"])
+            self.assertEqual(
+                captured["tool_names"],
+                [
+                    "document_outline",
+                    "document_search",
+                    "document_read_section",
+                    "document_summary",
+                    "rag_search",
+                ],
+            )
+            self.assertIn("Current uploaded note", captured["document_result"])
             self.assertIn("Prior MiniRAG note", captured["rag_result"])
             self.assertTrue(outcome.result.metadata["minirag_context_used"])
             self.assertEqual(

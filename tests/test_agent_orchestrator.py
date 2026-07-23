@@ -73,6 +73,7 @@ class AgentOrchestratorTests(unittest.TestCase):
         def fake_chat(**kwargs):
             web = bool(kwargs["enable_web_search"])
             local = bool(kwargs["enable_local_knowledge"])
+            self.assertEqual(kwargs["min_source_relevance"], 0.8)
             question = str(kwargs["user_message"])
             calls.append((web, local, question))
             if web:
@@ -99,6 +100,7 @@ class AgentOrchestratorTests(unittest.TestCase):
                     objective="Compare Company A ownership with the current web status.",
                     enable_web_search=True,
                     enable_local_knowledge=True,
+                    min_source_relevance=0.8,
                 )
             )
         )

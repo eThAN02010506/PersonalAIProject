@@ -6,35 +6,47 @@ import asyncio
 import json
 import logging
 import os
-import re
 from collections.abc import Coroutine, Sequence
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import asdict, dataclass, field
-from datetime import UTC, datetime
+from dataclasses import dataclass, field
 from functools import lru_cache
-from hashlib import blake2b
 from pathlib import Path
 from typing import Any, Protocol, TypeVar
 
 import numpy as np
 from minirag.kg.nano_vector_db_impl import NanoVectorDBStorage
 from minirag.utils import EmbeddingFunc
+from numpy.typing import NDArray
 
+import qwopus_agent.memory.minirag_records as minirag_records
+import qwopus_agent.memory.minirag_retrieval as minirag_retrieval
 from qwopus_agent.memory.entity_resolver import EntityResolver
 from qwopus_agent.memory.graph_backend import PersistentKnowledgeGraph
 from qwopus_agent.memory.graph_extraction import GraphExtractor, RuleBasedGraphExtractor
-from qwopus_agent.memory.graph_models import GraphChunk, GraphPath
 from qwopus_agent.memory.knowledge_graph import (
     DEFAULT_KNOWLEDGE_GRAPH_PATH,
     KnowledgeGraphIndex,
 )
 
+INDEX_SCHEMA_VERSION = minirag_records.INDEX_SCHEMA_VERSION
+SEARCH_TOP_K = minirag_retrieval.SEARCH_TOP_K
+_DocumentRecord = minirag_records.DocumentRecord
+_KnowledgeChunk = minirag_records.KnowledgeChunk
+_append_record = minirag_records.append_record
+_build_record = minirag_records.build_record
+_load_records = minirag_records.load_records
+_record_sources = minirag_records.record_sources
+_rewrite_records = minirag_records.rewrite_records
+_single_record_source = minirag_records.single_record_source
+_stable_id = minirag_records.stable_id
+_to_graph_chunks = minirag_records.to_graph_chunks
+_diverse_chunks = minirag_retrieval.diverse_chunks
+_embedding_content = minirag_retrieval.embedding_content
+_render_graph_search_result = minirag_retrieval.render_graph_search_result
+_render_search_result = minirag_retrieval.render_search_result
+
 DEFAULT_MINIRAG_STORE_PATH = Path("storage/minirag/documents.jsonl")
 DEFAULT_EMBEDDING_MODEL = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
-INDEX_SCHEMA_VERSION = 2
-CHUNK_SIZE = 900
-CHUNK_OVERLAP = 120
-SEARCH_TOP_K = 5
 SEARCH_CANDIDATE_K = 30
 COSINE_THRESHOLD = 0.25
 GRAPH_SEARCH_LIMIT = 3
@@ -48,9 +60,12 @@ class EmbeddingBackend(Protocol):
     """Internal contract that keeps document retrieval independent from the chat model."""
 
     model_name: str
-    dimensions: int
 
-    def encode(self, texts: Sequence[str]) -> np.ndarray:
+    @property
+    def dimensions(self) -> int:
+        """Return the stable vector width produced by this backend."""
+
+    def encode(self, texts: Sequence[str]) -> NDArray[np.float32]:
         """Encode text into normalized semantic vectors."""
 
 
@@ -66,7 +81,7 @@ class SentenceTransformerEmbedding:
         """Read the actual model dimension instead of assuming one vector shape."""
         return int(self._get_model().get_embedding_dimension())
 
-    def encode(self, texts: Sequence[str]) -> np.ndarray:
+    def encode(self, texts: Sequence[str]) -> NDArray[np.float32]:
         """Encode texts locally without using the configured chat LLM."""
         return np.asarray(
             self._get_model().encode(
@@ -81,28 +96,6 @@ class SentenceTransformerEmbedding:
         if self._model is None:
             self._model = _load_sentence_transformer(self.model_name)
         return self._model
-
-
-@dataclass(frozen=True)
-class _KnowledgeChunk:
-    """One persisted retrieval unit with traceable source metadata."""
-
-    id: str
-    document_id: str
-    source: str
-    page: str | None
-    content: str
-    position: int
-
-
-@dataclass(frozen=True)
-class _DocumentRecord:
-    """One original Markdown document and its deterministic chunks."""
-
-    id: str
-    timestamp: str
-    document: str
-    chunks: tuple[_KnowledgeChunk, ...]
 
 
 @dataclass
@@ -122,9 +115,14 @@ class MiniRAG:
     def __post_init__(self) -> None:
         """Load documents and the persisted MiniRAG vector index on startup."""
         self.storage_path = Path(self.storage_path)
-        self.embedding_backend = self.embedding_backend or SentenceTransformerEmbedding(
-            model_name=os.getenv("QWOPUS_EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL)
-        )
+        embedding_backend: EmbeddingBackend
+        if self.embedding_backend is None:
+            embedding_backend = SentenceTransformerEmbedding(
+                model_name=os.getenv("QWOPUS_EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL)
+            )
+        else:
+            embedding_backend = self.embedding_backend
+        self.embedding_backend = embedding_backend
         self.graph_storage_path = self.graph_storage_path or _graph_path(self.storage_path)
         self.graph_extractor = self.graph_extractor or RuleBasedGraphExtractor()
         self._initialize_graph_index()
@@ -137,16 +135,16 @@ class MiniRAG:
         self._vector_store = self._create_vector_store()
         self._synchronize_vector_index()
 
-    def insert(self, document: str) -> None:
+    def insert(self, document: str, *, document_id: str | None = None) -> str:
         """Insert one Markdown-normalized document into persistent semantic memory."""
         if not document.strip():
             raise ValueError("document must not be empty")
 
-        document_id = _stable_id("document", document)
-        if any(record.id == document_id for record in self._records):
-            return
+        resolved_document_id = document_id or _stable_id("document", document)
+        if any(record.id == resolved_document_id for record in self._records):
+            return resolved_document_id
 
-        record = _build_record(document_id, document)
+        record = _build_record(resolved_document_id, document)
         source = _single_record_source(record)
         if source is not None:
             replaced = [
@@ -170,14 +168,41 @@ class MiniRAG:
         except Exception:
             # 原因：远程 LLM 抽取失败不应破坏已经完成的本地文档与向量入库。
             # 作用：记录完整异常并保留向量搜索能力，之后可通过重建操作补齐图谱。
-            logger.exception("knowledge_graph_ingestion_failed document_id=%s", document_id)
+            logger.exception(
+                "knowledge_graph_ingestion_failed document_id=%s",
+                resolved_document_id,
+            )
+        return resolved_document_id
 
-    def search(self, query: str) -> list[str]:
+    def search(
+        self,
+        query: str,
+        min_relevance: float = COSINE_THRESHOLD,
+        *,
+        document_ids: Sequence[str] | None = None,
+        section_ids: Sequence[str] | None = None,
+        sources: Sequence[str] | None = None,
+    ) -> list[str]:
         """Return graph paths first, then complementary semantic chunks."""
         if not query.strip():
             raise ValueError("query must not be empty")
+        if not 0.0 <= min_relevance <= 1.0:
+            raise ValueError("min_relevance must be between 0 and 1")
 
+        document_filter = set(document_ids or ())
+        section_filter = set(section_ids or ())
+        source_filter = {source.casefold() for source in (sources or ())}
         graph_paths = self._graph_index.search(query, limit=GRAPH_SEARCH_LIMIT)
+        if document_filter or source_filter:
+            graph_paths = [
+                path
+                for path in graph_paths
+                if all(
+                    (not document_filter or evidence.document_id in document_filter)
+                    and (not source_filter or evidence.source.casefold() in source_filter)
+                    for evidence in path.evidence
+                )
+            ]
         results = [_render_graph_search_result(path) for path in graph_paths]
         graph_chunk_ids = {
             evidence.chunk_id
@@ -192,8 +217,18 @@ class MiniRAG:
         )
         ranked_chunks: list[_KnowledgeChunk] = []
         for match in matches:
+            # 原因：向量库的固定底线只负责粗筛，用户需要为每次问答调整 Source 严格度。
+            # 作用：按当前请求的余弦相似度阈值过滤，不修改共享索引或影响其他用户。
+            if float(match.get("distance", 0.0)) < min_relevance:
+                continue
             chunk = self._chunks.get(str(match.get("id", "")))
-            if chunk is not None and chunk.id not in graph_chunk_ids:
+            if (
+                chunk is not None
+                and chunk.id not in graph_chunk_ids
+                and (not document_filter or chunk.document_id in document_filter)
+                and (not section_filter or chunk.section_id in section_filter)
+                and (not source_filter or chunk.source.casefold() in source_filter)
+            ):
                 ranked_chunks.append(chunk)
         vector_results = [
             _render_search_result(chunk)
@@ -237,7 +272,10 @@ class MiniRAG:
         if self._chunks:
             self._upsert_chunks(tuple(self._chunks.values()))
 
-        Path(self.graph_storage_path).unlink(missing_ok=True)
+        graph_storage_path = self.graph_storage_path
+        if graph_storage_path is None:
+            raise RuntimeError("graph storage was not initialized")
+        Path(graph_storage_path).unlink(missing_ok=True)
         self._initialize_graph_index()
         for record in self._records:
             try:
@@ -284,12 +322,15 @@ class MiniRAG:
 
     def _create_vector_store(self) -> NanoVectorDBStorage:
         """Create MiniRAG's local NanoVectorDB adapter."""
+        embedding_backend = self.embedding_backend
+        if embedding_backend is None:
+            raise RuntimeError("embedding backend was not initialized")
         index_dir = _index_directory(self.storage_path)
         index_dir.mkdir(parents=True, exist_ok=True)
         expected_config = {
             "schema_version": INDEX_SCHEMA_VERSION,
-            "embedding_model": self.embedding_backend.model_name,
-            "embedding_dimensions": self.embedding_backend.dimensions,
+            "embedding_model": embedding_backend.model_name,
+            "embedding_dimensions": embedding_backend.dimensions,
         }
         config_path = index_dir / "index_config.json"
         vector_path = index_dir / "vdb_qwopus_chunks.json"
@@ -302,11 +343,11 @@ class MiniRAG:
                 encoding="utf-8",
             )
 
-        async def embed(texts: list[str]) -> np.ndarray:
-            return self.embedding_backend.encode(texts)
+        async def embed(texts: list[str]) -> NDArray[np.float32]:
+            return embedding_backend.encode(texts)
 
         embedding_func = EmbeddingFunc(
-            embedding_dim=self.embedding_backend.dimensions,
+            embedding_dim=embedding_backend.dimensions,
             max_token_size=512,
             func=embed,
         )
@@ -320,7 +361,15 @@ class MiniRAG:
                 },
             },
             embedding_func=embedding_func,
-            meta_fields={"document_id", "source", "page", "position"},
+            meta_fields={
+                "document_id",
+                "source",
+                "page",
+                "page_end",
+                "section_id",
+                "section_path",
+                "position",
+            },
         )
 
     def _synchronize_vector_index(self) -> None:
@@ -347,239 +396,19 @@ class MiniRAG:
     def _upsert_chunks(self, chunks: Sequence[_KnowledgeChunk]) -> None:
         payload = {
             chunk.id: {
-                "content": chunk.content,
+                "content": _embedding_content(chunk),
                 "document_id": chunk.document_id,
                 "source": chunk.source,
                 "page": chunk.page or "",
+                "page_end": chunk.page_end or "",
+                "section_id": chunk.section_id,
+                "section_path": " / ".join(chunk.section_path),
                 "position": chunk.position,
             }
             for chunk in chunks
         }
         _run_coroutine(self._vector_store.upsert(payload))
         _run_coroutine(self._vector_store.index_done_callback())
-
-
-def _build_record(document_id: str, document: str) -> _DocumentRecord:
-    chunks: list[_KnowledgeChunk] = []
-    position = 0
-    for source, page, section in _source_sections(document):
-        for content in _chunk_text(section):
-            chunks.append(
-                _KnowledgeChunk(
-                    id=_stable_id("chunk", f"{document_id}\n{source}\n{page}\n{content}"),
-                    document_id=document_id,
-                    source=source,
-                    page=page,
-                    content=content,
-                    position=position,
-                )
-            )
-            position += 1
-    return _DocumentRecord(
-        id=document_id,
-        timestamp=datetime.now(UTC).isoformat(),
-        document=document,
-        chunks=tuple(chunks),
-    )
-
-
-def _source_sections(document: str) -> list[tuple[str, str | None, str]]:
-    """Split combined Markdown by file and page while retaining citations."""
-    file_pattern = re.compile(r"(?m)^# File:\s*(.+?)\s*$")
-    file_matches = list(file_pattern.finditer(document))
-    file_sections: list[tuple[str, str]] = []
-    if not file_matches:
-        file_sections.append(("unknown", document.strip()))
-    else:
-        for index, match in enumerate(file_matches):
-            end = (
-                file_matches[index + 1].start()
-                if index + 1 < len(file_matches)
-                else len(document)
-            )
-            file_sections.append((match.group(1).strip(), document[match.end():end].strip()))
-
-    sections: list[tuple[str, str | None, str]] = []
-    page_pattern = re.compile(r"(?im)^#{1,4}\s+(?:Page\s+(\d+)|第\s*(\d+)\s*页)\s*$")
-    for source, file_content in file_sections:
-        page_matches = list(page_pattern.finditer(file_content))
-        if not page_matches:
-            sections.append((source, None, file_content))
-            continue
-        for index, match in enumerate(page_matches):
-            end = (
-                page_matches[index + 1].start()
-                if index + 1 < len(page_matches)
-                else len(file_content)
-            )
-            page = match.group(1) or match.group(2)
-            sections.append((source, page, file_content[match.end():end].strip()))
-    return [(source, page, text) for source, page, text in sections if text]
-
-
-def _chunk_text(text: str) -> list[str]:
-    """Create bounded overlapping Markdown chunks for embedding."""
-    compact = text.strip()
-    if len(compact) <= CHUNK_SIZE:
-        return [compact] if compact else []
-
-    chunks: list[str] = []
-    start = 0
-    while start < len(compact):
-        end = min(start + CHUNK_SIZE, len(compact))
-        if end < len(compact):
-            paragraph_break = compact.rfind("\n\n", start + CHUNK_SIZE // 2, end)
-            if paragraph_break > start:
-                end = paragraph_break
-        chunk = compact[start:end].strip()
-        if chunk:
-            chunks.append(chunk)
-        if end >= len(compact):
-            break
-        start = max(end - CHUNK_OVERLAP, start + 1)
-    return chunks
-
-
-def _render_search_result(chunk: _KnowledgeChunk) -> str:
-    if chunk.source == "unknown" and chunk.page is None:
-        return chunk.content
-    citation = f"Source: {chunk.source}"
-    if chunk.page is not None:
-        citation += f" | Page: {chunk.page}"
-    return f"[{citation}]\n{chunk.content}"
-
-
-def _render_graph_search_result(path: GraphPath) -> str:
-    names_by_id = dict(zip(path.entity_ids, path.entity_names, strict=False))
-    relation_lines = [
-        (
-            f"- {names_by_id[relation.source_id]} -[{relation.relation}]-> "
-            f"{names_by_id[relation.target_id]}"
-        )
-        for relation in path.relations
-    ]
-    evidence_lines: list[str] = []
-    for evidence in path.evidence:
-        citation = f"Source: {evidence.source}"
-        if evidence.page is not None:
-            citation += f" | Page: {evidence.page}"
-        evidence_lines.append(f"- [{citation}] {evidence.text}")
-    return (
-        "[Knowledge Graph Path]\n"
-        + "\n".join(relation_lines)
-        + "\nEvidence:\n"
-        + "\n".join(evidence_lines)
-    )
-
-
-def _diverse_chunks(ranked_chunks: Sequence[_KnowledgeChunk]) -> list[_KnowledgeChunk]:
-    """Keep high vector relevance while preventing one large document from dominating."""
-    primary: list[_KnowledgeChunk] = []
-    overflow: list[_KnowledgeChunk] = []
-    seen_documents: set[str] = set()
-    for chunk in ranked_chunks:
-        if chunk.document_id in seen_documents:
-            overflow.append(chunk)
-            continue
-        seen_documents.add(chunk.document_id)
-        primary.append(chunk)
-
-    # 原因：Excel 等大型文件会产生很多相似 chunk，可能挤掉其他文档的候选片段。
-    # 作用：优先保留每份文档的最佳命中，再按原向量排名补足上下文数量。
-    return (primary + overflow)[:SEARCH_TOP_K]
-
-
-def _load_records(storage_path: Path) -> list[_DocumentRecord]:
-    if not storage_path.exists():
-        return []
-
-    records: dict[str, _DocumentRecord] = {}
-    source_ids: dict[str, str] = {}
-    for line in storage_path.read_text(encoding="utf-8").splitlines():
-        if not line.strip():
-            continue
-        try:
-            payload = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        document = payload.get("document")
-        if not isinstance(document, str) or not document.strip():
-            continue
-        source_documents = _split_source_documents(document)
-        for source_document in source_documents:
-            document_id = (
-                str(payload.get("document_id"))
-                if len(source_documents) == 1 and payload.get("document_id")
-                else _stable_id("document", source_document)
-            )
-            # 原因：旧版 JSONL 可能把多个文件合在一条记录，也没有可靠的 chunk 元数据。
-            # 作用：加载时按来源拆分并确定性重建，使单文件更新/删除不会误伤其他文件。
-            record = _build_record(document_id, source_document)
-            source = _single_record_source(record)
-            if source is not None:
-                source_key = source.casefold()
-                previous_id = source_ids.get(source_key)
-                if previous_id is not None:
-                    records.pop(previous_id, None)
-                source_ids[source_key] = record.id
-            records[record.id] = record
-    return list(records.values())
-
-
-def _append_record(storage_path: Path, record: _DocumentRecord) -> None:
-    storage_path.parent.mkdir(parents=True, exist_ok=True)
-    with storage_path.open("a", encoding="utf-8") as file:
-        file.write(json.dumps(_record_payload(record), ensure_ascii=False) + "\n")
-
-
-def _rewrite_records(storage_path: Path, records: Sequence[_DocumentRecord]) -> None:
-    storage_path.parent.mkdir(parents=True, exist_ok=True)
-    temporary_path = storage_path.with_suffix(f"{storage_path.suffix}.tmp")
-    content = "".join(
-        json.dumps(_record_payload(record), ensure_ascii=False) + "\n"
-        for record in records
-    )
-    temporary_path.write_text(content, encoding="utf-8")
-    # 原因：更新或删除期间进程中断不能留下半截 JSONL，documents 是索引事实来源。
-    # 作用：完整写入临时文件后原子替换，向量与图谱可随时从它恢复。
-    temporary_path.replace(storage_path)
-
-
-def _record_payload(record: _DocumentRecord) -> dict[str, Any]:
-    return {
-        "schema_version": INDEX_SCHEMA_VERSION,
-        "document_id": record.id,
-        "timestamp": record.timestamp,
-        "document": record.document,
-        "chunks": [asdict(chunk) for chunk in record.chunks],
-    }
-
-
-def _record_sources(record: _DocumentRecord) -> set[str]:
-    return {chunk.source for chunk in record.chunks}
-
-
-def _single_record_source(record: _DocumentRecord) -> str | None:
-    sources = _record_sources(record) - {"unknown"}
-    return next(iter(sources)) if len(sources) == 1 else None
-
-
-def _split_source_documents(document: str) -> list[str]:
-    matches = list(re.finditer(r"(?m)^# File:\s*(.+?)\s*$", document))
-    if len(matches) <= 1:
-        return [document]
-    documents: list[str] = []
-    for index, match in enumerate(matches):
-        end = matches[index + 1].start() if index + 1 < len(matches) else len(document)
-        source_document = document[match.start():end].strip()
-        if source_document:
-            documents.append(source_document)
-    return documents
-
-
-def _stable_id(prefix: str, value: str) -> str:
-    digest = blake2b(value.encode("utf-8"), digest_size=16).hexdigest()
-    return f"{prefix}-{digest}"
 
 
 def _index_directory(storage_path: Path) -> Path:
@@ -590,19 +419,6 @@ def _graph_path(storage_path: Path) -> Path:
     if storage_path == DEFAULT_MINIRAG_STORE_PATH:
         return DEFAULT_KNOWLEDGE_GRAPH_PATH
     return storage_path.parent / f"{storage_path.stem}_graph.json"
-
-
-def _to_graph_chunks(chunks: Sequence[_KnowledgeChunk]) -> tuple[GraphChunk, ...]:
-    return tuple(
-        GraphChunk(
-            id=chunk.id,
-            document_id=chunk.document_id,
-            source=chunk.source,
-            page=chunk.page,
-            content=chunk.content,
-        )
-        for chunk in chunks
-    )
 
 
 def _load_json(path: Path) -> dict[str, Any] | None:

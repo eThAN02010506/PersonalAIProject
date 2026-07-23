@@ -48,6 +48,7 @@ class ChatStartRequest(BaseModel):
     content: str = Field(min_length=1)
     enable_web_search: bool = False
     enable_local_knowledge: bool = False
+    min_source_relevance: float = Field(default=0.55, ge=0.25, le=0.95)
 
 
 class RunStarted(BaseModel):
@@ -77,6 +78,27 @@ class AnalysisView(BaseModel):
     citations: list[dict[str, Any]] = Field(default_factory=list)
     trace: list[dict[str, Any]] = Field(default_factory=list)
     reports: list[dict[str, str]] = Field(default_factory=list)
+    documents: list[DocumentOutlineView] = Field(default_factory=list)
+
+
+class DocumentSectionView(BaseModel):
+    """One selectable heading shown without exposing its full body."""
+
+    id: str
+    title: str
+    level: int
+    parent_id: str | None = None
+    section_path: list[str] = Field(default_factory=list)
+    page_start: int | None = None
+    page_end: int | None = None
+
+
+class DocumentOutlineView(BaseModel):
+    """Safe document hierarchy returned to the formal frontend."""
+
+    document_id: str
+    source: str
+    sections: list[DocumentSectionView] = Field(default_factory=list)
 
 
 class ModelSettingsUpdate(BaseModel):

@@ -1,14 +1,29 @@
-import { FileSearch, Menu, MessageCircle, Network, Search, Wrench, X } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { FileSearch, Menu, MessageCircle, Network, Search, SlidersHorizontal, Wrench, X } from "lucide-react";
+import { lazy, Suspense, useCallback, useEffect, useState } from "react";
 
 import { AgentRuntimeProvider } from "./components/AgentRuntimeProvider";
 import { ChatThread } from "./components/ChatThread";
-import { DocumentWorkspace } from "./components/DocumentWorkspace";
-import { ModelSettingsDialog } from "./components/ModelSettingsDialog";
-import { RunInspector } from "./components/RunInspector";
 import { Sidebar } from "./components/Sidebar";
 import { api, waitForRun } from "./lib/api";
 import type { ChatMessage, Conversation, Health, RunView } from "./lib/types";
+
+// 原因：文档、过程和模型设置不是默认聊天首屏的必需代码。
+// 作用：仅在用户打开对应功能时加载模块，降低初始 JavaScript 解析成本。
+const DocumentWorkspace = lazy(() =>
+  import("./components/DocumentWorkspace").then((module) => ({
+    default: module.DocumentWorkspace,
+  })),
+);
+const ModelSettingsDialog = lazy(() =>
+  import("./components/ModelSettingsDialog").then((module) => ({
+    default: module.ModelSettingsDialog,
+  })),
+);
+const RunInspector = lazy(() =>
+  import("./components/RunInspector").then((module) => ({
+    default: module.RunInspector,
+  })),
+);
 
 type ViewMode = "chat" | "documents";
 
@@ -21,6 +36,7 @@ export default function App() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [webSearch, setWebSearch] = useState(false);
   const [localKnowledge, setLocalKnowledge] = useState(false);
+  const [minSourceRelevance, setMinSourceRelevance] = useState(0.55);
   const [showProcess, setShowProcess] = useState(false);
   const [isRunning, setIsRunning] = useState(false);
   const [runId, setRunId] = useState<string | null>(null);
@@ -132,6 +148,7 @@ export default function App() {
         const started = await api.startRun(conversationId, content, {
           enableWebSearch: webSearch,
           enableLocalKnowledge: localKnowledge,
+          minSourceRelevance,
         });
         setRunId(started.run_id);
         await loadMessages(conversationId);
@@ -152,7 +169,7 @@ export default function App() {
         setRunId(null);
       }
     },
-    [activeId, isRunning, loadMessages, localKnowledge, refreshConversations, webSearch],
+    [activeId, isRunning, loadMessages, localKnowledge, minSourceRelevance, refreshConversations, webSearch],
   );
 
   const cancelRun = useCallback(async () => {
@@ -225,6 +242,25 @@ export default function App() {
               </label>
             </div>
           )}
+          {(mode === "documents" || localKnowledge) && (
+            <label
+              className="source-relevance"
+              title="Only use local sources at or above this semantic similarity"
+            >
+              <SlidersHorizontal size={15} />
+              <span>Sources</span>
+              <input
+                type="range"
+                min="25"
+                max="95"
+                step="5"
+                value={Math.round(minSourceRelevance * 100)}
+                onChange={(event) => setMinSourceRelevance(Number(event.target.value) / 100)}
+                aria-label="Minimum local source relevance"
+              />
+              <output>{Math.round(minSourceRelevance * 100)}%</output>
+            </label>
+          )}
         </header>
 
         {error && (
@@ -247,18 +283,28 @@ export default function App() {
             >
               <ChatThread />
             </AgentRuntimeProvider>
-            <RunInspector run={runView} phase={phase} visible={showProcess} />
+            {showProcess && (
+              <Suspense fallback={null}>
+                <RunInspector run={runView} phase={phase} visible />
+              </Suspense>
+            )}
           </section>
         ) : (
-          <DocumentWorkspace />
+          <Suspense fallback={<div className="workspace-loading">Loading documents...</div>}>
+            <DocumentWorkspace minSourceRelevance={minSourceRelevance} />
+          </Suspense>
         )}
       </main>
-      <ModelSettingsDialog
-        open={modelSettingsOpen}
-        health={health}
-        onClose={() => setModelSettingsOpen(false)}
-        onSaved={setHealth}
-      />
+      {modelSettingsOpen && (
+        <Suspense fallback={null}>
+          <ModelSettingsDialog
+            open
+            health={health}
+            onClose={() => setModelSettingsOpen(false)}
+            onSaved={setHealth}
+          />
+        </Suspense>
+      )}
     </div>
   );
 }

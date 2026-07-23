@@ -87,7 +87,11 @@ def _render_path(path: GraphPath, *, number: int) -> str:
 
 def _bounded_integer(value: object, *, default: int, low: int, high: int) -> int:
     try:
-        parsed = int(value) if value is not None else default
+        parsed = (
+            int(value)
+            if isinstance(value, (str, bytes, bytearray, int, float))
+            else default
+        )
     except (TypeError, ValueError):
         parsed = default
     return min(high, max(low, parsed))

@@ -42,6 +42,15 @@ class OrchestrationRequest(BaseModel):
     uploaded_files: tuple[OrchestrationFile, ...] = ()
     enable_web_search: bool = False
     enable_local_knowledge: bool = False
+    # 原因：不同问题对召回率和精度的要求不同，不能使用全局可变阈值。
+    # 作用：把用户选择固定在单次编排请求中，并限制为索引支持的安全范围。
+    min_source_relevance: float = Field(default=0.55, ge=0.25, le=0.95)
+    # 原因：问题检索、章节阅读和全文总结需要不同的工具策略。
+    # 作用：把用户选择作为请求数据传入 Agent，而不是由前端改写自然语言问题。
+    analysis_mode: Literal["question", "section", "full"] = "question"
+    # 原因：章节选择属于单次请求范围，不能写入进程级全局状态。
+    # 作用：键为文档 id、值为章节 id，文档工具据此限制可读证据。
+    selected_sections: dict[str, tuple[str, ...]] = Field(default_factory=dict)
     generate_report: bool = False
     report_title: str = "Qwopus Agent Report"
     report_basename: str = "qwopus_agent_report"

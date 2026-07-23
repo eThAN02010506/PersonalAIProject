@@ -2,12 +2,44 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from qwopus_agent.memory.minirag import MiniRAG
+from qwopus_agent.memory.minirag import (
+    MiniRAG,
+    _diverse_chunks,
+    _KnowledgeChunk,
+)
 from qwopus_agent.services.knowledge_maintenance_service import KnowledgeMaintenanceService
 from tests.minirag_fakes import TestEmbeddingBackend, make_test_minirag
 
 
 class MiniRAGTests(unittest.TestCase):
+    def test_diverse_chunks_remove_near_duplicate_evidence(self) -> None:
+        def chunk(identifier: str, content: str) -> _KnowledgeChunk:
+            return _KnowledgeChunk(
+                id=identifier,
+                document_id=identifier,
+                source=f"{identifier}.md",
+                page=None,
+                page_end=None,
+                section_id="section",
+                section_path=("Section",),
+                content=content,
+                position=0,
+            )
+
+        repeated = "Revenue increased by ten percent during the first quarter. " * 8
+        ranked = [
+            chunk("first", repeated),
+            chunk("duplicate", repeated + " "),
+            chunk("different", "Customer retention improved after the support redesign."),
+        ]
+
+        # 原因：重叠切片可能拥有近乎相同的高向量分数并反复进入模型上下文。
+        # 作用：保留首个高排名证据和不同证据，同时剔除近重复 source。
+        self.assertEqual(
+            [item.id for item in _diverse_chunks(ranked)],
+            ["first", "different"],
+        )
+
     def test_insert_and_search_expose_only_simple_knowledge_api(self) -> None:
         with TemporaryDirectory() as tmpdir:
             memory = make_test_minirag(Path(tmpdir) / "documents.jsonl")
@@ -81,6 +113,23 @@ class MiniRAGTests(unittest.TestCase):
 
             self.assertIn("automobile maintenance", results[0])
 
+    def test_search_excludes_sources_below_request_relevance(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            memory = make_test_minirag(Path(tmpdir) / "documents.jsonl")
+            memory.insert("Revenue planning notes also mention staffing and office logistics.")
+
+            # 原因：滑块必须改变实际检索结果，不能只在前端隐藏 Source。
+            # 作用：锁定低阈值保留弱相关内容，高阈值在 Agent 推理前剔除它。
+            self.assertTrue(memory.search("revenue", min_relevance=0.25))
+            self.assertEqual(memory.search("revenue", min_relevance=0.95), [])
+
+    def test_search_rejects_invalid_relevance(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            memory = make_test_minirag(Path(tmpdir) / "documents.jsonl")
+
+            with self.assertRaisesRegex(ValueError, "between 0 and 1"):
+                memory.search("revenue", min_relevance=1.1)
+
     def test_search_returns_file_and_page_citations(self) -> None:
         with TemporaryDirectory() as tmpdir:
             memory = make_test_minirag(Path(tmpdir) / "documents.jsonl")
@@ -92,6 +141,37 @@ class MiniRAGTests(unittest.TestCase):
                 results,
                 ["[Source: budget.pdf | Page: 3]\nAnnual revenue reached 2 million."],
             )
+
+    def test_search_returns_section_path_and_filters_current_document(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            memory = make_test_minirag(Path(tmpdir) / "documents.jsonl")
+            north_id = memory.insert(
+                "# File: north.md\n\n# Finance\n\n## Revenue\n\nNorth revenue increased."
+            )
+            memory.insert(
+                "# File: south.md\n\n# Finance\n\n## Revenue\n\nSouth revenue decreased."
+            )
+
+            results = memory.search(
+                "revenue",
+                document_ids=(north_id,),
+            )
+
+            self.assertTrue(results)
+            self.assertTrue(all("Source: north.md" in result for result in results))
+            self.assertIn("Section: Finance / Revenue", results[0])
+            self.assertNotIn("South revenue", "\n".join(results))
+
+    def test_search_can_limit_results_by_source(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            memory = make_test_minirag(Path(tmpdir) / "documents.jsonl")
+            memory.insert("# File: alpha.txt\n\nShared project schedule.")
+            memory.insert("# File: beta.txt\n\nShared project budget.")
+
+            results = memory.search("shared project", sources=("beta.txt",))
+
+            self.assertTrue(results)
+            self.assertTrue(all("Source: beta.txt" in result for result in results))
 
     def test_restart_reuses_persisted_vector_index(self) -> None:
         with TemporaryDirectory() as tmpdir:

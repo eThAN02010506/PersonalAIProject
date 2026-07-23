@@ -50,10 +50,11 @@ class ExcelSchemaSkill(BaseSkill):
         sheets: dict[str, Any] = {}
         content_lines = [f"# Excel Schema: {path.name}"]
         for sheet_name, dataframe in spreadsheet.sheets.items():
+            column_names = [str(column) for column in dataframe.columns]
             sheet_data = {
                 "rows": int(len(dataframe)),
                 "columns": int(len(dataframe.columns)),
-                "column_names": [str(column) for column in dataframe.columns],
+                "column_names": column_names,
                 "dtypes": {
                     str(column): str(dtype)
                     for column, dtype in dataframe.dtypes.items()
@@ -70,7 +71,7 @@ class ExcelSchemaSkill(BaseSkill):
                     f"## Sheet: {sheet_name}",
                     f"- Rows: {sheet_data['rows']}",
                     f"- Columns: {sheet_data['columns']}",
-                    f"- Column names: {', '.join(sheet_data['column_names'])}",
+                    f"- Column names: {', '.join(column_names)}",
                 ]
             )
 

@@ -22,6 +22,7 @@ class ChatServiceTests(unittest.TestCase):
 
         def fake_orchestrator_run(_self, request, progress_callback=None):
             self.assertTrue(request.enable_local_knowledge)
+            self.assertEqual(request.min_source_relevance, 0.8)
             progress_callback("planning")
             progress_callback("completed")
             return OrchestrationResult(
@@ -61,6 +62,7 @@ class ChatServiceTests(unittest.TestCase):
                 settings,
                 True,
                 True,
+                0.8,
             )
 
         payload = result_queue.get_nowait()

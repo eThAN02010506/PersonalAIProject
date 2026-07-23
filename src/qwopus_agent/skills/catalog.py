@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from builtins import list as list_type
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
@@ -51,7 +52,7 @@ class SkillCatalog:
         # 作用：持久化可审计版本记录，并使用语义版本顺序稳定输出。
         self._write(sorted(filtered, key=lambda item: (item.name, _version_key(item.version))))
 
-    def list(self) -> list[SkillManifest]:
+    def list(self) -> list_type[SkillManifest]:
         """List all registered skill manifests."""
         if not self.storage_path.exists():
             return []
@@ -73,7 +74,7 @@ class SkillCatalog:
         """Return the active version for one skill."""
         return self.latest(name, status="active")
 
-    def deployed(self) -> list[SkillManifest]:
+    def deployed(self) -> list_type[SkillManifest]:
         """Return all active workflow manifests."""
         return [
             manifest
@@ -93,7 +94,7 @@ class SkillCatalog:
         """Activate one version and archive older active versions of the same skill."""
         manifests = self.list()
         target: SkillManifest | None = None
-        updated: list[SkillManifest] = []
+        updated: list_type[SkillManifest] = []
         for manifest in manifests:
             if manifest.name == name and manifest.version == version:
                 target = replace(manifest, status="active")
@@ -107,7 +108,7 @@ class SkillCatalog:
         self._write(sorted(updated, key=lambda item: (item.name, _version_key(item.version))))
         return target
 
-    def _write(self, manifests: list[SkillManifest]) -> None:
+    def _write(self, manifests: list_type[SkillManifest]) -> None:
         """Persist manifests atomically to avoid a partial catalog."""
         self.storage_path.parent.mkdir(parents=True, exist_ok=True)
         payload = {"skills": [asdict(manifest) for manifest in manifests]}

@@ -13,6 +13,11 @@ from typing import Any
 import pandas as pd
 
 from qwopus_agent.analysis.excel_processing import read_spreadsheet
+from qwopus_agent.documents import (
+    DocumentStructure,
+    build_document_structure,
+    chunk_document_structure,
+)
 from qwopus_agent.documents.parser import ParsedDocument, parse_document
 
 SPREADSHEET_EXTENSIONS = {".csv", ".xlsx", ".xls"}
@@ -42,8 +47,17 @@ class AnalysisResult:
     # 作用：保存 LLM 基于解析内容生成的真正分析答案。
     llm_analysis: str | None = None
 
+    # 原因：标题层级不能只存在于 Markdown 字符串里，否则 Tool 和前端无法按章节定位。
+    # 作用：携带确定性章节树和 Chunk，后续服务可持久化、过滤和展示而无需重复解析。
+    document_structures: tuple[DocumentStructure, ...] = ()
 
-def analyze_uploaded_file(file_path: str | Path, user_question: str = "") -> AnalysisResult:
+
+def analyze_uploaded_file(
+    file_path: str | Path,
+    user_question: str = "",
+    *,
+    source_name: str | None = None,
+) -> AnalysisResult:
     """Analyze one uploaded file using local Python."""
     path = Path(file_path)
     suffix = path.suffix.lower()
@@ -52,7 +66,11 @@ def analyze_uploaded_file(file_path: str | Path, user_question: str = "") -> Ana
         return _analyze_spreadsheet(path, user_question=user_question)
 
     parsed = parse_document(path)
-    return _analyze_markdown_document(parsed, user_question=user_question)
+    return _analyze_markdown_document(
+        parsed,
+        user_question=user_question,
+        source_name=source_name,
+    )
 
 
 def _analyze_spreadsheet(path: Path, user_question: str = "") -> AnalysisResult:
@@ -205,6 +223,7 @@ def _spreadsheet_analysis_context(
 def _analyze_markdown_document(
     parsed: ParsedDocument,
     user_question: str = "",
+    source_name: str | None = None,
 ) -> AnalysisResult:
     """Create a lightweight local summary for a Markdown-normalized document."""
     preview = parsed.markdown[:1200]
@@ -226,9 +245,16 @@ def _analyze_markdown_document(
     metadata_table = pd.DataFrame(
         [{"key": key, "value": value} for key, value in parsed.metadata.items()]
     )
+    structure = chunk_document_structure(
+        build_document_structure(
+            parsed.markdown,
+            source=source_name or parsed.source_path.name,
+        )
+    )
     return AnalysisResult(
         markdown_summary="\n".join(summary_lines),
         tables={"metadata": metadata_table},
         metadata=dict(parsed.metadata),
         markdown_document=parsed.markdown,
+        document_structures=(structure,),
     )

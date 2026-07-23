@@ -45,11 +45,19 @@ qwopus-ui = "qwopus_agent.ui.launcher:main"
 [project.optional-dependencies]
 dev = [
   "pytest>=8.0",
+  # 原因：Starlette 1.3 的 TestClient 已弃用旧 httpx 兼容路径。
+  # 作用：API 测试使用官方 httpx2 传输层，不产生弃用警告。
+  "httpx2>=2.7,<3",
   # 原因：真实格式集成测试需要生成带可提取文本层的 PDF fixture。
   # 作用：验证 PDF → Markdown → MiniRAG/图谱链路，而不是使用伪 PDF 字节。
   "reportlab>=4,<6",
   "ruff>=0.6.0",
-  "mypy>=1.10"
+  "mypy>=1.10",
+  # 原因：核心数据、图谱和 Excel 模块都启用了 strict mypy，运行库本身不包含完整类型。
+  # 作用：开发环境可以真正执行严格类型检查，而不是被第三方缺失 stubs 淹没。
+  "pandas-stubs>=2.2",
+  "types-networkx>=3.2",
+  "types-openpyxl>=3.1"
 ]
 ui = [
   # 原因：知识图谱页面需要绘制有向实体关系，Streamlit 将 DOT 交给 graphviz 渲染。
@@ -91,3 +99,9 @@ strict = true
 warn_unused_ignores = true
 warn_return_any = true
 packages = ["qwopus_agent"]
+
+[[tool.mypy.overrides]]
+# 原因：smolagents 与 MiniRAG 当前发行包没有 py.typed 标记或公开 stubs。
+# 作用：只跳过这两个外部边界的内部类型，项目自身调用代码仍接受 strict 检查。
+module = ["smolagents.*", "minirag.*"]
+ignore_missing_imports = true

@@ -6,6 +6,7 @@ keeps downstream modules independent from PDF/DOCX/TXT format details.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -95,7 +96,12 @@ def _parse_docx(path: Path) -> ParsedDocument:
     for paragraph in document.paragraphs:
         text = paragraph.text.strip()
         if text:
-            blocks.append(text)
+            heading_level = _docx_heading_level(
+                paragraph.style.name if paragraph.style is not None else None
+            )
+            # 原因：DOCX 回退解析过去只保留文字，Heading 1/2/3 会退化成普通段落。
+            # 作用：转换为统一 Markdown 标题，使后续章节树在没有 MinerU 时仍然可用。
+            blocks.append(f"{'#' * heading_level} {text}" if heading_level else text)
 
     for table_index, table in enumerate(document.tables, start=1):
         rows = [[cell.text.strip() for cell in row.cells] for row in table.rows]
@@ -105,6 +111,11 @@ def _parse_docx(path: Path) -> ParsedDocument:
             blocks.append(f"### Table {table_index}\n\n{_rows_to_markdown_table(rows)}")
 
     return _build_parsed_document(path, "\n\n".join(blocks), source_type="docx")
+
+
+def _docx_heading_level(style_name: str | None) -> int | None:
+    match = re.search(r"(?:Heading|标题)\s*([1-6])", style_name or "", re.IGNORECASE)
+    return int(match.group(1)) if match else None
 
 
 def _parse_with_mineru(path: Path, source_type: str) -> ParsedDocument:

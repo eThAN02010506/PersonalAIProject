@@ -4,8 +4,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 import pandas as pd
+
+if TYPE_CHECKING:
+    from matplotlib.axes import Axes
 
 CHART_COLORS = ("#2563EB", "#E85D3F", "#169B62", "#D89B16", "#7C3AED")
 MAX_CATEGORY_ROWS = 30
@@ -49,7 +53,9 @@ class ChartRenderer:
     ) -> list[RenderedChart]:
         if dataframe.empty:
             return []
-        numeric_columns = list(dataframe.select_dtypes(include="number").columns[:MAX_SERIES])
+        numeric_columns: list[Any] = list(
+            dataframe.select_dtypes(include="number").columns[:MAX_SERIES]
+        )
         if not numeric_columns:
             return []
 
@@ -88,7 +94,12 @@ class ChartRenderer:
             for kind, path in paths.items()
         ]
 
-    def _draw(self, axis, dataframe: pd.DataFrame, numeric_columns: list[object]) -> str:
+    def _draw(
+        self,
+        axis: Axes,
+        dataframe: pd.DataFrame,
+        numeric_columns: list[Any],
+    ) -> str:
         category_column = next(
             (
                 column
@@ -124,10 +135,10 @@ class ChartRenderer:
 
     def _draw_bars(
         self,
-        axis,
+        axis: Axes,
         dataframe: pd.DataFrame,
-        category_column: object,
-        numeric_columns: list[object],
+        category_column: Any,
+        numeric_columns: list[Any],
     ) -> None:
         frame = dataframe.head(MAX_CATEGORY_ROWS)
         positions = list(range(len(frame)))
@@ -149,10 +160,10 @@ class ChartRenderer:
 
     def _draw_lines(
         self,
-        axis,
+        axis: Axes,
         dataframe: pd.DataFrame,
-        x_column: object | None,
-        numeric_columns: list[object],
+        x_column: Any | None,
+        numeric_columns: list[Any],
     ) -> None:
         x_values = dataframe[x_column] if x_column is not None else list(range(len(dataframe)))
         for index, column in enumerate(numeric_columns):

@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
 from openpyxl import load_workbook
+from openpyxl.worksheet.worksheet import Worksheet
 
 
 @dataclass(frozen=True)
@@ -66,7 +68,7 @@ def _read_xlsx_with_detected_headers(path: Path) -> SpreadsheetReadResult:
     )
 
 
-def _detect_header_row(worksheet, max_scan_rows: int = 25) -> int:
+def _detect_header_row(worksheet: Worksheet, max_scan_rows: int = 25) -> int:
     """Detect the most likely 0-based header row index."""
     rows = list(
         worksheet.iter_rows(
@@ -118,7 +120,7 @@ def _looks_numeric(value: str) -> bool:
 
 
 def _extract_form_summary(
-        worksheet,
+        worksheet: Worksheet,
         max_rows: int = 200,
         max_columns: int = 80,
         max_pairs: int = 120,
@@ -168,7 +170,11 @@ def _extract_form_summary(
     return pd.DataFrame(pairs)
 
 
-def _neighbor_values(rows: list[tuple[Any, ...]], row_index: int, column_index: int):
+def _neighbor_values(
+    rows: list[tuple[Any, ...]],
+    row_index: int,
+    column_index: int,
+) -> Iterator[tuple[str, Any]]:
     row = rows[row_index]
     if column_index + 1 < len(row):
         yield "right", row[column_index + 1]

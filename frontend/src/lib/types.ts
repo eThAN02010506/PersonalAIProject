@@ -29,6 +29,23 @@ export type AnalysisResult = {
   citations: Record<string, unknown>[];
   trace: Record<string, unknown>[];
   reports: Array<{ kind: string; name: string; url: string }>;
+  documents: DocumentOutline[];
+};
+
+export type DocumentSection = {
+  id: string;
+  title: string;
+  level: number;
+  parent_id?: string;
+  section_path: string[];
+  page_start?: number;
+  page_end?: number;
+};
+
+export type DocumentOutline = {
+  document_id: string;
+  source: string;
+  sections: DocumentSection[];
 };
 
 export type Health = {

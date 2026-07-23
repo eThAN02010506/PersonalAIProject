@@ -28,7 +28,11 @@ class PersistentKnowledgeGraph:
     storage_path: Path
     _entities: dict[str, EntityRecord] = field(default_factory=dict, init=False, repr=False)
     _relations: dict[str, RelationRecord] = field(default_factory=dict, init=False, repr=False)
-    _graph: nx.MultiDiGraph = field(default_factory=nx.MultiDiGraph, init=False, repr=False)
+    _graph: nx.MultiDiGraph[str] = field(
+        default_factory=nx.MultiDiGraph,
+        init=False,
+        repr=False,
+    )
 
     def __post_init__(self) -> None:
         self.storage_path = Path(self.storage_path)

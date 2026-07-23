@@ -15,11 +15,11 @@ class KnowledgeMaintenanceService:
 
     def list_sources(self) -> list[str]:
         """Return uploaded sources available for maintenance."""
-        return self.memory._list_sources()
+        return list(self.memory._list_sources())
 
     def delete_source(self, source: str) -> int:
         """Delete one source's records, vectors, and unsupported graph facts."""
-        return self.memory._delete_source(source)
+        return int(self.memory._delete_source(source))
 
     def rebuild_indexes(self) -> None:
         """Rebuild all derived indexes from persisted Markdown documents."""

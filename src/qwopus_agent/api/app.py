@@ -2,37 +2,29 @@
 
 from __future__ import annotations
 
-import asyncio
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 from threading import Lock
-from typing import TYPE_CHECKING, Annotated
+from typing import TYPE_CHECKING
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from qwopus_agent.services.agent_orchestrator import AgentOrchestrator
-from qwopus_agent.services.orchestration_models import OrchestrationFile, OrchestrationRequest
-from qwopus_agent.utils.debug_store import DEFAULT_DEBUG_DIRECTORY, append_debug_record
+from qwopus_agent.api.routes import (
+    build_analysis_router,
+    build_conversation_router,
+    build_model_router,
+    build_report_router,
+)
+from qwopus_agent.utils.debug_store import DEFAULT_DEBUG_DIRECTORY
 
 if TYPE_CHECKING:
     from qwopus_agent.memory import MiniRAG
 
-from .model_runtime import ModelRuntimeError, RuntimeModelController, RuntimeModelStatus
-from .models import (
-    AnalysisView,
-    ChatStartRequest,
-    ConversationCreate,
-    ConversationUpdate,
-    ConversationView,
-    MessageView,
-    ModelSettingsUpdate,
-    ModelSettingsView,
-    RunStarted,
-    RunView,
-)
+from .model_runtime import RuntimeModelController
 from .repository import ConversationRepository
 from .runs import ChatRunRegistry
 
@@ -68,7 +60,7 @@ def create_app(
         return memory
 
     @asynccontextmanager
-    async def lifespan(_app: FastAPI):
+    async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         repo.initialize()
         try:
             yield
@@ -88,153 +80,12 @@ def create_app(
         allow_methods=["*"],
         allow_headers=["*"],
     )
-
-    @api.get("/api/health", response_model=ModelSettingsView)
-    async def health() -> ModelSettingsView:
-        return _model_settings_view(await asyncio.to_thread(runtime.status))
-
-    @api.get("/api/model-settings", response_model=ModelSettingsView)
-    async def model_settings() -> ModelSettingsView:
-        return _model_settings_view(await asyncio.to_thread(runtime.status))
-
-    @api.put("/api/model-settings", response_model=ModelSettingsView)
-    async def update_model_settings(payload: ModelSettingsUpdate) -> ModelSettingsView:
-        try:
-            if payload.mode == "remote":
-                if not payload.base_url:
-                    raise ModelRuntimeError("Model address is required for remote mode.")
-                status = await asyncio.to_thread(runtime.configure_remote, payload.base_url)
-            else:
-                if not payload.model_path:
-                    raise ModelRuntimeError("Model path is required for local mode.")
-                status = await asyncio.to_thread(runtime.configure_local, payload.model_path)
-        except ModelRuntimeError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return _model_settings_view(status)
-
-    @api.get("/api/conversations", response_model=list[ConversationView])
-    def conversations() -> list[ConversationView]:
-        return [ConversationView.model_validate(item) for item in repo.list_conversations()]
-
-    @api.post("/api/conversations", response_model=ConversationView, status_code=201)
-    def create_conversation(payload: ConversationCreate) -> ConversationView:
-        return ConversationView.model_validate(repo.create_conversation(payload.title))
-
-    @api.patch("/api/conversations/{conversation_id}", response_model=ConversationView)
-    def rename_conversation(
-        conversation_id: str,
-        payload: ConversationUpdate,
-    ) -> ConversationView:
-        record = repo.rename_conversation(conversation_id, payload.title)
-        if record is None:
-            raise HTTPException(status_code=404, detail="Conversation not found.")
-        return ConversationView.model_validate(record)
-
-    @api.delete("/api/conversations/{conversation_id}", status_code=204)
-    def delete_conversation(conversation_id: str) -> None:
-        if not repo.delete_conversation(conversation_id):
-            raise HTTPException(status_code=404, detail="Conversation not found.")
-
-    @api.get("/api/conversations/{conversation_id}/messages", response_model=list[MessageView])
-    def messages(conversation_id: str) -> list[MessageView]:
-        if repo.get_conversation(conversation_id) is None:
-            raise HTTPException(status_code=404, detail="Conversation not found.")
-        return [MessageView.model_validate(item) for item in repo.list_messages(conversation_id)]
-
-    @api.post("/api/conversations/{conversation_id}/runs", response_model=RunStarted)
-    def start_run(conversation_id: str, payload: ChatStartRequest) -> RunStarted:
-        conversation = repo.get_conversation(conversation_id)
-        if conversation is None:
-            raise HTTPException(status_code=404, detail="Conversation not found.")
-        if conversation.title in {"New chat", "新对话"}:
-            repo.rename_conversation(conversation_id, _conversation_title(payload.content))
-        run_id = runs.start(
-            conversation_id,
-            payload.content,
-            runtime.current_settings(),
-            enable_web_search=payload.enable_web_search,
-            enable_local_knowledge=payload.enable_local_knowledge,
-        )
-        return RunStarted(run_id=run_id)
-
-    @api.get("/api/runs/{run_id}", response_model=RunView)
-    def poll_run(run_id: str) -> RunView:
-        result = runs.poll(run_id)
-        if result is None:
-            raise HTTPException(status_code=404, detail="Run not found.")
-        return result
-
-    @api.delete("/api/runs/{run_id}", response_model=RunView)
-    def cancel_run(run_id: str) -> RunView:
-        result = runs.cancel(run_id)
-        if result is None:
-            raise HTTPException(status_code=404, detail="Run not found.")
-        return result
-
-    @api.post("/api/analysis", response_model=AnalysisView)
-    async def analyze(
-        files: Annotated[list[UploadFile], File()],
-        question: Annotated[str, Form()] = "",
-        generate_report: Annotated[bool, Form()] = False,
-    ) -> AnalysisView:
-        # 原因：生成式中包含 await 时会产生 async_generator，不能直接交给 tuple()。
-        # 作用：逐个读取上传字节，确保 MinerU/MiniRAG 编排收到完整且有序的文件集合。
-        uploads_list: list[OrchestrationFile] = []
-        for file in files:
-            uploads_list.append(
-                OrchestrationFile(name=file.filename or "upload", content=await file.read())
-            )
-        uploads = tuple(uploads_list)
-        if not uploads:
-            raise HTTPException(status_code=400, detail="At least one file is required.")
-        request = OrchestrationRequest(
-            objective=question,
-            uploaded_files=uploads,
-            generate_report=generate_report,
-            report_title="Qwopus Analysis Report",
-            report_basename="qwopus_web_analysis",
-        )
-        orchestrator = AgentOrchestrator(
-            runtime.current_settings(),
-            minirag=get_minirag(),
-        )
-        result = await asyncio.to_thread(orchestrator.run_sync, request)
-        # 原因：文档分析是同步 API 路径，不经过 ChatRunRegistry 的完成回调。
-        # 作用：把 MinerU/MiniRAG/Agent 的内部步骤写给只读 Console，同时不进入 AnalysisView。
-        append_debug_record(
-            source="document",
-            status="completed" if result.success else "failed",
-            result=result.final_answer,
-            trace=result.trace,
-            debug_runs=result.debug_runs,
-            directory=debug_path,
-        )
-        if not result.success:
-            raise HTTPException(status_code=500, detail=result.final_answer)
-        reports = []
-        if result.report is not None:
-            reports = [
-                {
-                    "kind": artifact.kind,
-                    "name": artifact.path.name,
-                    "url": f"/api/reports/{artifact.path.name}",
-                }
-                for artifact in result.report.artifacts
-            ]
-        return AnalysisView(
-            answer=result.final_answer,
-            route=result.route,
-            citations=[item.model_dump(mode="json") for item in result.citations],
-            trace=[item.model_dump(mode="json") for item in result.trace],
-            reports=reports,
-        )
-
-    @api.get("/api/reports/{filename}")
-    def report(filename: str) -> FileResponse:
-        path = REPORT_DIRECTORY / Path(filename).name
-        if not path.is_file():
-            raise HTTPException(status_code=404, detail="Report not found.")
-        return FileResponse(path, filename=path.name)
+    # 原因：入口工厂只负责依赖装配，路由业务边界不应共同累积在一个函数中。
+    # 作用：每组 Router 可独立测试，create_app 的复杂度不随功能数量线性增长。
+    api.include_router(build_model_router(runtime))
+    api.include_router(build_conversation_router(repo, runs, runtime))
+    api.include_router(build_analysis_router(runtime, get_minirag, debug_path))
+    api.include_router(build_report_router(REPORT_DIRECTORY))
 
     # 原因：生产模式需要一个进程同时提供 API 和已构建前端，调试时 Vite 仍可独立热更新。
     # 作用：存在 dist 时托管 SPA；没有构建前端时 API 测试和 OpenAPI 仍可单独运行。
@@ -251,22 +102,6 @@ def create_app(
             )
 
     return api
-
-
-def _conversation_title(content: str) -> str:
-    title = " ".join(content.split())
-    return title if len(title) <= 48 else f"{title[:47]}…"
-
-
-def _model_settings_view(status: RuntimeModelStatus) -> ModelSettingsView:
-    return ModelSettingsView(
-        mode=status.mode,
-        model_online=status.online,
-        message=status.message,
-        model=status.settings.model_id,
-        base_url=status.settings.base_url,
-        local_model_path=status.local_model_path,
-    )
 
 
 app = create_app()

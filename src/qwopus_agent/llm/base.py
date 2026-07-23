@@ -6,6 +6,8 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+from qwopus_agent.utils.token_budget import estimate_tokens
+
 Role = Literal["system", "user", "assistant", "tool"]
 
 
@@ -47,3 +49,12 @@ class BaseLLM(ABC):
         max_tokens: int | None = None,
     ) -> LLMResponse:
         """Generate a response for a list of chat messages."""
+
+    @property
+    def context_window(self) -> int:
+        """Return a conservative default when a provider does not publish model metadata."""
+        return 32768
+
+    def count_tokens(self, text: str) -> int:
+        """Use a model-neutral estimate unless an adapter supplies its exact tokenizer."""
+        return estimate_tokens(text)

@@ -14,6 +14,12 @@ from dotenv import dotenv_values
 
 from qwopus_agent.analysis.excel_processing import read_spreadsheet
 from qwopus_agent.analysis.pandas_sandbox import execute_pandas_code
+from qwopus_agent.documents import DocumentStructure, HierarchicalDocumentSummary
+from qwopus_agent.utils.token_budget import (
+    TokenBudgetManager,
+    estimate_tokens,
+    truncate_to_tokens,
+)
 
 if TYPE_CHECKING:
     from qwopus_agent.memory import MiniRAG
@@ -110,46 +116,196 @@ def build_tavily_search_tool(
     return TavilySearchTool()
 
 
-def build_document_parser_tool(
-    documents: Mapping[str, str],
-    max_chars: int = 16000,
+def build_document_outline_tool(
+    documents: Mapping[str, DocumentStructure],
 ) -> Any:
-    """Expose locally parsed Markdown to the smolagents runtime."""
+    """Expose heading hierarchy without returning the full document body."""
     Tool = _smolagents_tool_class()
-    parsed_documents = {
-        str(file_name): str(markdown)
-        for file_name, markdown in documents.items()
-        if str(markdown).strip()
-    }
-    if not parsed_documents:
+    if not documents:
         raise ValueError("documents must contain at least one parsed document.")
-    available_files = ", ".join(parsed_documents)
+    available_files = ", ".join(documents)
 
-    class DocumentParserTool(Tool):  # type: ignore[misc, valid-type]
-        name = "document_parser"
+    class DocumentOutlineTool(Tool):  # type: ignore[misc, valid-type]
+        name = "document_outline"
         description = (
-            "Read the locally parsed Markdown for one current uploaded document. "
-            f"Use the exact file_name. Available files: {available_files}."
+            "List the heading hierarchy, section ids, and page ranges for one uploaded "
+            f"document. Use this before selecting a section. Available files: {available_files}."
         )
         inputs = {
             "file_name": {
                 "type": "string",
-                "description": "Exact uploaded file name to read.",
+                "description": "Exact uploaded file name.",
             }
         }
         output_type = "string"
 
         def forward(self, file_name: str) -> str:
-            markdown = _lookup_file_value(parsed_documents, file_name)
-            # 原因：完整长文档会无界占用 Agent 上下文，甚至让模型停在 Observation 阶段。
-            # 作用：Tool 只返回有上限的 Markdown；原文件仍完整保存在本地和 MiniRAG 中。
-            return _bounded_text(
-                markdown,
-                max_chars=max_chars,
-                truncation_message="[Document content truncated by the tool.]",
+            structure = _lookup_file_value(documents, file_name)
+            lines = [f"# Outline: {file_name}"]
+            for section in structure.sections:
+                indent = "  " * max(section.level - 1, 0)
+                pages = _page_label(section.page_start, section.page_end)
+                lines.append(
+                    f"{indent}- {section.title} [section_id={section.id}{pages}]"
+                )
+            return truncate_to_tokens("\n".join(lines), 3000)
+
+    return DocumentOutlineTool()
+
+
+def build_document_search_tool(
+    minirag: MiniRAG,
+    documents: Mapping[str, DocumentStructure],
+    *,
+    min_relevance: float = 0.55,
+    selected_section_ids: Mapping[str, tuple[str, ...]] | None = None,
+    budget_manager: TokenBudgetManager | None = None,
+) -> Any:
+    """Search only the requested current document and optional selected sections."""
+    Tool = _smolagents_tool_class()
+    if not documents:
+        raise ValueError("documents must not be empty.")
+    budget = budget_manager or TokenBudgetManager()
+    available_files = ", ".join(documents)
+
+    class DocumentSearchTool(Tool):  # type: ignore[misc, valid-type]
+        name = "document_search"
+        description = (
+            "Search relevant evidence chunks inside one current uploaded document. "
+            "Use this for specific questions instead of reading the document from the start. "
+            f"Available files: {available_files}."
+        )
+        inputs = {
+            "file_name": {
+                "type": "string",
+                "description": "Exact uploaded file name.",
+            },
+            "query": {
+                "type": "string",
+                "description": "Question or evidence to find in this file.",
+            },
+        }
+        output_type = "string"
+
+        def forward(self, file_name: str, query: str) -> str:
+            structure = _lookup_file_value(documents, file_name)
+            allowed_sections = (selected_section_ids or {}).get(file_name)
+            results = minirag.search(
+                query,
+                min_relevance=min_relevance,
+                document_ids=(structure.document_id,),
+                section_ids=allowed_sections,
+            )
+            if not results:
+                return f"No relevant evidence found in {file_name}."
+            # 原因：检索已经限定当前文件，仍需服从当前模型可用的证据 token。
+            # 作用：只压缩 Tool Observation，不截断持久化原文和章节 Chunk。
+            return truncate_to_tokens(
+                "\n\n".join(results),
+                min(6000, budget.evidence_budget),
             )
 
-    return DocumentParserTool()
+    return DocumentSearchTool()
+
+
+def build_document_section_tool(
+    documents: Mapping[str, DocumentStructure],
+    *,
+    selected_section_ids: Mapping[str, tuple[str, ...]] | None = None,
+    budget_manager: TokenBudgetManager | None = None,
+) -> Any:
+    """Read one section and descendants with explicit truncation metadata."""
+    Tool = _smolagents_tool_class()
+    if not documents:
+        raise ValueError("documents must not be empty.")
+    budget = budget_manager or TokenBudgetManager()
+    available_files = ", ".join(documents)
+
+    class DocumentSectionTool(Tool):  # type: ignore[misc, valid-type]
+        name = "document_read_section"
+        description = (
+            "Read evidence from one section and its child sections. Call document_outline "
+            "to obtain section_id. Use section_id='__all__' only for whole-document analysis. "
+            f"Available files: {available_files}."
+        )
+        inputs = {
+            "file_name": {
+                "type": "string",
+                "description": "Exact uploaded file name.",
+            },
+            "section_id": {
+                "type": "string",
+                "description": "Section id from document_outline, or __all__.",
+            },
+        }
+        output_type = "string"
+
+        def forward(self, file_name: str, section_id: str) -> str:
+            structure = _lookup_file_value(documents, file_name)
+            allowed_sections = set((selected_section_ids or {}).get(file_name, ()))
+            if section_id == "__all__":
+                chunks = [
+                    chunk
+                    for chunk in structure.chunks
+                    if not allowed_sections or chunk.section_id in allowed_sections
+                ]
+            else:
+                section = next(
+                    (item for item in structure.sections if item.id == section_id),
+                    None,
+                )
+                if section is None:
+                    raise ValueError(f"Unknown section_id: {section_id}.")
+                chunks = [
+                    chunk
+                    for chunk in structure.chunks
+                    if chunk.section_path[: len(section.section_path)] == section.section_path
+                    and (not allowed_sections or chunk.section_id in allowed_sections)
+                ]
+            return _render_section_chunks(
+                file_name,
+                chunks,
+                max_tokens=min(6000, budget.evidence_budget),
+            )
+
+    return DocumentSectionTool()
+
+
+def build_document_summary_tool(
+    summaries: Mapping[str, HierarchicalDocumentSummary],
+    *,
+    budget_manager: TokenBudgetManager | None = None,
+) -> Any:
+    """Expose a whole-document hierarchical reduction instead of a prefix."""
+    Tool = _smolagents_tool_class()
+    if not summaries:
+        raise ValueError("summaries must not be empty.")
+    budget = budget_manager or TokenBudgetManager()
+    available_files = ", ".join(summaries)
+
+    class DocumentSummaryTool(Tool):  # type: ignore[misc, valid-type]
+        name = "document_summary"
+        description = (
+            "Read a hierarchical summary that covers every chapter of one current document. "
+            "Use this for whole-document summaries, then use document_search when exact evidence "
+            f"is needed. Available files: {available_files}."
+        )
+        inputs = {
+            "file_name": {
+                "type": "string",
+                "description": "Exact uploaded file name.",
+            }
+        }
+        output_type = "string"
+
+        def forward(self, file_name: str) -> str:
+            summary = _lookup_file_value(summaries, file_name)
+            return truncate_to_tokens(
+                summary.document_summary,
+                min(6000, budget.evidence_budget),
+            )
+
+    return DocumentSummaryTool()
 
 
 def build_excel_schema_tool(
@@ -241,6 +397,7 @@ def build_excel_analysis_tool(spreadsheets: Mapping[str, str | Path]) -> Any:
 
 def build_minirag_search_tool(
     minirag: MiniRAG,
+    min_relevance: float = 0.55,
     max_results: int = 3,
     max_chars: int = 6000,
     progress_callback: Callable[[str], None] | None = None,
@@ -265,7 +422,9 @@ def build_minirag_search_tool(
         def forward(self, query: str) -> str:
             if progress_callback is not None:
                 progress_callback("retrieving")
-            results = minirag.search(query)[:max_results]
+            # 原因：Agent 不应该看到未达到用户相关性要求的原始 Source。
+            # 作用：在 Tool Observation 产生前就过滤证据，防止无关内容进入最终回答。
+            results = minirag.search(query, min_relevance=min_relevance)[:max_results]
             if not results:
                 return "No relevant MiniRAG results."
             sections = [
@@ -402,7 +561,7 @@ def _resolve_tavily_api_key(explicit_api_key: str | None) -> str:
 def _smolagents_tool_class() -> Any:
     """Load the Tool base lazily so non-Agent modules remain importable without smolagents."""
     try:
-        from smolagents import Tool  # type: ignore[import-untyped]
+        from smolagents import Tool
     except ModuleNotFoundError as exc:
         raise RuntimeError("smolagents is required to build Agent tools.") from exc
     return Tool
@@ -417,6 +576,43 @@ def _lookup_file_value(values: Mapping[str, Any], file_name: str) -> Any:
             f"Unknown file_name: {normalized_name}. Available files: {available_files}."
         )
     return values[normalized_name]
+
+
+def _page_label(page_start: int | None, page_end: int | None) -> str:
+    if page_start is None:
+        return ""
+    if page_end is not None and page_end != page_start:
+        return f", pages={page_start}-{page_end}"
+    return f", page={page_start}"
+
+
+def _render_section_chunks(
+    file_name: str,
+    chunks: list[Any],
+    *,
+    max_tokens: int,
+) -> str:
+    if not chunks:
+        return f"No readable chunks found in the selected section of {file_name}."
+    rendered: list[str] = []
+    used_tokens = 0
+    for chunk in chunks:
+        citation = f"{file_name} / {' / '.join(chunk.section_path)}"
+        citation += _page_label(chunk.page_start, chunk.page_end)
+        block = f"[{citation}]\n{chunk.content}"
+        block_tokens = estimate_tokens(block)
+        if rendered and used_tokens + block_tokens > max_tokens:
+            break
+        rendered.append(
+            block if block_tokens <= max_tokens else truncate_to_tokens(block, max_tokens)
+        )
+        used_tokens += min(block_tokens, max_tokens)
+    remaining = len(chunks) - len(rendered)
+    return (
+        "\n\n".join(rendered)
+        + f"\n\n[section_read truncated={str(remaining > 0).lower()} "
+        f"remaining_chunks={remaining}]"
+    )
 
 
 def _bounded_text(text: str, max_chars: int, truncation_message: str) -> str:
