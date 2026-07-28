@@ -59,7 +59,7 @@ class ChartRenderer:
         if not numeric_columns:
             return []
 
-        # 原因：Matplotlib 默认后端可能尝试打开 macOS 窗口，阻塞 Streamlit 服务器。
+        # 原因：Matplotlib 默认后端可能尝试打开 macOS 窗口，阻塞本地 API 服务。
         # 作用：按需加载 Agg 后端，只写入图像文件且不增加报告模块启动成本。
         import matplotlib
 

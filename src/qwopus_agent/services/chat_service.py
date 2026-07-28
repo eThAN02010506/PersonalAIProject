@@ -82,7 +82,7 @@ class BackgroundChatTask:
         if not self.process.is_alive():
             return
         # 原因：线程无法中断正在等待的模型 HTTP 请求，停止按钮会形同虚设。
-        # 作用：终止独立 Agent 进程并关闭其连接，让 Streamlit 立即恢复交互。
+        # 作用：终止独立 Agent 进程并关闭其连接，让 Web UI 立即恢复交互。
         self.process.terminate()
         self.process.join(timeout=2)
         if self.process.is_alive():

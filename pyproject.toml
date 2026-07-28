@@ -40,7 +40,6 @@ dependencies = [
 qwopus-agent = "qwopus_agent.cli:main"
 qwopus-api = "qwopus_agent.api.launcher:main"
 qwopus-smolagents-smoke = "qwopus_agent.integrations.smolagents_smoke:main"
-qwopus-ui = "qwopus_agent.ui.launcher:main"
 
 [project.optional-dependencies]
 dev = [
@@ -59,14 +58,8 @@ dev = [
   "types-networkx>=3.2",
   "types-openpyxl>=3.1"
 ]
-ui = [
-  # 原因：知识图谱页面需要绘制有向实体关系，Streamlit 将 DOT 交给 graphviz 渲染。
-  # 作用：支持本地图谱可视化，同时不把 UI 依赖加入纯核心安装。
-  "graphviz>=0.20,<1",
-  "streamlit>=1.32"
-]
 api = [
-  # 原因：React 主前端需要稳定的 HTTP 边界，不能依赖 Streamlit Session State。
+  # 原因：React 主前端需要稳定的 HTTP 边界，不能依赖服务器进程内的 UI 会话状态。
   # 作用：提供类型化 API、后台任务轮询、文件上传和构建产物托管。
   "fastapi>=0.115,<1",
   "python-multipart>=0.0.20,<1",

@@ -44,7 +44,7 @@ logs/           Runtime logs, ignored by Git except .gitkeep
 python3.11 -m venv .venv
 source .venv/bin/activate
 pip install -e vendor/MiniRAG-main
-pip install -e ".[dev,ui,api,documents]"
+pip install -e ".[dev,api,documents]"
 pytest
 ```
 
@@ -103,7 +103,7 @@ PYTHONPATH=src python3.11 -m qwopus_agent.integrations.smolagents_smoke \
   "用一句中文回答：你是否已经连接到本地大模型？"
 ```
 
-This smoke test intentionally creates a smolagents `CodeAgent` with no tools. The Streamlit workflow
+This smoke test intentionally creates a smolagents `CodeAgent` with no tools. The web application
 then injects document, pandas sandbox, MiniRAG, graph, and Tavily capabilities as bounded tools.
 
 ## Primary React Application
@@ -161,8 +161,8 @@ AgentOrchestrator + smolagents
   process when the API exits. Arbitrary compatible models can still be used through Remote API mode.
 
 Conversations are persisted in `storage/qwopus.db`, and existing Streamlit JSONL history is imported
-once when that database is first created. Streamlit remains available at its own port as a debugging
-console; the production React application links to it but does not depend on Streamlit Session State.
+once when that database is first created. FastAPI serves both the production React application and a
+separate local-only React Debug Console; neither interface depends on Streamlit Session State.
 
 Verify the new boundary with:
 
@@ -173,41 +173,45 @@ ruff check src tests
 cd frontend && pnpm run build
 ```
 
-## Streamlit Debug Console
+## Local Debug Console
 
-Streamlit is a read-only local developer console. Chat, document analysis, MiniRAG, MinerU, reports,
-and knowledge-graph workflows stay behind the formal FastAPI/React application:
+The read-only Debug Console is part of the FastAPI/React application. Chat, document analysis,
+MiniRAG, MinerU, reports, and knowledge-graph workflows continue to use the same backend:
 
 ```bash
-pip install -e ".[dev,ui]"
+pip install -e ".[dev,api]"
 python -m mlx_lm.server --model ~/Desktop/model/gemma-4-12B-it-qat-OptiQ-4bit --port 8080
-PYTHONPATH=src streamlit run src/qwopus_agent/ui/streamlit_debug_console.py
+PYTHONPATH=src python -m uvicorn qwopus_agent.api.app:app --host 127.0.0.1 --port 8010
 ```
 
-The Streamlit debug console provides:
+Open the formal application at `http://127.0.0.1:8010/` and the Debug Console at
+`http://127.0.0.1:8010/debug`.
 
-- current model identity and an explicit connection probe
-- persisted backend orchestration events and final run status
+The Debug Console provides:
+
+- current model identity, endpoint, process, Python, platform, uptime, task counts, and trace storage
+- persisted backend orchestration events, final status, final result, source/status filters, and search
 - complete smolagents prompts, raw model outputs, Tool arguments, Tool Observations, and step errors
-- downloadable JSON traces and rotating runtime logs
-- a link back to the formal React frontend; no chat, upload, graph-maintenance, or report actions
+- downloadable per-run JSON traces and a bounded rotating runtime-log tail
+- automatic five-second refresh and a link back to the formal React frontend
+- no chat, upload, graph-maintenance, report, model-mutation, or record-deletion actions
 
 The Debug Console intentionally exposes more information than the primary React application and may
 contain full local document excerpts. Use it only on a trusted local machine. It displays the raw
 fields returned by smolagents and the current model server; it cannot display hidden reasoning that
 the model/provider did not return. FastAPI `RunView` and `AnalysisView` do not serialize raw debug
 runs, so the primary React frontend continues to receive only final answers, citations, and safe
-process events. FastAPI writes internal records atomically under `logs/debug_runs/`; Streamlit only
-reads those files and does not initialize MiniRAG, MinerU, Torch, or an Agent worker.
-The project Streamlit configuration binds the console to `127.0.0.1` and keeps the newest 200 raw
-run records so sensitive diagnostics are local and storage remains bounded.
+process events. FastAPI writes internal records atomically under `logs/debug_runs/`; the Debug API
+only reads those files and does not initialize MiniRAG, MinerU, Torch, or an Agent worker. Raw
+diagnostics reject non-loopback clients even if the main API is later exposed to the local network.
+The newest 200 complete run records are retained so sensitive diagnostics stay bounded.
 
 Manual checks:
 
 1. Send a message or analyze a document in the React application at `http://127.0.0.1:8010/`.
-2. Open `http://localhost:8502/` and click "Refresh".
+2. Open `http://127.0.0.1:8010/debug` and click "Refresh".
 3. Confirm the matching backend run shows its safe trace, raw steps, Tool calls, and Observations.
-4. Click "Check model connection" and confirm the currently selected model server is online.
+4. Confirm the runtime summary shows the currently selected model server as online.
 
 Runtime MiniRAG data lives under `storage/minirag`. Uploaded Markdown-normalized documents and safe
 spreadsheet summaries are inserted through the `MiniRAG.insert(document)` facade, and later analysis

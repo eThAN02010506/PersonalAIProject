@@ -125,3 +125,10 @@ class ChatRunRegistry:
         with self._lock:
             self._completed[run_id] = view
         return view
+
+    def debug_counts(self) -> tuple[int, int]:
+        """Return a lock-consistent active/completed run count."""
+        # 原因：Debug API 与聊天轮询可能同时访问运行表，直接读取私有字典会产生竞态。
+        # 作用：只暴露数量且沿用现有锁，不让调试页面获得任务对象或取消能力。
+        with self._lock:
+            return len(self._runs), len(self._completed)

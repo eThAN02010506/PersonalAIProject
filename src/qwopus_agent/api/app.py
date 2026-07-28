@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -16,10 +17,15 @@ from fastapi.staticfiles import StaticFiles
 from qwopus_agent.api.routes import (
     build_analysis_router,
     build_conversation_router,
+    build_debug_router,
     build_model_router,
     build_report_router,
 )
 from qwopus_agent.utils.debug_store import DEFAULT_DEBUG_DIRECTORY
+from qwopus_agent.utils.logging_config import (
+    DEFAULT_RUNTIME_LOG_PATH,
+    configure_runtime_logging,
+)
 
 if TYPE_CHECKING:
     from qwopus_agent.memory import MiniRAG
@@ -37,6 +43,7 @@ def create_app(
     minirag: MiniRAG | None = None,
     model_runtime: RuntimeModelController | None = None,
     debug_directory: Path | None = None,
+    runtime_log_path: Path = DEFAULT_RUNTIME_LOG_PATH,
 ) -> FastAPI:
     """Build an independently testable API application."""
     repo = repository or ConversationRepository()
@@ -45,6 +52,7 @@ def create_app(
     memory = minirag
     memory_lock = Lock()
     runtime = model_runtime or RuntimeModelController()
+    started_at = time.monotonic()
 
     def get_minirag() -> MiniRAG:
         nonlocal memory
@@ -86,6 +94,15 @@ def create_app(
     api.include_router(build_conversation_router(repo, runs, runtime))
     api.include_router(build_analysis_router(runtime, get_minirag, debug_path))
     api.include_router(build_report_router(REPORT_DIRECTORY))
+    api.include_router(
+        build_debug_router(
+            runtime,
+            runs,
+            debug_path,
+            runtime_log_path,
+            started_at=started_at,
+        )
+    )
 
     # 原因：生产模式需要一个进程同时提供 API 和已构建前端，调试时 Vite 仍可独立热更新。
     # 作用：存在 dist 时托管 SPA；没有构建前端时 API 测试和 OpenAPI 仍可单独运行。
@@ -104,4 +121,5 @@ def create_app(
     return api
 
 
+configure_runtime_logging()
 app = create_app()

@@ -78,12 +78,12 @@ export function Sidebar({
         </div>
         <a
           className="debug-link"
-          href="http://localhost:8502"
+          href="/debug"
           target="_blank"
           rel="noreferrer"
         >
           <Bug size={15} />
-          Streamlit debug console
+          Debug console
         </a>
       </div>
     </aside>

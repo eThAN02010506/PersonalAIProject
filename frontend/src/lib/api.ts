@@ -2,6 +2,8 @@ import type {
   AnalysisResult,
   ChatMessage,
   Conversation,
+  DebugOverview,
+  DebugRecord,
   Health,
   RunView,
 } from "./types";
@@ -17,6 +19,12 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const api = {
   health: () => request<Health>("/api/health"),
+
+  debugOverview: (limit = 100, logLines = 500) =>
+    request<DebugOverview>(`/api/debug?limit=${limit}&log_lines=${logLines}`),
+
+  debugRecord: (recordId: string) =>
+    request<DebugRecord>(`/api/debug/records/${encodeURIComponent(recordId)}`),
 
   updateModelSettings: (payload: {
     mode: "remote" | "local";

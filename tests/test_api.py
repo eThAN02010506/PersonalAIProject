@@ -20,6 +20,7 @@ class ApiTests(unittest.TestCase):
         self.temp_directory = tempfile.TemporaryDirectory()
         database_path = Path(self.temp_directory.name) / "qwopus.db"
         self.debug_directory = Path(self.temp_directory.name) / "debug_runs"
+        self.runtime_log_path = Path(self.temp_directory.name) / "qwopus_agent.log"
         # 原因：API 测试必须验证 SQLite 持久化，但不能读取或修改用户现有对话。
         # 作用：每个测试使用独立数据库，并关闭旧 JSONL 自动导入。
         self.repository = ConversationRepository(database_path, import_legacy=False)
@@ -46,6 +47,7 @@ class ApiTests(unittest.TestCase):
                 minirag=MagicMock(),
                 model_runtime=self.model_runtime,
                 debug_directory=self.debug_directory,
+                runtime_log_path=self.runtime_log_path,
             )
         )
         self.client = self.client_context.__enter__()
@@ -88,6 +90,44 @@ class ApiTests(unittest.TestCase):
         self.assertIn("/api/analysis", schema["paths"])
         self.assertIn("/api/model-settings", schema["paths"])
         self.assertIn("/api/reports/{filename}", schema["paths"])
+        self.assertIn("/api/debug", schema["paths"])
+
+    def test_debug_overview_exposes_complete_local_diagnostics(self) -> None:
+        self.runtime_log_path.write_text(
+            "line one\nline two\nline three\n",
+            encoding="utf-8",
+        )
+        debug_record = self.debug_directory / "record.json"
+        self.debug_directory.mkdir(parents=True)
+        debug_record.write_text(
+            (
+                '{"id":"record-1","timestamp":"2026-07-23T00:00:00+00:00",'
+                '"source":"chat","status":"completed","run_id":"run-1",'
+                '"result":"answer","trace":[{"phase":"planning"}],'
+                '"debug_runs":[{"label":"chat","prompt":"question",'
+                '"steps":[{"observations":"raw evidence"}]}]}'
+            ),
+            encoding="utf-8",
+        )
+
+        response = self.client.get("/api/debug?limit=10&log_lines=2")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["record_count"], 1)
+        self.assertEqual(payload["source_counts"], {"chat": 1})
+        self.assertEqual(payload["status_counts"], {"completed": 1})
+        self.assertNotIn("debug_runs", payload["records"][0])
+        self.assertEqual(payload["records"][0]["trace_events"], 1)
+        detail = self.client.get("/api/debug/records/record-1")
+        self.assertEqual(detail.status_code, 200)
+        self.assertEqual(detail.json()["debug_runs"][0]["prompt"], "question")
+        self.assertEqual(
+            detail.json()["debug_runs"][0]["steps"][0]["observations"],
+            "raw evidence",
+        )
+        self.assertEqual(payload["runtime_log"]["lines"], ["line two", "line three"])
+        self.assertTrue(payload["model"]["model_online"])
 
     def test_analysis_rejects_malformed_section_scope(self) -> None:
         response = self.client.post(
@@ -159,7 +199,7 @@ class ApiTests(unittest.TestCase):
             )
 
         self.assertEqual(response.status_code, 200)
-        # 原因：raw debug 可能包含完整文件正文，只允许本地 Streamlit 调试台读取。
+        # 原因：raw debug 可能包含完整文件正文，只允许本机 Debug Console 读取。
         # 作用：锁定 FastAPI 正式响应不会把内部 debug_runs 暴露给 React 或其他客户端。
         self.assertNotIn("debug_runs", response.json())
         self.assertEqual(response.json()["documents"][0]["source"], "sample.txt")

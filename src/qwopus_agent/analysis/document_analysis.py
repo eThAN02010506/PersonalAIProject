@@ -31,7 +31,7 @@ class AnalysisResult:
     # 作用：保存人类可读 Markdown 总结。
     markdown_summary: str
 
-    # 原因：Streamlit 可以直接展示表格；报告模块也能复用。
+    # 原因：Web UI 可以直接展示表格；报告模块也能复用。
     # 作用：保存多个可展示 dataframe。
     tables: dict[str, pd.DataFrame] = field(default_factory=dict)
 

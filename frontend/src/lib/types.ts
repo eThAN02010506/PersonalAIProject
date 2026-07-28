@@ -57,3 +57,61 @@ export type Health = {
   base_url: string;
   local_model_path?: string;
 };
+
+export type DebugAgentRun = {
+  label?: string;
+  prompt?: string;
+  max_steps?: number;
+  state?: string;
+  output?: string;
+  steps?: Record<string, unknown>[];
+};
+
+export type DebugRecord = {
+  id: string;
+  timestamp?: string;
+  source?: string;
+  status?: string;
+  run_id?: string;
+  result?: string;
+  trace?: Record<string, unknown>[];
+  debug_runs?: DebugAgentRun[];
+};
+
+export type DebugRecordSummary = {
+  id: string;
+  timestamp?: string;
+  source: string;
+  status: string;
+  run_id: string;
+  result_preview: string;
+  trace_events: number;
+  agent_runs: number;
+};
+
+export type DebugRuntimeLog = {
+  path: string;
+  exists: boolean;
+  size_bytes: number;
+  modified_at?: string;
+  total_lines: number;
+  lines: string[];
+  error?: string;
+};
+
+export type DebugOverview = {
+  generated_at: string;
+  uptime_seconds: number;
+  process_id: number;
+  python_version: string;
+  platform: string;
+  model: Health;
+  active_runs: number;
+  completed_runs: number;
+  record_count: number;
+  record_storage_bytes: number;
+  source_counts: Record<string, number>;
+  status_counts: Record<string, number>;
+  records: DebugRecordSummary[];
+  runtime_log: DebugRuntimeLog;
+};

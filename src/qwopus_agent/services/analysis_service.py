@@ -48,7 +48,7 @@ logger = get_logger("services.analysis_service")
 
 @dataclass(frozen=True)
 class UploadedFileInput:
-    """Uploaded file payload independent from Streamlit."""
+    """Uploaded file payload independent from any UI framework."""
 
     name: str
 

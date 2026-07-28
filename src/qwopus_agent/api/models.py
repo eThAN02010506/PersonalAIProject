@@ -119,3 +119,47 @@ class ModelSettingsView(BaseModel):
     model: str
     base_url: str
     local_model_path: str | None = None
+
+
+class DebugRuntimeLogView(BaseModel):
+    """Bounded runtime-log snapshot shown only by the local debug console."""
+
+    path: str
+    exists: bool
+    size_bytes: int = 0
+    modified_at: str | None = None
+    total_lines: int = 0
+    lines: list[str] = Field(default_factory=list)
+    error: str | None = None
+
+
+class DebugRecordSummaryView(BaseModel):
+    """Small immutable run summary used by the auto-refreshing record list."""
+
+    id: str
+    timestamp: str | None = None
+    source: str = "unknown"
+    status: str = "unknown"
+    run_id: str
+    result_preview: str = ""
+    trace_events: int = 0
+    agent_runs: int = 0
+
+
+class DebugOverviewView(BaseModel):
+    """Complete read-only diagnostic snapshot for the React debug console."""
+
+    generated_at: str
+    uptime_seconds: float
+    process_id: int
+    python_version: str
+    platform: str
+    model: ModelSettingsView
+    active_runs: int
+    completed_runs: int
+    record_count: int
+    record_storage_bytes: int
+    source_counts: dict[str, int] = Field(default_factory=dict)
+    status_counts: dict[str, int] = Field(default_factory=dict)
+    records: list[DebugRecordSummaryView] = Field(default_factory=list)
+    runtime_log: DebugRuntimeLogView

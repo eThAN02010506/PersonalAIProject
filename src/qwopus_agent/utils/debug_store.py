@@ -43,7 +43,7 @@ def append_debug_record(
         filename = f"{timestamp.strftime('%Y%m%dT%H%M%S.%fZ')}_{record_id}.json"
         path = directory / filename
         temporary_path = directory / f".{filename}.tmp"
-        # 原因：FastAPI 与 Streamlit 是独立进程，Console 可能正好读到写入中的大 Trace。
+        # 原因：后台任务与 Debug API 并发运行，Console 可能正好读到写入中的大 Trace。
         # 作用：先写临时文件再原子替换，保证读取方只会看到完整 JSON 记录。
         temporary_path.write_text(
             json.dumps(record, ensure_ascii=False, indent=2, default=str),
@@ -76,6 +76,24 @@ def load_debug_records(
         if isinstance(payload, dict):
             records.append(payload)
     return records
+
+
+def load_debug_record(
+    record_id: str,
+    *,
+    directory: Path = DEFAULT_DEBUG_DIRECTORY,
+) -> dict[str, Any] | None:
+    """Load one immutable record without returning every raw trace to the client."""
+    if not record_id or len(record_id) > 128:
+        return None
+    for path in directory.glob("*.json"):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if isinstance(payload, dict) and payload.get("id") == record_id:
+            return payload
+    return None
 
 
 def _json_value(value: Any) -> Any:

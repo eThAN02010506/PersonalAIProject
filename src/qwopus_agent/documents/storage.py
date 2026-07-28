@@ -1,7 +1,7 @@
 """Upload storage helpers.
 
 The UI should only save uploaded bytes and pass a file path to services. Keeping this logic here
-prevents Streamlit code from becoming business logic.
+prevents UI code from becoming business logic.
 """
 
 from __future__ import annotations
