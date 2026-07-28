@@ -38,10 +38,14 @@ class OrchestrationRequest(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     objective: str
+    # 原因：开启本地知识时，全局 MiniRAG 会让一个聊天检索到其他聊天上传的文件。
+    # 作用：把隔离键作为编排请求的一部分，所有知识 Tool 只能打开当前会话目录。
+    conversation_id: str | None = None
     history: tuple[ConversationTurn, ...] = ()
     uploaded_files: tuple[OrchestrationFile, ...] = ()
     enable_web_search: bool = False
     enable_local_knowledge: bool = False
+    include_global_knowledge: bool = False
     # 原因：不同问题对召回率和精度的要求不同，不能使用全局可变阈值。
     # 作用：把用户选择固定在单次编排请求中，并限制为索引支持的安全范围。
     min_source_relevance: float = Field(default=0.55, ge=0.25, le=0.95)

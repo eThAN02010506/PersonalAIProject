@@ -162,6 +162,63 @@ class MiniRAGTests(unittest.TestCase):
             self.assertIn("Section: Finance / Revenue", results[0])
             self.assertNotIn("South revenue", "\n".join(results))
 
+    def test_section_filter_trims_mixed_graph_evidence(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            memory = make_test_minirag(Path(tmpdir) / "documents.jsonl")
+            memory.insert(
+                "# File: scoped.md\n\n"
+                "# Allowed\n\n"
+                "[[Company A|Organization]] -[owns]-> [[Company B|Organization]]\n\n"
+                "# Blocked\n\n"
+                "[[Company A]] -[owns]-> [[Company B]]"
+            )
+            allowed_section_id = next(
+                chunk.section_id
+                for chunk in memory._records[0].chunks
+                if chunk.section_path == ("Allowed",)
+            )
+
+            results = memory.search(
+                "Company A and Company B",
+                section_ids=(allowed_section_id,),
+            )
+
+            self.assertTrue(results)
+            self.assertIn("[Knowledge Graph Path]", results[0])
+            self.assertEqual(results[0].count("- [Source: scoped.md]"), 1)
+            self.assertIn(
+                "[[Company A|Organization]] -[owns]-> [[Company B|Organization]]",
+                results[0],
+            )
+            self.assertNotIn(
+                "[[Company A]] -[owns]-> [[Company B]]",
+                "\n".join(results),
+            )
+
+    def test_section_filter_drops_graph_path_with_an_unscoped_hop(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            memory = make_test_minirag(Path(tmpdir) / "documents.jsonl")
+            memory.insert(
+                "# File: scoped.md\n\n"
+                "# Allowed\n\n"
+                "[[Company A|Organization]] -[owns]-> [[Company B|Organization]]\n\n"
+                "# Blocked\n\n"
+                "[[Company B|Organization]] -[funds]-> [[Project C|Project]]"
+            )
+            allowed_section_id = next(
+                chunk.section_id
+                for chunk in memory._records[0].chunks
+                if chunk.section_path == ("Allowed",)
+            )
+
+            results = memory.search(
+                "Company A and Project C",
+                section_ids=(allowed_section_id,),
+            )
+
+            self.assertNotIn("[Knowledge Graph Path]", "\n".join(results))
+            self.assertNotIn("-[funds]->", "\n".join(results))
+
     def test_search_can_limit_results_by_source(self) -> None:
         with TemporaryDirectory() as tmpdir:
             memory = make_test_minirag(Path(tmpdir) / "documents.jsonl")

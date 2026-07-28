@@ -1,11 +1,13 @@
 import sys
 import types
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from qwopus_agent.integrations.smolagents_runtime import (
     SmolagentsModelSettings,
     build_chat_messages,
+    build_local_knowledge_tools,
     build_smolagents_code_agent,
     build_smolagents_model,
     build_smolagents_tool_calling_agent,
@@ -141,6 +143,60 @@ class SmolagentsRuntimeTests(unittest.TestCase):
         self.assertEqual(FakeToolCallingAgent.last_instance.tools, [])
         self.assertIn("Internet search is disabled", FakeToolCallingAgent.last_instance.prompt)
 
+    def test_local_tool_factory_opens_global_store_only_when_authorized(self) -> None:
+        class FakeMemory:
+            instances = []
+
+            def __init__(self, storage_path=None):
+                self.storage_path = storage_path
+                self.graph_index = object()
+                self.instances.append(self)
+
+        def rag_tool(memory, **kwargs):
+            return kwargs.get("tool_name", "rag_search")
+
+        def graph_tool(_index, **kwargs):
+            return kwargs.get("tool_name", "graph_search")
+
+        with (
+            patch("qwopus_agent.memory.MiniRAG", FakeMemory),
+            patch(
+                "qwopus_agent.integrations.smolagents_tools.build_minirag_search_tool",
+                side_effect=rag_tool,
+            ),
+            patch(
+                "qwopus_agent.integrations.smolagents_tools.build_graph_search_tool",
+                side_effect=graph_tool,
+            ),
+        ):
+            private_tools = build_local_knowledge_tools(
+                "conversation-1",
+                knowledge_root=Path("private-root"),
+            )
+            global_tools = build_local_knowledge_tools(
+                "conversation-2",
+                knowledge_root=Path("private-root"),
+                include_global_knowledge=True,
+            )
+
+        # 原因：Prompt 权限不足以隔离数据，未授权时全局 MiniRAG 对象本身就不应创建。
+        # 作用：证明默认只装配两项私有工具，显式授权才额外装配两项全局工具。
+        self.assertEqual(private_tools, ["rag_search", "graph_search"])
+        self.assertEqual(
+            global_tools,
+            [
+                "rag_search",
+                "graph_search",
+                "global_rag_search",
+                "global_graph_search",
+            ],
+        )
+        self.assertEqual(
+            FakeMemory.instances[0].storage_path,
+            Path("private-root/conversation-1/documents.jsonl"),
+        )
+        self.assertIsNone(FakeMemory.instances[-1].storage_path)
+
     def test_run_agent_chat_turn_injects_tavily_tool_when_web_enabled(self) -> None:
         settings = SmolagentsModelSettings(
             model_id="any-model",
@@ -181,6 +237,7 @@ class SmolagentsRuntimeTests(unittest.TestCase):
                 history=[],
                 settings=settings,
                 enable_local_knowledge=True,
+                knowledge_scope="conversation-1",
             )
 
         # 原因：Streamlit 开关只负责授权，工具选择必须继续由 smolagents 驱动。
@@ -214,10 +271,59 @@ class SmolagentsRuntimeTests(unittest.TestCase):
                 settings=settings,
                 enable_web_search=True,
                 enable_local_knowledge=True,
+                knowledge_scope="conversation-1",
             )
 
         self.assertEqual(FakeToolCallingAgent.last_instance.tools, [web_tool, *local_tools])
         self.assertEqual(FakeToolCallingAgent.last_instance.run_kwargs["max_steps"], 3)
+
+    def test_global_knowledge_tools_require_explicit_turn_permission(self) -> None:
+        settings = SmolagentsModelSettings(
+            model_id="any-model",
+            base_url="http://127.0.0.1:8080/v1",
+        )
+        scoped_and_global_tools = [object(), object(), object(), object()]
+
+        with patch(
+            "qwopus_agent.integrations.smolagents_runtime.build_local_knowledge_tools",
+            return_value=scoped_and_global_tools,
+        ) as build_tools:
+            run_agent_chat_turn(
+                user_message="Compare this chat with global project knowledge.",
+                history=[],
+                settings=settings,
+                enable_local_knowledge=True,
+                include_global_knowledge=True,
+                knowledge_scope="conversation-1",
+            )
+
+        # 原因：Global 开关若只影响 Prompt，模型仍可能在未授权时拿到全局 Tool。
+        # 作用：锁定授权位会进入 Tool 工厂，且增加一次可选检索所需的受限步数。
+        self.assertTrue(build_tools.call_args.kwargs["include_global_knowledge"])
+        self.assertEqual(
+            FakeToolCallingAgent.last_instance.tools,
+            scoped_and_global_tools,
+        )
+        self.assertIn(
+            "explicitly allowed global knowledge",
+            FakeToolCallingAgent.last_instance.prompt,
+        )
+        self.assertEqual(FakeToolCallingAgent.last_instance.run_kwargs["max_steps"], 3)
+
+    def test_global_knowledge_is_rejected_without_private_knowledge_permission(self) -> None:
+        settings = SmolagentsModelSettings(
+            model_id="any-model",
+            base_url="http://127.0.0.1:8080/v1",
+        )
+
+        with self.assertRaisesRegex(ValueError, "requires local knowledge"):
+            run_agent_chat_turn(
+                user_message="Search globally",
+                history=[],
+                settings=settings,
+                include_global_knowledge=True,
+                knowledge_scope="conversation-1",
+            )
 
     def test_run_agent_chat_turn_refines_short_local_knowledge_answer(self) -> None:
         settings = SmolagentsModelSettings(
@@ -255,6 +361,7 @@ class SmolagentsRuntimeTests(unittest.TestCase):
                 history=[],
                 settings=settings,
                 enable_local_knowledge=True,
+                knowledge_scope="conversation-1",
             )
 
         # 原因：真实模型曾正确检索图谱，却只返回一句没有来源的答案。
@@ -263,6 +370,51 @@ class SmolagentsRuntimeTests(unittest.TestCase):
         self.assertEqual(FakeToolCallingAgent.last_instance.tools, [])
         self.assertIn("[agent_notes.txt]", FakeToolCallingAgent.last_instance.prompt)
         self.assertEqual(FakeToolCallingAgent.last_instance.run_kwargs["max_steps"], 2)
+
+    def test_knowledge_only_zero_hits_skip_open_ended_finalizer(self) -> None:
+        settings = SmolagentsModelSettings(
+            model_id="any-model",
+            base_url="http://127.0.0.1:8080/v1",
+        )
+        local_tools = [object(), object()]
+        FakeToolCallingAgent.queued_results = [
+            types.SimpleNamespace(
+                output="A plausible but unsupported answer from model knowledge.",
+                state="max_steps_error",
+                steps=[
+                    {
+                        "step_number": 1,
+                        "tool_calls": [{"function": {"name": "rag_search"}}],
+                        "observations": "No relevant MiniRAG results.",
+                    }
+                ],
+            ),
+            types.SimpleNamespace(
+                output="This finalizer result must never be used.",
+                state="success",
+                steps=[],
+            ),
+        ]
+
+        with patch(
+            "qwopus_agent.integrations.smolagents_runtime.build_local_knowledge_tools",
+            return_value=local_tools,
+        ):
+            result = run_agent_chat_turn_with_debug(
+                user_message="对比我上传的两篇文章",
+                history=[],
+                settings=settings,
+                enable_local_knowledge=True,
+                knowledge_scope="conversation-1",
+            )
+
+        # 原因：真实问题在 MiniRAG 零命中后被无工具 finalizer 补成了泛化答案。
+        # 作用：零证据直接产生可审计失败，且第二个伪造回答仍留在队列中证明未调用。
+        self.assertFalse(result.success)
+        self.assertIn("没有检索到足够的相关证据", result.answer)
+        self.assertEqual(result.observations, ("No relevant MiniRAG results.",))
+        self.assertEqual(len(FakeToolCallingAgent.queued_results), 1)
+        self.assertEqual(FakeToolCallingAgent.last_instance.tools, local_tools)
 
     def test_detailed_chat_result_keeps_tool_metadata_without_thoughts(self) -> None:
         settings = SmolagentsModelSettings(
@@ -298,6 +450,7 @@ class SmolagentsRuntimeTests(unittest.TestCase):
                 history=[],
                 settings=settings,
                 enable_local_knowledge=True,
+                knowledge_scope="conversation-1",
             )
 
         # 原因：统一编排需要引用与 Tool 审计信息，但不能取得模型的 Thought。

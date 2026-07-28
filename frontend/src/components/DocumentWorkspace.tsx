@@ -1,20 +1,30 @@
 import {
   BarChart3,
+  Database,
   Download,
   FileText,
   ListTree,
   LoaderCircle,
+  RefreshCw,
   Upload,
   X,
 } from "lucide-react";
-import { type ChangeEvent, useRef, useState } from "react";
+import { type ChangeEvent, useCallback, useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
 import { api } from "../lib/api";
-import type { AnalysisResult } from "../lib/types";
+import type { AnalysisResult, SavedDocument } from "../lib/types";
 
-export function DocumentWorkspace({ minSourceRelevance }: { minSourceRelevance: number }) {
+type DocumentWorkspaceProps = {
+  conversationId: string | null;
+  minSourceRelevance: number;
+};
+
+export function DocumentWorkspace({
+  conversationId,
+  minSourceRelevance,
+}: DocumentWorkspaceProps) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [files, setFiles] = useState<File[]>([]);
   const [question, setQuestion] = useState("");
@@ -24,6 +34,25 @@ export function DocumentWorkspace({ minSourceRelevance }: { minSourceRelevance: 
   const [isRunning, setIsRunning] = useState(false);
   const [result, setResult] = useState<AnalysisResult | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [savedDocuments, setSavedDocuments] = useState<SavedDocument[]>([]);
+  const [isLoadingSaved, setIsLoadingSaved] = useState(true);
+  const [savedError, setSavedError] = useState<string | null>(null);
+
+  const loadSavedDocuments = useCallback(async () => {
+    setIsLoadingSaved(true);
+    setSavedError(null);
+    try {
+      setSavedDocuments(await api.listDocuments());
+    } catch (reason) {
+      setSavedError(reason instanceof Error ? reason.message : "Could not load saved documents");
+    } finally {
+      setIsLoadingSaved(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadSavedDocuments();
+  }, [loadSavedDocuments]);
 
   const addFiles = (event: ChangeEvent<HTMLInputElement>) => {
     const incoming = Array.from(event.target.files ?? []);
@@ -44,22 +73,23 @@ export function DocumentWorkspace({ minSourceRelevance }: { minSourceRelevance: 
   };
 
   const analyze = async () => {
-    if (!files.length || isRunning) return;
+    if (!conversationId || !files.length || isRunning) return;
     setIsRunning(true);
     setError(null);
     try {
       // 原因：MinerU、Excel 沙箱、MiniRAG 和报告逻辑属于 Python 业务层。
       // 作用：浏览器只上传原文件并显示结果，避免前端产生另一套不一致的解析结果。
-      setResult(
-        await api.analyze(
+      const analysisResult = await api.analyze(
+          conversationId,
           files,
           question,
           generateReport,
           minSourceRelevance,
           analysisMode,
           selectedSections,
-        ),
-      );
+        );
+      setResult(analysisResult);
+      await loadSavedDocuments();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Analysis failed");
     } finally {
@@ -87,6 +117,44 @@ export function DocumentWorkspace({ minSourceRelevance }: { minSourceRelevance: 
           onChange={addFiles}
         />
       </header>
+
+      <section className="saved-documents">
+        <div className="saved-documents-heading">
+          <div>
+            <Database size={17} />
+            <h2>Saved documents</h2>
+            <span>{savedDocuments.length}</span>
+          </div>
+          <button
+            className="icon-button"
+            disabled={isLoadingSaved}
+            onClick={() => void loadSavedDocuments()}
+            title="Refresh saved documents"
+          >
+            <RefreshCw className={isLoadingSaved ? "spin" : ""} size={15} />
+          </button>
+        </div>
+        {savedError && <div className="error-banner">{savedError}</div>}
+        {!savedError && !isLoadingSaved && savedDocuments.length === 0 && (
+          <div className="empty-files">No parsed documents have been saved yet.</div>
+        )}
+        <div className="saved-document-list">
+          {savedDocuments.map((document) => (
+            <div className="saved-document-row" key={document.document_id}>
+              <FileText size={17} />
+              <div>
+                <strong title={document.source}>{document.source}</strong>
+                <small>
+                  {document.file_type.toUpperCase()} · {formatBytes(document.size_bytes)} ·{" "}
+                  {document.section_count} sections
+                  {document.summary_available ? " · summarized" : ""}
+                </small>
+              </div>
+              <time dateTime={document.saved_at}>{formatSavedAt(document.saved_at)}</time>
+            </div>
+          ))}
+        </div>
+      </section>
 
       <div className="document-controls">
         <div className="file-list">
@@ -142,7 +210,11 @@ export function DocumentWorkspace({ minSourceRelevance }: { minSourceRelevance: 
             <BarChart3 size={16} />
             Generate report
           </label>
-          <button className="primary-button" disabled={!files.length || isRunning} onClick={analyze}>
+          <button
+            className="primary-button"
+            disabled={!conversationId || !files.length || isRunning}
+            onClick={analyze}
+          >
             {isRunning ? <LoaderCircle className="spin" size={16} /> : <FileText size={16} />}
             {isRunning ? "Analyzing" : "Analyze"}
           </button>
@@ -218,4 +290,12 @@ function formatBytes(size: number): string {
   if (size < 1024) return `${size} B`;
   if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
   return `${(size / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function formatSavedAt(value: string): string {
+  return new Intl.DateTimeFormat(undefined, {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+  }).format(new Date(value));
 }

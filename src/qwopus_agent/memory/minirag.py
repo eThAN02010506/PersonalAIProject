@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import asyncio
+import fcntl
 import json
 import logging
 import os
-from collections.abc import Coroutine, Sequence
+from collections.abc import Coroutine, Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
+from threading import RLock
 from typing import Any, Protocol, TypeVar
 
 import numpy as np
@@ -23,6 +26,7 @@ import qwopus_agent.memory.minirag_retrieval as minirag_retrieval
 from qwopus_agent.memory.entity_resolver import EntityResolver
 from qwopus_agent.memory.graph_backend import PersistentKnowledgeGraph
 from qwopus_agent.memory.graph_extraction import GraphExtractor, RuleBasedGraphExtractor
+from qwopus_agent.memory.graph_models import GraphEvidence, GraphPath
 from qwopus_agent.memory.knowledge_graph import (
     DEFAULT_KNOWLEDGE_GRAPH_PATH,
     KnowledgeGraphIndex,
@@ -111,10 +115,19 @@ class MiniRAG:
     _vector_store: NanoVectorDBStorage = field(init=False, repr=False)
     _graph: PersistentKnowledgeGraph = field(init=False, repr=False)
     _graph_index: KnowledgeGraphIndex = field(init=False, repr=False)
+    _thread_lock: Any = field(default_factory=RLock, init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Load documents and the persisted MiniRAG vector index on startup."""
         self.storage_path = Path(self.storage_path)
+        self.storage_path.parent.mkdir(parents=True, exist_ok=True)
+        # 原因：聊天使用 spawn 子进程，可能与文档上传同时打开同一个会话索引。
+        # 作用：初始化与索引恢复持有跨进程排他锁，避免读取一半写入的派生文件。
+        with _exclusive_storage_lock(self.storage_path):
+            self._initialize_storage()
+
+    def _initialize_storage(self) -> None:
+        """Initialize one storage snapshot while the caller owns its file lock."""
         embedding_backend: EmbeddingBackend
         if self.embedding_backend is None:
             embedding_backend = SentenceTransformerEmbedding(
@@ -137,6 +150,11 @@ class MiniRAG:
 
     def insert(self, document: str, *, document_id: str | None = None) -> str:
         """Insert one Markdown-normalized document into persistent semantic memory."""
+        with self._thread_lock, _exclusive_storage_lock(self.storage_path):
+            return self._insert_unlocked(document, document_id=document_id)
+
+    def _insert_unlocked(self, document: str, *, document_id: str | None = None) -> str:
+        """Perform insertion while the public boundary owns both storage locks."""
         if not document.strip():
             raise ValueError("document must not be empty")
 
@@ -184,6 +202,25 @@ class MiniRAG:
         sources: Sequence[str] | None = None,
     ) -> list[str]:
         """Return graph paths first, then complementary semantic chunks."""
+        with self._thread_lock:
+            return self._search_unlocked(
+                query,
+                min_relevance,
+                document_ids=document_ids,
+                section_ids=section_ids,
+                sources=sources,
+            )
+
+    def _search_unlocked(
+        self,
+        query: str,
+        min_relevance: float = COSINE_THRESHOLD,
+        *,
+        document_ids: Sequence[str] | None = None,
+        section_ids: Sequence[str] | None = None,
+        sources: Sequence[str] | None = None,
+    ) -> list[str]:
+        """Search one internally consistent in-memory index snapshot."""
         if not query.strip():
             raise ValueError("query must not be empty")
         if not 0.0 <= min_relevance <= 1.0:
@@ -193,16 +230,12 @@ class MiniRAG:
         section_filter = set(section_ids or ())
         source_filter = {source.casefold() for source in (sources or ())}
         graph_paths = self._graph_index.search(query, limit=GRAPH_SEARCH_LIMIT)
-        if document_filter or source_filter:
-            graph_paths = [
-                path
-                for path in graph_paths
-                if all(
-                    (not document_filter or evidence.document_id in document_filter)
-                    and (not source_filter or evidence.source.casefold() in source_filter)
-                    for evidence in path.evidence
-                )
-            ]
+        graph_paths = _filter_graph_paths(
+            graph_paths,
+            document_ids=document_filter,
+            section_ids=section_filter,
+            sources=source_filter,
+        )
         results = [_render_graph_search_result(path) for path in graph_paths]
         graph_chunk_ids = {
             evidence.chunk_id
@@ -238,18 +271,24 @@ class MiniRAG:
 
     def _list_sources(self) -> list[str]:
         """Return indexed file sources for the separate maintenance service."""
-        return sorted(
-            {
-                source
-                for record in self._records
-                for source in _record_sources(record)
-                if source != "unknown"
-            },
-            key=str.casefold,
-        )
+        with self._thread_lock:
+            return sorted(
+                {
+                    source
+                    for record in self._records
+                    for source in _record_sources(record)
+                    if source != "unknown"
+                },
+                key=str.casefold,
+            )
 
     def _delete_source(self, source: str) -> int:
         """Delete all records for one exact file source from every index."""
+        with self._thread_lock, _exclusive_storage_lock(self.storage_path):
+            return self._delete_source_unlocked(source)
+
+    def _delete_source_unlocked(self, source: str) -> int:
+        """Delete a source while the maintenance boundary owns storage locks."""
         normalized_source = source.strip().casefold()
         if not normalized_source:
             raise ValueError("source must not be empty")
@@ -266,6 +305,11 @@ class MiniRAG:
 
     def _rebuild_indexes(self) -> None:
         """Recreate vector and graph indexes from persisted Markdown records."""
+        with self._thread_lock, _exclusive_storage_lock(self.storage_path):
+            self._rebuild_indexes_unlocked()
+
+    def _rebuild_indexes_unlocked(self) -> None:
+        """Rebuild derived indexes while the maintenance boundary owns storage locks."""
         vector_path = _index_directory(self.storage_path) / "vdb_qwopus_chunks.json"
         vector_path.unlink(missing_ok=True)
         self._vector_store = self._create_vector_store()
@@ -290,6 +334,13 @@ class MiniRAG:
             len(self._records),
             len(self._chunks),
         )
+
+    @property
+    def graph_index(self) -> KnowledgeGraphIndex:
+        """Expose this MiniRAG instance's matching graph index to its Tool adapter."""
+        # 原因：重新按全局常量创建图谱会绕过 conversation_id 的知识库边界。
+        # 作用：rag_search 与 graph_search 始终查询同一个会话目录中的两种索引。
+        return self._graph_index
 
     def _initialize_graph_index(self) -> None:
         if self.graph_extractor is None or self.graph_storage_path is None:
@@ -429,6 +480,97 @@ def _load_json(path: Path) -> dict[str, Any] | None:
     except (json.JSONDecodeError, OSError):
         return None
     return payload if isinstance(payload, dict) else None
+
+
+def _filter_graph_paths(
+    paths: Sequence[GraphPath],
+    *,
+    document_ids: set[str],
+    section_ids: set[str],
+    sources: set[str],
+) -> list[GraphPath]:
+    """Return only paths whose every relation remains supported inside the scope."""
+    if not document_ids and not section_ids and not sources:
+        return list(paths)
+
+    scoped_paths: list[GraphPath] = []
+    for path in paths:
+        scoped_relations = []
+        for relation in path.relations:
+            scoped_evidence = tuple(
+                evidence
+                for evidence in relation.evidence
+                if _graph_evidence_in_scope(
+                    evidence,
+                    document_ids=document_ids,
+                    section_ids=section_ids,
+                    sources=sources,
+                )
+            )
+            if not scoped_evidence:
+                # 原因：多跳路径中的任一关系若只由未选章节支持，整条推理链就越界。
+                # 作用：逐关系执行 fail-closed 过滤，避免保留一条证据不完整的路径。
+                break
+            scoped_relations.append(
+                relation.model_copy(update={"evidence": scoped_evidence})
+            )
+        else:
+            scoped_paths.append(
+                path.model_copy(
+                    update={
+                        "relations": tuple(scoped_relations),
+                        "evidence": _unique_graph_evidence(
+                            tuple(
+                                evidence
+                                for relation in scoped_relations
+                                for evidence in relation.evidence
+                            )
+                        ),
+                    }
+                )
+            )
+    return scoped_paths
+
+
+def _graph_evidence_in_scope(
+    evidence: GraphEvidence,
+    *,
+    document_ids: set[str],
+    section_ids: set[str],
+    sources: set[str],
+) -> bool:
+    return (
+        (not document_ids or evidence.document_id in document_ids)
+        and (not section_ids or evidence.section_id in section_ids)
+        and (not sources or evidence.source.casefold() in sources)
+    )
+
+
+def _unique_graph_evidence(
+    evidence_items: Sequence[GraphEvidence],
+) -> tuple[GraphEvidence, ...]:
+    seen: set[tuple[str, str]] = set()
+    unique: list[GraphEvidence] = []
+    for evidence in evidence_items:
+        identity = (evidence.chunk_id, evidence.text)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        unique.append(evidence)
+    return tuple(unique)
+
+
+@contextmanager
+def _exclusive_storage_lock(storage_path: Path) -> Iterator[None]:
+    """Prevent two local processes from mutating one MiniRAG store concurrently."""
+    lock_path = storage_path.with_suffix(f"{storage_path.suffix}.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+b") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
 def _run_coroutine(coroutine: Coroutine[Any, Any, T]) -> T:

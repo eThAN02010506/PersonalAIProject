@@ -1,13 +1,25 @@
+import multiprocessing
 import queue
 import unittest
+from collections.abc import Callable
+from dataclasses import replace
+from pathlib import Path
+from typing import Any
 from unittest.mock import Mock, patch
 
 from qwopus_agent.integrations.smolagents_runtime import (
     AgentDebugRun,
     SmolagentsModelSettings,
 )
-from qwopus_agent.services.chat_service import BackgroundChatTask, _run_chat_task
+from qwopus_agent.services.chat_service import (
+    CHAT_WORKER_REQUEST_SCHEMA_VERSION,
+    BackgroundChatTask,
+    ChatWorkerRequest,
+    _run_chat_task,
+    start_chat_task,
+)
 from qwopus_agent.services.orchestration_models import (
+    OrchestrationRequest,
     OrchestrationResult,
     ProcessEvent,
     SourceCitation,
@@ -15,14 +27,34 @@ from qwopus_agent.services.orchestration_models import (
 
 
 class ChatServiceTests(unittest.TestCase):
+    def _request(
+        self,
+        settings: SmolagentsModelSettings,
+        **overrides: Any,
+    ) -> ChatWorkerRequest:
+        request = ChatWorkerRequest(
+            conversation_id="conversation-1",
+            user_message="question",
+            history=(),
+            settings=settings,
+            enable_web_search=False,
+        )
+        return replace(request, **overrides)
+
     def test_worker_reports_completed_reply_and_progress(self) -> None:
-        result_queue: queue.Queue = queue.Queue()
-        progress_queue: queue.Queue = queue.Queue()
+        result_queue: queue.Queue[Any] = queue.Queue()
+        progress_queue: queue.Queue[Any] = queue.Queue()
         settings = SmolagentsModelSettings(model_id="test", base_url="http://local/v1")
 
-        def fake_orchestrator_run(_self, request, progress_callback=None):
+        def fake_orchestrator_run(
+            _self: Any,
+            request: OrchestrationRequest,
+            progress_callback: Callable[[str], None] | None = None,
+        ) -> OrchestrationResult:
             self.assertTrue(request.enable_local_knowledge)
+            self.assertEqual(request.conversation_id, "conversation-1")
             self.assertEqual(request.min_source_relevance, 0.8)
+            assert progress_callback is not None
             progress_callback("planning")
             progress_callback("completed")
             return OrchestrationResult(
@@ -57,12 +89,12 @@ class ChatServiceTests(unittest.TestCase):
             _run_chat_task(
                 result_queue,
                 progress_queue,
-                "question",
-                [],
-                settings,
-                True,
-                True,
-                0.8,
+                self._request(
+                    settings,
+                    enable_web_search=True,
+                    enable_local_knowledge=True,
+                    min_source_relevance=0.8,
+                ),
             )
 
         payload = result_queue.get_nowait()
@@ -76,8 +108,8 @@ class ChatServiceTests(unittest.TestCase):
         self.assertEqual(progress_queue.get_nowait(), "completed")
 
     def test_worker_returns_failure_without_raising_into_ui(self) -> None:
-        result_queue: queue.Queue = queue.Queue()
-        progress_queue: queue.Queue = queue.Queue()
+        result_queue: queue.Queue[Any] = queue.Queue()
+        progress_queue: queue.Queue[Any] = queue.Queue()
         settings = SmolagentsModelSettings(model_id="test", base_url="http://local/v1")
 
         with patch(
@@ -87,15 +119,86 @@ class ChatServiceTests(unittest.TestCase):
             _run_chat_task(
                 result_queue,
                 progress_queue,
-                "question",
-                [],
-                settings,
-                False,
+                self._request(settings),
             )
 
         status, content = result_queue.get_nowait()[:2]
         self.assertEqual(status, "failed")
         self.assertIn("model timed out", content)
+
+    def test_start_maps_arguments_into_one_versioned_worker_request(self) -> None:
+        context = Mock()
+        result_queue = Mock()
+        progress_queue = Mock()
+        process = Mock()
+        context.Queue.side_effect = [result_queue, progress_queue]
+        context.Process.return_value = process
+        settings = SmolagentsModelSettings(model_id="test", base_url="http://local/v1")
+        history = [{"role": "assistant", "content": "previous"}]
+
+        with patch(
+            "qwopus_agent.services.chat_service.multiprocessing.get_context",
+            return_value=context,
+        ):
+            task = start_chat_task(
+                conversation_id="conversation-7",
+                user_message="next question",
+                history=history,
+                settings=settings,
+                enable_web_search=True,
+                enable_local_knowledge=True,
+                include_global_knowledge=True,
+                min_source_relevance=0.72,
+                knowledge_root=Path("/tmp/conversation-knowledge"),
+            )
+
+        process_kwargs = context.Process.call_args.kwargs
+        self.assertIs(process_kwargs["target"], _run_chat_task)
+        self.assertTrue(process_kwargs["daemon"])
+        self.assertEqual(len(process_kwargs["args"]), 3)
+        self.assertIs(process_kwargs["args"][0], result_queue)
+        self.assertIs(process_kwargs["args"][1], progress_queue)
+        request = process_kwargs["args"][2]
+        self.assertIsInstance(request, ChatWorkerRequest)
+        self.assertEqual(request.schema_version, CHAT_WORKER_REQUEST_SCHEMA_VERSION)
+        self.assertEqual(request.conversation_id, "conversation-7")
+        self.assertEqual(request.user_message, "next question")
+        self.assertEqual(request.history, (history[0],))
+        self.assertIsNot(request.history[0], history[0])
+        self.assertIs(request.settings, settings)
+        self.assertTrue(request.enable_web_search)
+        self.assertTrue(request.enable_local_knowledge)
+        self.assertTrue(request.include_global_knowledge)
+        self.assertEqual(request.min_source_relevance, 0.72)
+        self.assertEqual(request.knowledge_root, Path("/tmp/conversation-knowledge"))
+        self.assertIs(task.process, process)
+        process.start.assert_called_once_with()
+
+    def test_spawned_worker_rejects_unknown_request_schema(self) -> None:
+        context = multiprocessing.get_context("spawn")
+        result_queue = context.Queue()
+        progress_queue = context.Queue()
+        settings = SmolagentsModelSettings(model_id="test", base_url="http://local/v1")
+        request = self._request(
+            settings,
+            schema_version=CHAT_WORKER_REQUEST_SCHEMA_VERSION + 1,
+        )
+        process = context.Process(
+            target=_run_chat_task,
+            args=(result_queue, progress_queue, request),
+        )
+
+        process.start()
+        process.join(timeout=10)
+        if process.is_alive():
+            process.terminate()
+            process.join(timeout=2)
+            self.fail("Spawned chat worker did not exit after schema validation.")
+
+        status, content = result_queue.get(timeout=2)[:2]
+        self.assertEqual(process.exitcode, 0)
+        self.assertEqual(status, "failed")
+        self.assertIn("Unsupported chat worker request schema version", content)
 
     def test_cancel_terminates_running_process(self) -> None:
         process = Mock()

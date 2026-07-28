@@ -15,6 +15,7 @@ from qwopus_agent.agents.multi_agent.models import (
     ResultArbiter,
 )
 from qwopus_agent.llm import BaseLLM, ChatMessage
+from qwopus_agent.utils.token_budget import TokenBudgetManager, truncate_to_tokens
 
 
 @dataclass
@@ -83,12 +84,18 @@ class LLMResultArbiter:
         context: dict[str, Any],
     ) -> ArbitrationDecision:
         """Synthesize candidates and fall back to deterministic arbitration on errors."""
+        budget = TokenBudgetManager(
+            context_window=self.llm.context_window,
+            output_reserve=1600,
+        )
+        item_count = max(1, len(contributions) + len(debate))
+        per_item_budget = max(128, budget.synthesis_budget // item_count)
         payload = {
             "objective": objective,
             "candidates": [
                 {
                     "agent": item.agent_name,
-                    "content": item.content[:6000],
+                    "content": truncate_to_tokens(item.content, per_item_budget),
                     "confidence": item.confidence,
                 }
                 for item in contributions
@@ -98,7 +105,7 @@ class LLMResultArbiter:
                 {
                     "agent": item.agent_name,
                     "round": item.round_number,
-                    "content": item.content[:4000],
+                    "content": truncate_to_tokens(item.content, per_item_budget),
                 }
                 for item in debate
             ],

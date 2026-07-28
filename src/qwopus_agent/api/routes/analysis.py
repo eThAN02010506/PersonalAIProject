@@ -4,9 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Literal
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 
@@ -16,6 +15,8 @@ from qwopus_agent.api.models import (
     DocumentOutlineView,
     DocumentSectionView,
 )
+from qwopus_agent.api.repository import ConversationRepository
+from qwopus_agent.memory import ConversationKnowledgeManager
 from qwopus_agent.services.agent_orchestrator import AgentOrchestrator
 from qwopus_agent.services.orchestration_models import (
     OrchestrationFile,
@@ -24,15 +25,11 @@ from qwopus_agent.services.orchestration_models import (
 )
 from qwopus_agent.utils.debug_store import append_debug_record
 
-if TYPE_CHECKING:
-    from qwopus_agent.memory import MiniRAG
-
-MemoryProvider = Callable[[], "MiniRAG"]
-
 
 def build_analysis_router(
     runtime: RuntimeModelController,
-    get_minirag: MemoryProvider,
+    repository: ConversationRepository,
+    knowledge: ConversationKnowledgeManager,
     debug_directory: Path,
 ) -> APIRouter:
     """Build the upload boundary around the unified Agent orchestrator."""
@@ -41,6 +38,7 @@ def build_analysis_router(
     @router.post("/api/analysis", response_model=AnalysisView)
     async def analyze(
         files: Annotated[list[UploadFile], File()],
+        conversation_id: Annotated[str, Form(min_length=1)],
         question: Annotated[str, Form()] = "",
         generate_report: Annotated[bool, Form()] = False,
         min_source_relevance: Annotated[float, Form(ge=0.25, le=0.95)] = 0.55,
@@ -50,6 +48,8 @@ def build_analysis_router(
         ] = "question",
         selected_sections: Annotated[str, Form()] = "{}",
     ) -> AnalysisView:
+        if repository.get_conversation(conversation_id) is None:
+            raise HTTPException(status_code=404, detail="Conversation not found.")
         try:
             scoped_sections = _parse_selected_sections(selected_sections)
         except (json.JSONDecodeError, TypeError, ValueError) as exc:
@@ -71,6 +71,7 @@ def build_analysis_router(
 
         request = OrchestrationRequest(
             objective=question,
+            conversation_id=conversation_id,
             uploaded_files=uploads,
             generate_report=generate_report,
             min_source_relevance=min_source_relevance,
@@ -79,11 +80,18 @@ def build_analysis_router(
             report_title="Qwopus Analysis Report",
             report_basename="qwopus_web_analysis",
         )
-        orchestrator = AgentOrchestrator(
-            runtime.current_settings(),
-            minirag=get_minirag(),
-        )
-        result = await asyncio.to_thread(orchestrator.run_sync, request)
+
+        def run_analysis() -> OrchestrationResult:
+            # 原因：同一聊天的两个并发上传会同时改写 documents、向量和图谱派生文件。
+            # 作用：只串行化当前 conversation_id；其他聊天仍可独立并行分析。
+            with knowledge.lease(conversation_id) as minirag:
+                orchestrator = AgentOrchestrator(
+                    runtime.current_settings(),
+                    minirag=minirag,
+                )
+                return orchestrator.run_sync(request)
+
+        result = await asyncio.to_thread(run_analysis)
         # 原因：文档分析不经过 ChatRunRegistry 的完成回调。
         # 作用：把内部步骤写给只读 Console，同时不把 Tool Observation 暴露给正式前端。
         append_debug_record(

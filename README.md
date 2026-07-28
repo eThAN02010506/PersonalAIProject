@@ -26,7 +26,7 @@ src/qwopus_agent/
   documents/    Markdown normalization, section structure, chunking, summaries, and local storage
   integrations/ smolagents execution, model discovery, debug normalization, and Tool adapters
   llm/          BaseLLM interface and LocalMLXLLM adapter
-  memory/       MiniRAG facade, JSONL records, retrieval ranking, graph, and multi-hop queries
+  memory/       MiniRAG facade, conversation-scoped lifecycle, retrieval, graph, and multi-hop queries
   skills/       Reusable, auto-discovered, and learned Workflow Skills
   services/     UI-independent analysis and knowledge lifecycle workflows
   reflection/   Lightweight task reflection evaluator
@@ -147,9 +147,16 @@ AgentOrchestrator + smolagents
   business decisions remain in `AgentOrchestrator` and the existing services.
 - PDF, DOCX, PNG, and JPEG inputs continue through MinerU when available, with the established local
   fallback behavior. All unstructured content is normalized to Markdown before downstream use.
-- Document analysis searches existing MiniRAG knowledge, inserts each newly normalized document into
-  `storage/minirag/`, and gives smolagents bounded document, pandas, and MiniRAG tools. The browser only
-  receives the final answer, citations, safe process events, and generated report links.
+- Document analysis inserts every normalized upload into the active conversation's private store at
+  `storage/minirag/conversations/<conversation_id>/` and writes a conversation-namespaced mirror to
+  the global aggregate. Chat exposes only the active conversation's semantic and graph tools by
+  default. The browser receives only final answers, citations, safe process events, and generated
+  report links.
+- The Knowledge control enables the active conversation's private MiniRAG. Global is disabled by
+  default and becomes selectable only after Knowledge is enabled; when explicitly selected for a
+  turn, it additionally exposes the aggregate of uploads from every conversation under
+  `storage/minirag/`. Switching or creating a conversation clears the Global permission, and deleting
+  a conversation removes both its private index and its namespaced global mirror.
 - Long documents are structured by heading and page, chunked with section provenance, and summarized
   hierarchically. The React document workspace can target a question, selected sections, or the whole
   document without sending the complete source to the model.
@@ -213,9 +220,13 @@ Manual checks:
 3. Confirm the matching backend run shows its safe trace, raw steps, Tool calls, and Observations.
 4. Confirm the runtime summary shows the currently selected model server as online.
 
-Runtime MiniRAG data lives under `storage/minirag`. Uploaded Markdown-normalized documents and safe
-spreadsheet summaries are inserted through the `MiniRAG.insert(document)` facade, and later analysis
-can retrieve existing context through `MiniRAG.search(query)`. The facade uses MiniRAG's persistent
+Runtime MiniRAG data lives under `storage/minirag`. New uploads are stored under
+`storage/minirag/conversations/<conversation_id>/documents.jsonl`; a namespaced mirror is maintained
+in the global aggregate at `storage/minirag/documents.jsonl`, alongside compatible legacy records.
+That aggregate is never opened by a chat turn unless Global is explicitly authorized.
+Markdown-normalized documents and safe spreadsheet summaries are inserted through the
+`MiniRAG.insert(document)` facade, and later analysis can retrieve existing context through
+`MiniRAG.search(query)`. The facade uses MiniRAG's persistent
 NanoVectorDB backend and a local multilingual sentence-transformer, so retrieval does not depend on
 the Gemma, Qwen, or other chat model currently served by the OpenAI-compatible endpoint. The installed
 `minirag-hku` package is linked to `vendor/MiniRAG-main`; Qwopus adds a persistent directed graph layer

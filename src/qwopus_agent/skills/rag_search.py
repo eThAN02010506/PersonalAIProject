@@ -28,16 +28,31 @@ class RagSearchSkill(BaseSkill):
                 content="rag_search requires a MiniRAG instance.",
             )
 
-        results = self.minirag.search(request.query)
+        min_relevance = float(request.arguments.get("min_relevance", 0.25))
+        max_results = max(1, min(20, int(request.arguments.get("max_results", 5))))
+        results = self.minirag.search(
+            request.query,
+            min_relevance=min_relevance,
+        )[:max_results]
+        content = (
+            "\n\n".join(
+                f"## MiniRAG Result {index}\n\n{result}"
+                for index, result in enumerate(results, start=1)
+            )
+            if results
+            else "No relevant MiniRAG results."
+        )
         return SkillResponse(
-            success=True,
-            content="\n".join(results),
+            # 原因：空检索结果不是可用于回答的证据，标记成功会让上层继续自由生成。
+            # 作用：直接 Skill 调用与 smolagents Tool 适配器都能统一识别“无证据”。
+            success=bool(results),
+            content=content,
             data={"results": results},
         )
 
 
 def create_skill() -> BaseSkill:
     """Factory used by SkillRegistry for zero-manual registration."""
-    # 原因：自动发现的 rag_search 也应该开箱可用，而不是必须由 UI 手动注入依赖。
-    # 作用：默认连接持久化 MiniRAG facade；测试仍可直接构造 RagSearchSkill 注入临时实例。
-    return RagSearchSkill(minirag=MiniRAG())
+    # 原因：扫描 Skill 目录不应加载 Torch、embedding 模型和持久化索引。
+    # 作用：Registry 仍可零手工发现名称，生产装配时再通过 override 注入共享 MiniRAG。
+    return RagSearchSkill()

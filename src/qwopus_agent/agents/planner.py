@@ -1,15 +1,16 @@
-"""Planner Agent.
+"""Side-effect-free planners for Agent DAGs and direct Skill workflows.
 
-Planner is responsible only for turning a user objective into an execution plan. It never calls
-skills, reads files, or performs side effects.
+Planner creates the production Agent DAG. SkillPlanner retains the lightweight CLI workflow
+without executing skills, reading files, or producing side effects.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
+from qwopus_agent.agents.multi_agent import DelegatedTask, DelegationPlan
 from qwopus_agent.skills import SkillRegistry
 
 SPREADSHEET_EXTENSIONS = {".csv", ".xls", ".xlsx"}
@@ -45,8 +46,8 @@ class Plan:
 
 
 @dataclass
-class Planner:
-    """Creates plans from objectives and available skills."""
+class SkillPlanner:
+    """Create direct Skill plans for CLI and learned workflows."""
 
     # Reason: Dependency injection keeps Planner testable and avoids hard-coded skill knowledge.
     skill_registry: SkillRegistry
@@ -179,3 +180,101 @@ class Planner:
         # 原因：无法判断任务类型时自动选第一个 Skill 会执行错误能力。
         # 作用：返回空计划，让上层明确处理“无法规划”，而不是产生隐式副作用。
         return Plan(objective=objective, steps=[])
+
+
+@dataclass(frozen=True)
+class AgentPlanningRequest:
+    """Capability facts needed to plan one production request."""
+
+    objective: str
+    has_documents: bool = False
+    enable_web_search: bool = False
+    enable_local_knowledge: bool = False
+    generate_report: bool = False
+
+
+@dataclass(frozen=True)
+class AgentPlan:
+    """One production Agent plan and its user-visible execution route."""
+
+    route: Literal["single_agent", "multi_agent"]
+    delegation: DelegationPlan
+    terminal_task_id: str
+
+
+@dataclass
+class Planner:
+    """Plan named Agent tasks and dependencies without executing any capability."""
+
+    async def plan(self, request: AgentPlanningRequest) -> AgentPlan:
+        """Build the smallest dependency DAG that can satisfy the request."""
+        tasks: list[DelegatedTask] = []
+        evidence_ids: list[str] = []
+        if request.has_documents:
+            tasks.append(
+                DelegatedTask("document", request.objective, "document_agent")
+            )
+            evidence_ids.append("document")
+        if request.enable_web_search:
+            tasks.append(
+                DelegatedTask("research", request.objective, "research_agent")
+            )
+            evidence_ids.append("research")
+        if request.enable_local_knowledge:
+            # 原因：上传文档必须先完成入库，当前请求的知识 Agent 才能检索到它。
+            # 作用：仅在同次请求含上传文件时增加依赖，历史知识检索仍可并行执行。
+            dependencies = ("document",) if request.has_documents else ()
+            tasks.append(
+                DelegatedTask(
+                    "knowledge",
+                    request.objective,
+                    "knowledge_agent",
+                    dependencies,
+                )
+            )
+            evidence_ids.append("knowledge")
+        if not evidence_ids:
+            tasks.append(DelegatedTask("chat", request.objective, "chat_agent"))
+            evidence_ids.append("chat")
+
+        capability_count = sum(
+            (
+                request.has_documents,
+                request.enable_web_search,
+                request.enable_local_knowledge,
+            )
+        )
+        route: Literal["single_agent", "multi_agent"] = (
+            "multi_agent"
+            if capability_count > 1 or request.generate_report
+            else "single_agent"
+        )
+        terminal_task_id = evidence_ids[-1]
+        if route == "multi_agent":
+            tasks.append(
+                DelegatedTask(
+                    "synthesis",
+                    request.objective,
+                    "synthesis_agent",
+                    tuple(evidence_ids),
+                )
+            )
+            terminal_task_id = "synthesis"
+        if request.generate_report:
+            tasks.append(
+                DelegatedTask(
+                    "report",
+                    request.objective,
+                    "report_agent",
+                    ("synthesis",),
+                )
+            )
+            terminal_task_id = "report"
+        return AgentPlan(
+            route=route,
+            delegation=DelegationPlan(
+                objective=request.objective,
+                tasks=tuple(tasks),
+            ),
+            terminal_task_id=terminal_task_id,
+        )

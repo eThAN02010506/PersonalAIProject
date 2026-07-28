@@ -4,7 +4,18 @@ from __future__ import annotations
 
 from typing import Any
 
-__all__ = ["MiniRAG"]
+from qwopus_agent.memory.conversation_knowledge import (
+    DEFAULT_CONVERSATION_KNOWLEDGE_ROOT,
+    ConversationKnowledgeManager,
+    conversation_knowledge_path,
+)
+
+__all__ = [
+    "DEFAULT_CONVERSATION_KNOWLEDGE_ROOT",
+    "ConversationKnowledgeManager",
+    "MiniRAG",
+    "conversation_knowledge_path",
+]
 
 
 def __getattr__(name: str) -> Any:

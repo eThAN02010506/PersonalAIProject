@@ -65,6 +65,14 @@ def build_debug_router(
                 model=model_status.settings.model_id,
                 base_url=model_status.settings.base_url,
                 local_model_path=model_status.local_model_path,
+                context_window_tokens=(
+                    model_status.settings.capabilities.context_window_tokens
+                ),
+                agent_mode=model_status.settings.capabilities.agent_mode,
+                supports_structured_output=(
+                    model_status.settings.capabilities.supports_structured_output
+                ),
+                supports_vision=model_status.settings.capabilities.supports_vision,
             ),
             active_runs=active_runs,
             completed_runs=completed_runs,

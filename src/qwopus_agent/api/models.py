@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class ConversationCreate(BaseModel):
@@ -48,7 +48,17 @@ class ChatStartRequest(BaseModel):
     content: str = Field(min_length=1)
     enable_web_search: bool = False
     enable_local_knowledge: bool = False
+    # 原因：全局知识可能包含其他聊天上传的内容，不能跟随 Knowledge 默认自动授权。
+    # 作用：只有用户在当前请求显式开启时，Agent 才会收到全局检索 Tool。
+    include_global_knowledge: bool = False
     min_source_relevance: float = Field(default=0.55, ge=0.25, le=0.95)
+
+    @model_validator(mode="after")
+    def validate_global_permission(self) -> ChatStartRequest:
+        """Reject a global permission bit without the parent knowledge capability."""
+        if self.include_global_knowledge and not self.enable_local_knowledge:
+            raise ValueError("Global knowledge requires local knowledge permission.")
+        return self
 
 
 class RunStarted(BaseModel):
@@ -101,12 +111,28 @@ class DocumentOutlineView(BaseModel):
     sections: list[DocumentSectionView] = Field(default_factory=list)
 
 
+class SavedDocumentView(BaseModel):
+    """One locally persisted, successfully parsed document."""
+
+    document_id: str
+    source: str
+    file_type: str
+    size_bytes: int
+    section_count: int
+    saved_at: str
+    summary_available: bool
+
+
 class ModelSettingsUpdate(BaseModel):
     """Request to select a remote endpoint or launch a local MLX model."""
 
     mode: Literal["remote", "local"]
     base_url: str | None = None
     model_path: str | None = None
+    context_window_tokens: int = Field(default=32768, ge=2048)
+    agent_mode: Literal["tool_calling", "code"] = "tool_calling"
+    supports_structured_output: bool = False
+    supports_vision: bool = False
 
 
 class ModelSettingsView(BaseModel):
@@ -119,6 +145,10 @@ class ModelSettingsView(BaseModel):
     model: str
     base_url: str
     local_model_path: str | None = None
+    context_window_tokens: int
+    agent_mode: Literal["tool_calling", "code"]
+    supports_structured_output: bool
+    supports_vision: bool
 
 
 class DebugRuntimeLogView(BaseModel):

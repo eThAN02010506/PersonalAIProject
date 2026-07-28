@@ -5,10 +5,12 @@ from __future__ import annotations
 import multiprocessing
 import time
 from dataclasses import asdict, dataclass
+from pathlib import Path
 from queue import Empty
 from typing import Any, Literal, cast
 
 from qwopus_agent.integrations.smolagents_runtime import ChatMessage, SmolagentsModelSettings
+from qwopus_agent.memory import DEFAULT_CONVERSATION_KNOWLEDGE_ROOT
 from qwopus_agent.services.agent_orchestrator import AgentOrchestrator
 from qwopus_agent.services.orchestration_models import (
     ConversationTurn,
@@ -16,6 +18,31 @@ from qwopus_agent.services.orchestration_models import (
 )
 
 ChatTaskStatus = Literal["completed", "failed"]
+CHAT_WORKER_REQUEST_SCHEMA_VERSION = 1
+
+
+@dataclass(frozen=True)
+class ChatWorkerRequest:
+    """Serializable contract passed across the spawned-process boundary."""
+
+    conversation_id: str
+    user_message: str
+    history: tuple[ChatMessage, ...]
+    settings: SmolagentsModelSettings
+    enable_web_search: bool
+    enable_local_knowledge: bool = False
+    include_global_knowledge: bool = False
+    min_source_relevance: float = 0.55
+    knowledge_root: Path = DEFAULT_CONVERSATION_KNOWLEDGE_ROOT
+    schema_version: int = CHAT_WORKER_REQUEST_SCHEMA_VERSION
+
+    def validate_schema(self) -> None:
+        """Reject parent/worker code that disagree on the serialized contract."""
+        if self.schema_version != CHAT_WORKER_REQUEST_SCHEMA_VERSION:
+            raise ValueError(
+                "Unsupported chat worker request schema version "
+                f"{self.schema_version}; expected {CHAT_WORKER_REQUEST_SCHEMA_VERSION}."
+            )
 
 
 @dataclass(frozen=True)
@@ -91,28 +118,37 @@ class BackgroundChatTask:
 
 
 def start_chat_task(
+    conversation_id: str,
     user_message: str,
     history: list[ChatMessage],
     settings: SmolagentsModelSettings,
     enable_web_search: bool,
     enable_local_knowledge: bool = False,
+    include_global_knowledge: bool = False,
     min_source_relevance: float = 0.55,
+    knowledge_root: Path = DEFAULT_CONVERSATION_KNOWLEDGE_ROOT,
 ) -> BackgroundChatTask:
     """Start one cancelable Agent request in a spawned process."""
     context = multiprocessing.get_context("spawn")
     result_queue = context.Queue()
     progress_queue = context.Queue()
+    request = ChatWorkerRequest(
+        conversation_id=conversation_id,
+        user_message=user_message,
+        history=tuple(dict(item) for item in history),
+        settings=settings,
+        enable_web_search=enable_web_search,
+        enable_local_knowledge=enable_local_knowledge,
+        include_global_knowledge=include_global_knowledge,
+        min_source_relevance=min_source_relevance,
+        knowledge_root=Path(knowledge_root),
+    )
     process = context.Process(
         target=_run_chat_task,
         args=(
             result_queue,
             progress_queue,
-            user_message,
-            history,
-            settings,
-            enable_web_search,
-            enable_local_knowledge,
-            min_source_relevance,
+            request,
         ),
         daemon=True,
     )
@@ -128,12 +164,7 @@ def start_chat_task(
 def _run_chat_task(
     result_queue: Any,
     progress_queue: Any,
-    user_message: str,
-    history: list[ChatMessage],
-    settings: SmolagentsModelSettings,
-    enable_web_search: bool,
-    enable_local_knowledge: bool = False,
-    min_source_relevance: float = 0.55,
+    request: ChatWorkerRequest,
 ) -> None:
     """Run the synchronous Agent inside the cancelable worker process."""
 
@@ -141,22 +172,28 @@ def _run_chat_task(
         progress_queue.put(phase)
 
     try:
+        request.validate_schema()
         # 原因：聊天、联网和本地知识不能继续绕过统一任务入口各自运行。
         # 作用：后台进程只负责生命周期，所有路由与 Multi-Agent 决策交给 Orchestrator。
-        result = AgentOrchestrator(settings=settings).run_sync(
+        result = AgentOrchestrator(
+            settings=request.settings,
+            knowledge_root=request.knowledge_root,
+        ).run_sync(
             OrchestrationRequest(
-                objective=user_message,
+                objective=request.user_message,
+                conversation_id=request.conversation_id,
                 history=tuple(
                     ConversationTurn(
                         role=cast(Literal["user", "assistant"], item["role"]),
                         content=item["content"],
                     )
-                    for item in history
+                    for item in request.history
                     if item.get("role") in {"user", "assistant"} and item.get("content")
                 ),
-                enable_web_search=enable_web_search,
-                enable_local_knowledge=enable_local_knowledge,
-                min_source_relevance=min_source_relevance,
+                enable_web_search=request.enable_web_search,
+                enable_local_knowledge=request.enable_local_knowledge,
+                include_global_knowledge=request.include_global_knowledge,
+                min_source_relevance=request.min_source_relevance,
             ),
             progress_callback=report_progress,
         )

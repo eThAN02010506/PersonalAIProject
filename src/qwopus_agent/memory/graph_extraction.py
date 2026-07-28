@@ -277,6 +277,7 @@ def _evidence(chunk: GraphChunk, text: str) -> GraphEvidence:
         document_id=chunk.document_id,
         source=chunk.source,
         page=chunk.page,
+        section_id=chunk.section_id,
         chunk_id=chunk.id,
         text=text,
     )

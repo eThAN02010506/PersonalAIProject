@@ -158,6 +158,7 @@ def to_graph_chunks(chunks: Sequence[KnowledgeChunk]) -> tuple[GraphChunk, ...]:
             document_id=chunk.document_id,
             source=chunk.source,
             page=chunk.page,
+            section_id=chunk.section_id,
             content=chunk.content,
         )
         for chunk in chunks

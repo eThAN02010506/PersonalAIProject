@@ -14,6 +14,7 @@ class GraphChunk(BaseModel):
     document_id: str
     source: str
     page: str | None = None
+    section_id: str | None = None
     content: str
 
 
@@ -25,6 +26,7 @@ class GraphEvidence(BaseModel):
     document_id: str
     source: str
     page: str | None = None
+    section_id: str | None = None
     chunk_id: str
     text: str
 
@@ -63,7 +65,7 @@ class GraphExtraction(BaseModel):
 
 
 class EntityRecord(BaseModel):
-    """Canonical entity persisted in the global knowledge graph."""
+    """Canonical entity persisted in one injected knowledge-graph scope."""
 
     model_config = ConfigDict(frozen=True)
 

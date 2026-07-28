@@ -133,6 +133,10 @@ class DocumentStructureTests(unittest.TestCase):
             self.assertTrue((directory / "original.md").exists())
             self.assertTrue((directory / "normalized.md").exists())
             self.assertTrue((directory / "chunks.jsonl").read_text(encoding="utf-8"))
+            inventory = store.list_documents()
+            self.assertEqual(len(inventory), 1)
+            self.assertEqual(inventory[0].source, original.name)
+            self.assertEqual(inventory[0].section_count, len(structure.sections))
 
     def test_hierarchical_summary_covers_first_and_last_chapters(self) -> None:
         structure = chunk_document_structure(

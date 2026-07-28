@@ -1,7 +1,7 @@
 """Document upload and parsing services."""
 
 from qwopus_agent.documents.chunker import chunk_document_structure
-from qwopus_agent.documents.document_store import DocumentStore
+from qwopus_agent.documents.document_store import DocumentStore, StoredDocument
 from qwopus_agent.documents.models import DocumentChunk, DocumentSection, DocumentStructure
 from qwopus_agent.documents.parser import ParsedDocument, parse_document
 from qwopus_agent.documents.storage import StoredUpload, save_uploaded_bytes
@@ -15,6 +15,7 @@ from qwopus_agent.documents.summarizer import (
 __all__ = [
     "DocumentChunk",
     "DocumentStore",
+    "StoredDocument",
     "DocumentSection",
     "DocumentStructure",
     "HierarchicalDocumentSummary",

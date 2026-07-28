@@ -20,6 +20,8 @@ export function ModelSettingsDialog({
   const [mode, setMode] = useState<"remote" | "local">("remote");
   const [baseUrl, setBaseUrl] = useState("");
   const [modelPath, setModelPath] = useState("");
+  const [contextWindow, setContextWindow] = useState(32768);
+  const [agentMode, setAgentMode] = useState<"tool_calling" | "code">("tool_calling");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -30,6 +32,8 @@ export function ModelSettingsDialog({
     setMode(health?.mode ?? "remote");
     setBaseUrl(health?.base_url ?? "");
     setModelPath(health?.local_model_path ?? "");
+    setContextWindow(health?.context_window_tokens ?? 32768);
+    setAgentMode(health?.agent_mode ?? "tool_calling");
     setError(null);
   }, [health, open]);
 
@@ -42,8 +46,22 @@ export function ModelSettingsDialog({
     try {
       const updated = await api.updateModelSettings(
         mode === "remote"
-          ? { mode, base_url: baseUrl }
-          : { mode, model_path: modelPath },
+          ? {
+              mode,
+              base_url: baseUrl,
+              context_window_tokens: contextWindow,
+              agent_mode: agentMode,
+              supports_structured_output: health?.supports_structured_output ?? false,
+              supports_vision: health?.supports_vision ?? false,
+            }
+          : {
+              mode,
+              model_path: modelPath,
+              context_window_tokens: contextWindow,
+              agent_mode: agentMode,
+              supports_structured_output: health?.supports_structured_output ?? false,
+              supports_vision: health?.supports_vision ?? false,
+            },
       );
       onSaved(updated);
       onClose();
@@ -113,6 +131,32 @@ export function ModelSettingsDialog({
               />
             </label>
           )}
+
+          <div className="model-capability-grid">
+            <label className="model-field">
+              <span>Context window</span>
+              <input
+                type="number"
+                min="2048"
+                step="1024"
+                value={contextWindow}
+                onChange={(event) => setContextWindow(Number(event.target.value))}
+                required
+              />
+            </label>
+            <label className="model-field">
+              <span>Agent protocol</span>
+              <select
+                value={agentMode}
+                onChange={(event) =>
+                  setAgentMode(event.target.value as "tool_calling" | "code")
+                }
+              >
+                <option value="tool_calling">Tool calling</option>
+                <option value="code">Code actions</option>
+              </select>
+            </label>
+          </div>
 
           {error && <div className="error-banner model-error">{error}</div>}
 

@@ -7,14 +7,14 @@ import re
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from dataclasses import field as dataclass_field
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from qwopus_agent.agents import AgentPlanningRequest, Executor, Planner
 from qwopus_agent.agents.multi_agent import (
     AgentProfile,
-    DelegatedTask,
-    DelegationPlan,
     MultiAgentRun,
-    MultiAgentSupervisor,
     RunnableAgent,
 )
 from qwopus_agent.integrations.smolagents_runtime import (
@@ -23,12 +23,14 @@ from qwopus_agent.integrations.smolagents_runtime import (
     SmolagentsModelSettings,
     run_agent_chat_turn_with_debug,
 )
+from qwopus_agent.memory import DEFAULT_CONVERSATION_KNOWLEDGE_ROOT
 from qwopus_agent.services.orchestration_models import (
     OrchestrationRequest,
     OrchestrationResult,
     ProcessEvent,
     SourceCitation,
 )
+from qwopus_agent.utils.token_budget import TokenBudgetManager, truncate_to_tokens
 
 if TYPE_CHECKING:
     from qwopus_agent.analysis import AnalysisResult
@@ -54,7 +56,7 @@ class _CapabilityResult:
     """Internal result shape understood by the generic Supervisor helpers."""
 
     content: str
-    success: bool = True
+    success: bool = False
     confidence: float = 0.5
     citations: tuple[SourceCitation, ...] = ()
     analysis_result: AnalysisResult | None = None
@@ -79,21 +81,92 @@ class AgentOrchestrator:
 
     settings: SmolagentsModelSettings
     minirag: MiniRAG | None = None
+    knowledge_root: Path = DEFAULT_CONVERSATION_KNOWLEDGE_ROOT
     chat_runner: ChatRunner = run_agent_chat_turn_with_debug
     analysis_runner: AnalysisRunner | None = None
     report_generator: ReportGenerator | None = None
+    planner: Planner = dataclass_field(default_factory=Planner)
+    executor: Executor = dataclass_field(default_factory=Executor)
 
     async def run(
         self,
         request: OrchestrationRequest,
         progress_callback: ProgressCallback | None = None,
     ) -> OrchestrationResult:
-        """Execute one request through a single fast path or supervised multi-agent path."""
+        """Plan once and execute the resulting DAG through one Supervisor path."""
         trace: list[ProcessEvent] = []
         try:
-            if not _requires_supervisor(request):
-                return await self._run_single(request, trace, progress_callback)
-            return await self._run_supervised(request, trace, progress_callback)
+            if request.include_global_knowledge and not request.enable_local_knowledge:
+                raise ValueError(
+                    "Global knowledge requires local knowledge permission."
+                )
+            plan = await self.planner.plan(
+                AgentPlanningRequest(
+                    objective=request.objective,
+                    has_documents=bool(request.uploaded_files),
+                    enable_web_search=request.enable_web_search,
+                    enable_local_knowledge=request.enable_local_knowledge,
+                    generate_report=request.generate_report,
+                )
+            )
+            agents = self._build_agents(request, trace, progress_callback)
+            profiles = {
+                name: AgentProfile(
+                    name=name,
+                    capabilities=(name.removesuffix("_agent"),),
+                )
+                for name in agents
+            }
+            if progress_callback is not None:
+                progress_callback("planning")
+            trace.append(
+                ProcessEvent(
+                    phase="planning",
+                    status="completed",
+                    agent="planner",
+                    message=f"Planned {len(plan.delegation.tasks)} task(s).",
+                )
+            )
+            run = await self.executor.execute(
+                plan,
+                agents=agents,
+                profiles=profiles,
+                context={
+                    "shared_state": {
+                        "request": request.model_dump(exclude={"uploaded_files"})
+                    }
+                },
+            )
+            citations, analysis_result, report, debug_runs = _collect_artifacts(run)
+            terminal_run = next(
+                (item for item in run.runs if item.task_id == plan.terminal_task_id),
+                None,
+            )
+            terminal_result = terminal_run.result if terminal_run is not None else None
+            answer_content = run.final_answer
+            if plan.route == "single_agent" and isinstance(
+                terminal_result,
+                _CapabilityResult,
+            ):
+                # 原因：确定性仲裁在单 Agent 失败时只返回通用错误，会丢失安全的拒答说明。
+                # 作用：继续把能力层的无证据提示交给用户，同时 success 保持为 False。
+                answer_content = terminal_result.content
+            answer = _append_citations(answer_content, citations, request.objective)
+            return OrchestrationResult(
+                # 原因：中间证据或错误文本非空，不代表规划的最终任务已经完成。
+                # 作用：整体状态只取决于 DAG 的 terminal task，避免部分结果伪装成成功。
+                success=bool(answer.strip()) and bool(
+                    terminal_run is not None and terminal_run.success
+                ),
+                final_answer=answer,
+                route=plan.route,
+                citations=citations,
+                trace=tuple(trace),
+                analysis_result=analysis_result,
+                report=report,
+                multi_agent_run=run if plan.route == "multi_agent" else None,
+                debug_runs=debug_runs,
+            )
         except Exception as exc:  # noqa: BLE001 - return one stable application error envelope.
             trace.append(
                 ProcessEvent(
@@ -105,7 +178,19 @@ class AgentOrchestrator:
             return OrchestrationResult(
                 success=False,
                 final_answer=f"Agent execution failed: {type(exc).__name__}: {exc}",
-                route="single_agent" if not _requires_supervisor(request) else "multi_agent",
+                route=(
+                    "multi_agent"
+                    if sum(
+                        (
+                            bool(request.uploaded_files),
+                            request.enable_web_search,
+                            request.enable_local_knowledge,
+                        )
+                    )
+                    > 1
+                    or request.generate_report
+                    else "single_agent"
+                ),
                 trace=tuple(trace),
             )
 
@@ -117,85 +202,6 @@ class AgentOrchestrator:
         """Run from synchronous CLI/UI adapters."""
         return asyncio.run(self.run(request, progress_callback=progress_callback))
 
-    async def _run_single(
-        self,
-        request: OrchestrationRequest,
-        trace: list[ProcessEvent],
-        progress_callback: ProgressCallback | None,
-    ) -> OrchestrationResult:
-        if request.uploaded_files:
-            capability = await self._document_capability(request, trace, progress_callback)
-        else:
-            capability = await self._chat_capability(
-                "chat_agent",
-                request,
-                trace,
-                progress_callback,
-                web=request.enable_web_search,
-                local=request.enable_local_knowledge,
-            )
-        answer = _append_citations(capability.content, capability.citations, request.objective)
-        return OrchestrationResult(
-            success=capability.success,
-            final_answer=answer,
-            route="single_agent",
-            citations=capability.citations,
-            trace=tuple(trace),
-            analysis_result=capability.analysis_result,
-            report=capability.report,
-            debug_runs=capability.debug_runs,
-        )
-
-    async def _run_supervised(
-        self,
-        request: OrchestrationRequest,
-        trace: list[ProcessEvent],
-        progress_callback: ProgressCallback | None,
-    ) -> OrchestrationResult:
-        plan = _build_delegation_plan(request)
-        agents = self._build_agents(request, trace, progress_callback)
-        profiles = {
-            name: AgentProfile(name=name, capabilities=(name.removesuffix("_agent"),))
-            for name in agents
-        }
-        if progress_callback is not None:
-            progress_callback("planning")
-        trace.append(
-            ProcessEvent(
-                phase="planning",
-                status="completed",
-                agent="supervisor",
-                message=f"Delegated {len(plan.tasks)} tasks.",
-            )
-        )
-        supervisor = MultiAgentSupervisor(
-            agents=agents,
-            profiles=profiles,
-            max_parallel=3,
-            # 原因：生产请求先通过依赖任务和确定性仲裁收敛，默认辩论会额外调用所有模型。
-            # 作用：保留 Supervisor 冲突仲裁能力，同时避免每次组合查询产生无必要的延迟。
-            debate_rounds=0,
-        )
-        run = await supervisor.run(
-            request.objective,
-            context={
-                "delegation_plan": plan,
-                "shared_state": {"request": request.model_dump(exclude={"uploaded_files"})},
-            },
-        )
-        citations, analysis_result, report, debug_runs = _collect_artifacts(run)
-        answer = _append_citations(run.final_answer, citations, request.objective)
-        return OrchestrationResult(
-            success=bool(answer.strip()) and any(item.success for item in run.runs),
-            final_answer=answer,
-            route="multi_agent",
-            citations=citations,
-            trace=tuple(trace),
-            analysis_result=analysis_result,
-            report=report,
-            multi_agent_run=run,
-            debug_runs=debug_runs,
-        )
 
     def _build_agents(
         self,
@@ -283,7 +289,12 @@ class AgentOrchestrator:
             settings=self.settings,
             enable_web_search=web,
             enable_local_knowledge=local,
+            include_global_knowledge=(
+                request.include_global_knowledge if local else False
+            ),
             min_source_relevance=request.min_source_relevance,
+            knowledge_scope=request.conversation_id,
+            knowledge_root=self.knowledge_root,
             progress_callback=progress_callback,
         )
         citations = _citations_from_chat(run)
@@ -301,15 +312,18 @@ class AgentOrchestrator:
         trace.append(
             ProcessEvent(
                 phase="execution",
-                status="completed",
+                status="completed" if run.success else "failed",
                 agent=agent_name,
+                message=run.error or "",
                 duration_seconds=round(time.monotonic() - started, 3),
             )
         )
         return _CapabilityResult(
             content=run.answer,
-            confidence=0.72 if web or local else 0.65,
+            success=run.success,
+            confidence=(0.72 if web or local else 0.65) if run.success else 0.0,
             citations=citations,
+            error=run.error,
             debug_runs=run.debug_runs,
         )
 
@@ -370,6 +384,7 @@ class AgentOrchestrator:
         )
         return _CapabilityResult(
             content=answer,
+            success=True,
             confidence=0.8,
             citations=citations,
             analysis_result=outcome.result,
@@ -385,9 +400,17 @@ class AgentOrchestrator:
         progress_callback: ProgressCallback | None,
     ) -> _CapabilityResult:
         dependency_results = context.get("multi_agent", {}).get("dependency_results", {})
-        evidence = "\n\n".join(
-            f"[{task_id}]\n{content}" for task_id, content in dependency_results.items()
-        )[:18_000]
+        budget = TokenBudgetManager(
+            context_window=self.settings.context_window_tokens,
+            output_reserve=self.settings.max_tokens,
+        )
+        evidence = truncate_to_tokens(
+            "\n\n".join(
+                f"[{task_id}]\n{content}"
+                for task_id, content in dependency_results.items()
+            ),
+            budget.synthesis_budget,
+        )
         synthesis_request = request.model_copy(
             update={
                 "objective": (
@@ -399,6 +422,7 @@ class AgentOrchestrator:
                 "history": (),
                 "enable_web_search": False,
                 "enable_local_knowledge": False,
+                "include_global_knowledge": False,
             }
         )
         try:
@@ -410,7 +434,13 @@ class AgentOrchestrator:
                 web=False,
                 local=False,
             )
-            return _CapabilityResult(content=result.content, confidence=0.95)
+            return _CapabilityResult(
+                content=result.content,
+                success=result.success,
+                confidence=0.95 if result.success else 0.0,
+                error=result.error,
+                debug_runs=result.debug_runs,
+            )
         except Exception as exc:  # noqa: BLE001 - preserve completed evidence on synthesis failure.
             trace.append(
                 ProcessEvent(
@@ -422,7 +452,8 @@ class AgentOrchestrator:
             )
             return _CapabilityResult(
                 content=evidence or f"No evidence was available: {exc}",
-                confidence=0.75,
+                success=False,
+                confidence=0.0,
                 error=str(exc),
             )
 
@@ -470,6 +501,7 @@ class AgentOrchestrator:
         )
         return _CapabilityResult(
             content=answer,
+            success=True,
             confidence=1.0,
             citations=_deduplicate_citations(citations),
             report=report,
@@ -484,8 +516,8 @@ class AgentOrchestrator:
         try:
             return await operation()
         except Exception as exc:  # noqa: BLE001 - one provider must not cancel sibling evidence.
-            # 原因：研究或知识服务可能独立失败，严格失败会跳过依赖它的综合任务。
-            # 作用：发布可审计的降级结果，让 Supervisor 继续使用其他成功证据。
+            # 原因：异常文本若沿用默认 success=True，会被 Supervisor 当成有效证据。
+            # 作用：发布可审计的真实失败状态；可选依赖降级由 DAG 策略显式处理。
             trace.append(
                 ProcessEvent(
                     phase="execution",
@@ -496,63 +528,10 @@ class AgentOrchestrator:
             )
             return _CapabilityResult(
                 content=f"{agent_name} was unavailable: {type(exc).__name__}: {exc}",
-                confidence=0.05,
+                success=False,
+                confidence=0.0,
                 error=str(exc),
             )
-
-
-def _requires_supervisor(request: OrchestrationRequest) -> bool:
-    capabilities = sum(
-        (
-            bool(request.uploaded_files),
-            request.enable_web_search,
-            request.enable_local_knowledge,
-        )
-    )
-    return capabilities > 1 or request.generate_report
-
-
-def _build_delegation_plan(request: OrchestrationRequest) -> DelegationPlan:
-    tasks: list[DelegatedTask] = []
-    evidence_ids: list[str] = []
-    if request.uploaded_files:
-        tasks.append(DelegatedTask("document", request.objective, "document_agent"))
-        evidence_ids.append("document")
-    if request.enable_web_search:
-        tasks.append(DelegatedTask("research", request.objective, "research_agent"))
-        evidence_ids.append("research")
-    if request.enable_local_knowledge:
-        dependencies = ("document",) if request.uploaded_files else ()
-        tasks.append(
-            DelegatedTask(
-                "knowledge",
-                request.objective,
-                "knowledge_agent",
-                dependencies,
-            )
-        )
-        evidence_ids.append("knowledge")
-    if not evidence_ids:
-        tasks.append(DelegatedTask("chat", request.objective, "chat_agent"))
-        evidence_ids.append("chat")
-    tasks.append(
-        DelegatedTask(
-            "synthesis",
-            request.objective,
-            "synthesis_agent",
-            tuple(evidence_ids),
-        )
-    )
-    if request.generate_report:
-        tasks.append(
-            DelegatedTask(
-                "report",
-                request.objective,
-                "report_agent",
-                ("synthesis",),
-            )
-        )
-    return DelegationPlan(objective=request.objective, tasks=tuple(tasks))
 
 
 def _citations_from_chat(run: ChatAgentRun) -> tuple[SourceCitation, ...]:

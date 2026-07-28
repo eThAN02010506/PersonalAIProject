@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import shutil
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +13,19 @@ from qwopus_agent.documents.models import DocumentStructure
 from qwopus_agent.documents.summarizer import HierarchicalDocumentSummary
 
 DEFAULT_DOCUMENT_STORE = Path("storage/documents")
+
+
+@dataclass(frozen=True)
+class StoredDocument:
+    """Inventory metadata for one complete locally persisted document."""
+
+    document_id: str
+    source: str
+    file_type: str
+    size_bytes: int
+    section_count: int
+    saved_at: str
+    summary_available: bool
 
 
 @dataclass(frozen=True)
@@ -64,6 +78,53 @@ class DocumentStore:
         path = self.root / Path(document_id).name / "structure.json"
         return DocumentStructure.model_validate_json(path.read_text(encoding="utf-8"))
 
+    def list_documents(self) -> list[StoredDocument]:
+        """List complete records while ignoring interrupted or malformed writes."""
+        documents: list[StoredDocument] = []
+        if not self.root.is_dir():
+            return documents
+
+        for directory in self.root.glob("document-*"):
+            metadata_path = directory / "metadata.json"
+            structure_path = directory / "structure.json"
+            if (
+                not directory.is_dir()
+                or not metadata_path.is_file()
+                or not structure_path.is_file()
+            ):
+                continue
+            try:
+                metadata = _read_object(metadata_path)
+                structure = DocumentStructure.model_validate_json(
+                    structure_path.read_text(encoding="utf-8")
+                )
+                original = next(
+                    (path for path in directory.glob("original.*") if path.is_file()),
+                    None,
+                )
+                if original is None:
+                    continue
+                saved_timestamp = max(
+                    metadata_path.stat().st_mtime,
+                    structure_path.stat().st_mtime,
+                    original.stat().st_mtime,
+                )
+                documents.append(
+                    StoredDocument(
+                        document_id=str(metadata.get("document_id") or structure.document_id),
+                        source=str(metadata.get("source") or structure.source),
+                        file_type=original.suffix.lower().lstrip("."),
+                        size_bytes=original.stat().st_size,
+                        section_count=len(structure.sections),
+                        saved_at=datetime.fromtimestamp(saved_timestamp, tz=UTC).isoformat(),
+                        summary_available=(directory / "document_summary.md").is_file(),
+                    )
+                )
+            except (OSError, ValueError, TypeError, json.JSONDecodeError):
+                continue
+
+        return sorted(documents, key=lambda item: item.saved_at, reverse=True)
+
     def persist_summary(self, summary: HierarchicalDocumentSummary) -> None:
         directory = self.root / summary.document_id
         directory.mkdir(parents=True, exist_ok=True)
@@ -79,6 +140,13 @@ class DocumentStore:
             ),
         )
         _atomic_write(directory / "document_summary.md", summary.document_summary)
+
+
+def _read_object(path: Path) -> dict[str, Any]:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise TypeError(f"{path.name} must contain an object")
+    return payload
 
 
 def _atomic_write(path: Path, content: str) -> None:

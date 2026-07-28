@@ -11,6 +11,7 @@ from qwopus_agent.api.model_runtime import (
     _validate_model_path,
 )
 from qwopus_agent.integrations.smolagents_runtime import SmolagentsModelSettings
+from qwopus_agent.llm import ModelCapabilities
 
 
 class ModelRuntimeTests(unittest.TestCase):
@@ -55,9 +56,14 @@ class ModelRuntimeTests(unittest.TestCase):
         )
         controller = RuntimeModelController(settings)
 
-        status = controller.configure_remote("http://new.example:9000")
+        status = controller.configure_remote(
+            "http://new.example:9000",
+            ModelCapabilities(context_window_tokens=65536, agent_mode="code"),
+        )
 
         self.assertEqual(status.settings.base_url, "http://new.example:9000/v1")
+        self.assertEqual(status.settings.context_window_tokens, 65536)
+        self.assertEqual(status.settings.capabilities.agent_mode, "code")
         self.assertEqual(status.mode, "remote")
 
     @patch("qwopus_agent.api.model_runtime.resolve_model_settings", side_effect=lambda value: value)

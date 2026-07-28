@@ -53,3 +53,16 @@ class LLMRegistryTests(unittest.TestCase):
 
         self.assertIsInstance(llm, BaseLLM)
         self.assertEqual(llm.model, "plugged-model")
+
+    def test_registry_uses_shared_runtime_model_settings(self) -> None:
+        from qwopus_agent.llm import ModelSettings
+
+        llm = create_default_llm_registry().create_from_settings(
+            ModelSettings(
+                model_id="runtime-model",
+                base_url="http://127.0.0.1:9000/v1",
+            )
+        )
+
+        self.assertEqual(llm.model, "runtime-model")
+        self.assertEqual(llm.base_url, "http://127.0.0.1:9000/v1")

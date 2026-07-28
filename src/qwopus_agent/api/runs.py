@@ -8,6 +8,7 @@ from threading import Lock
 from uuid import uuid4
 
 from qwopus_agent.integrations.smolagents_runtime import SmolagentsModelSettings
+from qwopus_agent.memory import DEFAULT_CONVERSATION_KNOWLEDGE_ROOT
 from qwopus_agent.services.chat_service import BackgroundChatTask, start_chat_task
 from qwopus_agent.utils.debug_store import DEFAULT_DEBUG_DIRECTORY, append_debug_record
 
@@ -28,9 +29,11 @@ class ChatRunRegistry:
         self,
         repository: ConversationRepository,
         debug_directory: Path = DEFAULT_DEBUG_DIRECTORY,
+        knowledge_root: Path = DEFAULT_CONVERSATION_KNOWLEDGE_ROOT,
     ) -> None:
         self.repository = repository
         self.debug_directory = debug_directory
+        self.knowledge_root = Path(knowledge_root)
         self._runs: dict[str, _ActiveRun] = {}
         self._completed: dict[str, RunView] = {}
         self._lock = Lock()
@@ -43,17 +46,21 @@ class ChatRunRegistry:
         *,
         enable_web_search: bool,
         enable_local_knowledge: bool,
+        include_global_knowledge: bool = False,
         min_source_relevance: float = 0.55,
     ) -> str:
         history = self.repository.build_model_history(conversation_id)
         self.repository.add_message(conversation_id, "user", content)
         task = start_chat_task(
+            conversation_id=conversation_id,
             user_message=content,
             history=history,
             settings=settings,
             enable_web_search=enable_web_search,
             enable_local_knowledge=enable_local_knowledge,
+            include_global_knowledge=include_global_knowledge,
             min_source_relevance=min_source_relevance,
+            knowledge_root=self.knowledge_root,
         )
         run_id = uuid4().hex
         with self._lock:

@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import Protocol
 
-from qwopus_agent.integrations.smolagents_tools import TavilySearchConfig, build_tavily_search_tool
 from qwopus_agent.skills.base import BaseSkill, SkillRequest, SkillResponse
 
 
@@ -23,20 +22,6 @@ class UnconfiguredWebSearchProvider:
     def search(self, query: str) -> list[str]:
         """Fail clearly instead of pretending web search is available."""
         raise RuntimeError("web_search provider is not configured yet.")
-
-
-@dataclass
-class SmolagentsTavilySearchProvider:
-    """Web search provider backed by a smolagents Tavily Tool."""
-
-    max_results: int = 5
-
-    def search(self, query: str) -> list[str]:
-        """Search through Qwopus' smolagents Tavily tool adapter."""
-        # 原因：smolagents 是 Agent 驱动入口，但 Tavily 才是稳定搜索 provider。
-        # 作用：保留 Skill search(query) 接口，同时让执行路径经过 smolagents Tool。
-        tool = build_tavily_search_tool(TavilySearchConfig(max_results=self.max_results))
-        return _normalize_smolagents_search_results(tool(query))
 
 
 @dataclass
@@ -78,14 +63,3 @@ class WebSearchSkill(BaseSkill):
 def create_skill() -> BaseSkill:
     """Factory used by SkillRegistry for zero-manual registration."""
     return WebSearchSkill()
-
-
-def _normalize_smolagents_search_results(raw_result: Any) -> list[str]:
-    """Normalize smolagents Tool output into text results."""
-    if isinstance(raw_result, str):
-        return [raw_result.strip()] if raw_result.strip() else []
-    if isinstance(raw_result, list):
-        return [str(item).strip() for item in raw_result if str(item).strip()]
-    if raw_result is None:
-        return []
-    return [str(raw_result).strip()]

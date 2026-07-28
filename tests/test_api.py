@@ -9,8 +9,10 @@ from qwopus_agent.analysis import AnalysisResult
 from qwopus_agent.api.app import create_app
 from qwopus_agent.api.model_runtime import RuntimeModelStatus
 from qwopus_agent.api.repository import ConversationRepository
-from qwopus_agent.documents import build_document_structure, chunk_document_structure
+from qwopus_agent.documents import DocumentStore, build_document_structure, chunk_document_structure
 from qwopus_agent.integrations.smolagents_runtime import AgentDebugRun, SmolagentsModelSettings
+from qwopus_agent.llm import ModelCapabilities
+from qwopus_agent.memory import ConversationKnowledgeManager
 from qwopus_agent.services.orchestration_models import OrchestrationResult
 from qwopus_agent.utils.debug_store import load_debug_records
 
@@ -21,6 +23,8 @@ class ApiTests(unittest.TestCase):
         database_path = Path(self.temp_directory.name) / "qwopus.db"
         self.debug_directory = Path(self.temp_directory.name) / "debug_runs"
         self.runtime_log_path = Path(self.temp_directory.name) / "qwopus_agent.log"
+        self.knowledge_root = Path(self.temp_directory.name) / "minirag"
+        self.document_directory = Path(self.temp_directory.name) / "documents"
         # 原因：API 测试必须验证 SQLite 持久化，但不能读取或修改用户现有对话。
         # 作用：每个测试使用独立数据库，并关闭旧 JSONL 自动导入。
         self.repository = ConversationRepository(database_path, import_legacy=False)
@@ -41,13 +45,18 @@ class ApiTests(unittest.TestCase):
         self.model_runtime.status.return_value = self.model_status
         self.model_runtime.configure_remote.return_value = self.model_status
         self.model_runtime.configure_local.return_value = self.model_status
+        self.knowledge_manager = ConversationKnowledgeManager(
+            root=self.knowledge_root,
+            factory=lambda _path: MagicMock(),
+        )
         self.client_context = TestClient(
             create_app(
                 self.repository,
-                minirag=MagicMock(),
+                knowledge_manager=self.knowledge_manager,
                 model_runtime=self.model_runtime,
                 debug_directory=self.debug_directory,
                 runtime_log_path=self.runtime_log_path,
+                document_store=DocumentStore(self.document_directory),
             )
         )
         self.client = self.client_context.__enter__()
@@ -76,7 +85,11 @@ class ApiTests(unittest.TestCase):
             json={"title": "Renamed"},
         )
         self.assertEqual(renamed.json()["title"], "Renamed")
+        scoped_directory = self.knowledge_manager.storage_path(first_id).parent
+        scoped_directory.mkdir(parents=True)
+        (scoped_directory / "marker").write_text("private", encoding="utf-8")
         self.assertEqual(self.client.delete(f"/api/conversations/{first_id}").status_code, 204)
+        self.assertFalse(scoped_directory.exists())
         self.assertEqual(
             self.client.get(f"/api/conversations/{first_id}/messages").status_code,
             404,
@@ -88,9 +101,36 @@ class ApiTests(unittest.TestCase):
         self.assertIn("/api/conversations/{conversation_id}/runs", schema["paths"])
         self.assertIn("/api/runs/{run_id}", schema["paths"])
         self.assertIn("/api/analysis", schema["paths"])
+        self.assertIn("/api/documents", schema["paths"])
         self.assertIn("/api/model-settings", schema["paths"])
         self.assertIn("/api/reports/{filename}", schema["paths"])
         self.assertIn("/api/debug", schema["paths"])
+
+    def test_saved_document_inventory_lists_only_complete_parsed_documents(self) -> None:
+        original = Path(self.temp_directory.name) / "paper.md"
+        original.write_text("# One\nBody\n\n# Two\nBody", encoding="utf-8")
+        structure = chunk_document_structure(
+            build_document_structure(original.read_text(encoding="utf-8"), source="paper.md")
+        )
+        store = DocumentStore(self.document_directory)
+        complete = store.persist(
+            original_path=original,
+            markdown=original.read_text(encoding="utf-8"),
+            structure=structure,
+            metadata={"parser": "markdown"},
+        )
+        (complete / "document_summary.md").write_text("Summary", encoding="utf-8")
+        incomplete = self.document_directory / "document-incomplete"
+        incomplete.mkdir()
+        (incomplete / "metadata.json").write_text("{}", encoding="utf-8")
+
+        response = self.client.get("/api/documents")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(response.json()), 1)
+        self.assertEqual(response.json()[0]["source"], "paper.md")
+        self.assertEqual(response.json()[0]["section_count"], 2)
+        self.assertTrue(response.json()[0]["summary_available"])
 
     def test_debug_overview_exposes_complete_local_diagnostics(self) -> None:
         self.runtime_log_path.write_text(
@@ -130,10 +170,17 @@ class ApiTests(unittest.TestCase):
         self.assertTrue(payload["model"]["model_online"])
 
     def test_analysis_rejects_malformed_section_scope(self) -> None:
+        conversation_id = self.client.post(
+            "/api/conversations",
+            json={"title": "Documents"},
+        ).json()["id"]
         response = self.client.post(
             "/api/analysis",
             files={"files": ("sample.txt", b"content", "text/plain")},
-            data={"selected_sections": '{"document":"section-as-string"}'},
+            data={
+                "conversation_id": conversation_id,
+                "selected_sections": '{"document":"section-as-string"}',
+            },
         )
 
         # 原因：宽松解析会把字符串 section id 拆成字符列表并绕过预期范围。
@@ -150,10 +197,15 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["base_url"], self.model_settings.base_url)
         self.model_runtime.configure_remote.assert_called_once_with(
-            "http://192.168.1.97:8001/v1"
+            "http://192.168.1.97:8001/v1",
+            ModelCapabilities(),
         )
 
     def test_analysis_reads_uploaded_bytes_before_orchestration(self) -> None:
+        conversation_id = self.client.post(
+            "/api/conversations",
+            json={"title": "Documents"},
+        ).json()["id"]
         structure = chunk_document_structure(
             build_document_structure("# Overview\nReal body", source="sample.txt")
         )
@@ -189,6 +241,7 @@ class ApiTests(unittest.TestCase):
                 "/api/analysis",
                 files={"files": ("sample.txt", b"real bytes", "text/plain")},
                 data={
+                    "conversation_id": conversation_id,
                     "question": "Summarize",
                     "min_source_relevance": "0.8",
                     "analysis_mode": "section",
@@ -216,6 +269,7 @@ class ApiTests(unittest.TestCase):
             "raw document",
         )
         request = orchestrator.run_sync.call_args.args[0]
+        self.assertEqual(request.conversation_id, conversation_id)
         self.assertEqual(request.uploaded_files[0].name, "sample.txt")
         self.assertEqual(request.uploaded_files[0].content, b"real bytes")
         self.assertEqual(request.min_source_relevance, 0.8)
@@ -224,6 +278,35 @@ class ApiTests(unittest.TestCase):
             request.selected_sections[structure.document_id],
             (structure.sections[0].id,),
         )
+
+    def test_analysis_rejects_unknown_conversation_scope(self) -> None:
+        response = self.client.post(
+            "/api/analysis",
+            files={"files": ("sample.txt", b"content", "text/plain")},
+            data={"conversation_id": "missing-conversation"},
+        )
+
+        # 原因：允许任意 scope 会让客户端绕过对话所有权并创建不可见知识库。
+        # 作用：上传只接受 SQLite 中真实存在的 conversation_id。
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.json()["detail"], "Conversation not found.")
+
+    def test_chat_rejects_global_knowledge_without_local_permission(self) -> None:
+        conversation_id = self.client.post(
+            "/api/conversations",
+            json={"title": "Knowledge"},
+        ).json()["id"]
+
+        response = self.client.post(
+            f"/api/conversations/{conversation_id}/runs",
+            json={
+                "content": "Search global documents",
+                "enable_local_knowledge": False,
+                "include_global_knowledge": True,
+            },
+        )
+
+        self.assertEqual(response.status_code, 422)
 
 
 if __name__ == "__main__":

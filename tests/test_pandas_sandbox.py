@@ -51,6 +51,26 @@ class PandasSandboxTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Blocked sandbox attribute"):
             execute_pandas_code('df = dfs["Sheet1"]\nresult = df.to_csv("out.csv")', dataframes)
 
+    def test_rejects_unlisted_pandas_io_and_plot_methods(self) -> None:
+        dataframes = {"Sheet1": pd.DataFrame({"value": [1]})}
+
+        with self.assertRaisesRegex(ValueError, "Blocked sandbox attribute"):
+            execute_pandas_code('result = pd.read_pickle("secret.pkl")', dataframes)
+        with self.assertRaisesRegex(ValueError, "Blocked sandbox attribute"):
+            execute_pandas_code('df = dfs["Sheet1"]\nresult = df.plot()', dataframes)
+
+    def test_rejects_loops_and_exponentiation_before_execution(self) -> None:
+        dataframes = {"Sheet1": pd.DataFrame({"value": [1]})}
+
+        with self.assertRaisesRegex(ValueError, "Unsupported sandbox syntax"):
+            execute_pandas_code("while True:\n    result = 1", dataframes)
+        with self.assertRaisesRegex(ValueError, "Exponentiation"):
+            execute_pandas_code("result = 10 ** 5", dataframes)
+
+    def test_worker_errors_return_through_the_sandbox_boundary(self) -> None:
+        with self.assertRaisesRegex(ValueError, "ZeroDivisionError"):
+            execute_pandas_code("result = 1 / 0", {"Sheet1": pd.DataFrame()})
+
     def test_requires_result_assignment(self) -> None:
         dataframes = {"Sheet1": pd.DataFrame({"value": [1]})}
 

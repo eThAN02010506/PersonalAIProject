@@ -8,10 +8,19 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from qwopus_agent.integrations import smolagents_debug, smolagents_model
-from qwopus_agent.utils.token_budget import estimate_tokens, truncate_to_tokens
+from qwopus_agent.memory import (
+    DEFAULT_CONVERSATION_KNOWLEDGE_ROOT,
+    conversation_knowledge_path,
+)
+from qwopus_agent.utils.token_budget import (
+    TokenBudgetManager,
+    estimate_tokens,
+    truncate_to_tokens,
+)
 
 AgentDebugRun = smolagents_debug.AgentDebugRun
 SmolagentsModelSettings = smolagents_model.SmolagentsModelSettings
@@ -35,7 +44,24 @@ class SmolagentsDependencyError(RuntimeError):
 
 ChatMessage = dict[str, str]
 CHAT_HISTORY_MAX_MESSAGES = 8
-CHAT_HISTORY_MAX_TOKENS = 1000
+_LOCAL_KNOWLEDGE_TOOLS = frozenset(
+    {
+        "rag_search",
+        "graph_search",
+        "global_rag_search",
+        "global_graph_search",
+    }
+)
+_NO_KNOWLEDGE_EVIDENCE_MARKERS = (
+    "no relevant minirag results",
+    "no matching knowledge-graph path was found",
+    "no relevant knowledge",
+    "no relevant evidence",
+    "no usable tool evidence",
+    "tool execution failed",
+    "error executing tool",
+    "error while executing tool",
+)
 
 
 def build_tavily_search_tool(
@@ -52,8 +78,12 @@ def build_tavily_search_tool(
 
 
 def build_local_knowledge_tools(
+    knowledge_scope: str,
     progress_callback: Callable[[str], None] | None = None,
     min_source_relevance: float = 0.55,
+    knowledge_root: Path = DEFAULT_CONVERSATION_KNOWLEDGE_ROOT,
+    include_global_knowledge: bool = False,
+    budget_manager: TokenBudgetManager | None = None,
 ) -> list[Any]:
     """Build chat tools over the persisted MiniRAG and knowledge graph stores."""
     from qwopus_agent.integrations.smolagents_tools import (
@@ -61,28 +91,58 @@ def build_local_knowledge_tools(
         build_minirag_search_tool,
     )
     from qwopus_agent.memory import MiniRAG
-    from qwopus_agent.memory.graph_backend import PersistentKnowledgeGraph
-    from qwopus_agent.memory.graph_extraction import RuleBasedGraphExtractor
-    from qwopus_agent.memory.knowledge_graph import (
-        DEFAULT_KNOWLEDGE_GRAPH_PATH,
-        KnowledgeGraphIndex,
-    )
 
+    budget = budget_manager or TokenBudgetManager()
     # 原因：聊天运行在独立 spawn 进程，不能安全复用 Streamlit session 中的原生向量对象。
-    # 作用：每次启用本地知识时从持久化文件加载只属于当前聊天进程的检索实例。
-    minirag = MiniRAG()
-    graph_index = KnowledgeGraphIndex(
-        graph=PersistentKnowledgeGraph(DEFAULT_KNOWLEDGE_GRAPH_PATH),
-        extractor=RuleBasedGraphExtractor(),
+    # 作用：每次启用本地知识时只加载当前 conversation_id 的向量和配套图谱快照。
+    minirag = MiniRAG(
+        storage_path=conversation_knowledge_path(
+            knowledge_scope,
+            root=knowledge_root,
+        )
     )
-    return [
+    tools = [
         build_minirag_search_tool(
             minirag,
             min_relevance=min_source_relevance,
             progress_callback=progress_callback,
+            budget_manager=budget,
         ),
-        build_graph_search_tool(graph_index, progress_callback=progress_callback),
+        build_graph_search_tool(
+            minirag.graph_index,
+            progress_callback=progress_callback,
+            budget_manager=budget,
+        ),
     ]
+    if include_global_knowledge:
+        global_minirag = MiniRAG()
+        # 原因：全局检索是额外权限，复用 rag_search 名称会让 Agent 和日志无法区分来源范围。
+        # 作用：仅在显式授权后增加独立命名的全局语义与图路径 Tool。
+        tools.extend(
+            [
+                build_minirag_search_tool(
+                    global_minirag,
+                    min_relevance=min_source_relevance,
+                    progress_callback=progress_callback,
+                    budget_manager=budget,
+                    tool_name="global_rag_search",
+                    description=(
+                        "Search the explicitly authorized global MiniRAG store. Use this only "
+                        "when current-conversation evidence is insufficient."
+                    ),
+                ),
+                build_graph_search_tool(
+                    global_minirag.graph_index,
+                    progress_callback=progress_callback,
+                    budget_manager=budget,
+                    tool_name="global_graph_search",
+                    description=(
+                        "Search explicit relationships in the authorized global knowledge graph."
+                    ),
+                ),
+            ]
+        )
+    return tools
 
 
 @dataclass(frozen=True)
@@ -107,6 +167,8 @@ class ChatAgentRun:
     observations: tuple[str, ...] = ()
     state: str | None = None
     debug_runs: tuple[AgentDebugRun, ...] = ()
+    success: bool = True
+    error: str | None = None
 
 
 def format_chat_prompt(
@@ -217,15 +279,9 @@ def build_smolagents_code_agent(
     return CodeAgent(
         tools=tools or [],
         model=model,
-        additional_authorized_imports=[
-            "os",
-            "pathlib",
-            "glob",
-            "json",
-            "datetime",
-            "re",
-            "subprocess",
-        ],
+        # 原因：聊天 Tool 不需要任意文件、进程或 shell 访问；授权 os/subprocess 会扩大风险。
+        # 作用：Code 兼容模式只能组合已注册 Tool，数据计算继续使用独立 pandas 沙箱。
+        additional_authorized_imports=[],
     )
 
 
@@ -239,6 +295,10 @@ def build_smolagents_tool_calling_agent(
 
     except ModuleNotFoundError as exc:
         raise SmolagentsDependencyError("Install smolagents first.") from exc
+
+    settings = settings or SmolagentsModelSettings.from_env()
+    if settings.capabilities.agent_mode == "code":
+        return build_smolagents_code_agent(settings=settings, tools=tools)
 
     model = build_smolagents_model(settings)
     # 原因：smolagents 是整体 Agent 驱动入口，工具选择应由 Agent runtime 处理。
@@ -267,7 +327,10 @@ def run_agent_chat_turn(
     settings: SmolagentsModelSettings | None = None,
     enable_web_search: bool = False,
     enable_local_knowledge: bool = False,
+    include_global_knowledge: bool = False,
     min_source_relevance: float = 0.55,
+    knowledge_scope: str | None = None,
+    knowledge_root: Path = DEFAULT_CONVERSATION_KNOWLEDGE_ROOT,
     progress_callback: Callable[[str], None] | None = None,
 ) -> str:
     """Run one chat turn through smolagents as the Agent driver."""
@@ -277,7 +340,10 @@ def run_agent_chat_turn(
         settings=settings,
         enable_web_search=enable_web_search,
         enable_local_knowledge=enable_local_knowledge,
+        include_global_knowledge=include_global_knowledge,
         min_source_relevance=min_source_relevance,
+        knowledge_scope=knowledge_scope,
+        knowledge_root=knowledge_root,
         progress_callback=progress_callback,
     ).answer
 
@@ -288,32 +354,54 @@ def run_agent_chat_turn_with_debug(
     settings: SmolagentsModelSettings | None = None,
     enable_web_search: bool = False,
     enable_local_knowledge: bool = False,
+    include_global_knowledge: bool = False,
     min_source_relevance: float = 0.55,
+    knowledge_scope: str | None = None,
+    knowledge_root: Path = DEFAULT_CONVERSATION_KNOWLEDGE_ROOT,
     progress_callback: Callable[[str], None] | None = None,
 ) -> ChatAgentRun:
     """Run chat and retain only the safe Tool metadata needed by orchestration."""
+    effective_settings = settings or SmolagentsModelSettings.from_env()
+    budget = TokenBudgetManager(
+        context_window=effective_settings.context_window_tokens,
+        output_reserve=effective_settings.max_tokens,
+    )
     tools: list[Any] = []
+    if include_global_knowledge and not enable_local_knowledge:
+        raise ValueError("Global knowledge requires local knowledge permission.")
     if enable_web_search:
         tools.append(build_tavily_search_tool(progress_callback=progress_callback))
     if enable_local_knowledge:
+        if not knowledge_scope:
+            raise ValueError("knowledge_scope is required when local knowledge is enabled")
         tools.extend(
             build_local_knowledge_tools(
+                knowledge_scope,
                 progress_callback=progress_callback,
                 min_source_relevance=min_source_relevance,
+                knowledge_root=knowledge_root,
+                include_global_knowledge=include_global_knowledge,
+                budget_manager=budget,
             )
         )
-    agent = build_smolagents_tool_calling_agent(settings=settings, tools=tools)
+    agent = build_smolagents_tool_calling_agent(settings=effective_settings, tools=tools)
     prompt = format_agent_chat_prompt(
         history=history,
         user_message=user_message,
         enable_web_search=enable_web_search,
         enable_local_knowledge=enable_local_knowledge,
+        include_global_knowledge=include_global_knowledge,
+        history_max_tokens=budget.history_budget,
     )
     if progress_callback is not None:
         progress_callback("planning")
     # 原因：部分模型会忽略提示并重复调用已经成功的检索 Tool，直到耗尽较大的步数上限。
     # 作用：单类检索只允许一次调用加一次收尾；两类检索最多各调用一次再收尾。
-    max_steps = 3 if enable_web_search and enable_local_knowledge else 2
+    max_steps = (
+        2
+        + int(enable_web_search and enable_local_knowledge)
+        + int(include_global_knowledge)
+    )
     run_max_steps = max_steps if tools else 2
     run_result = agent.run(
         prompt,
@@ -335,7 +423,29 @@ def run_agent_chat_turn_with_debug(
     observations = _extract_agent_observations(steps)
     final_answer = _extract_final_answer(answer)
 
-    local_tool_used = bool({"rag_search", "graph_search"}.intersection(tool_calls))
+    local_tool_used = bool(_LOCAL_KNOWLEDGE_TOOLS.intersection(tool_calls))
+    if (
+        enable_local_knowledge
+        and not enable_web_search
+        and (
+            not local_tool_used
+            or not _has_usable_knowledge_evidence(observations)
+        )
+    ):
+        # 原因：知识专用请求在零命中后交给无工具 finalizer，会退化成模型常识回答。
+        # 作用：保留原始 Tool 审计信息，但明确返回失败且不再进行任何开放式生成。
+        if progress_callback is not None:
+            progress_callback("completed")
+        error = "No relevant local knowledge evidence was found for this request."
+        return ChatAgentRun(
+            answer=_no_knowledge_evidence_answer(user_message),
+            tool_calls=tuple(dict.fromkeys(tool_calls)),
+            observations=tuple(dict.fromkeys(observations)),
+            state=state,
+            debug_runs=tuple(debug_runs),
+            success=False,
+            error=error,
+        )
     needs_refinement = (
         not final_answer
         or _looks_like_tool_observation(final_answer)
@@ -346,10 +456,14 @@ def run_agent_chat_turn_with_debug(
         evidence = "\n\n".join(observations) or final_answer or "No usable tool evidence."
         # 原因：继续复用带 Tool 的 Agent 仍可能无视提示并再次检索，造成长时间循环。
         # 作用：把已取得的 Observation 交给无工具 finalizer，只允许它生成最终自然语言答案。
-        finalizer = build_smolagents_tool_calling_agent(settings=settings, tools=[])
+        finalizer = build_smolagents_tool_calling_agent(
+            settings=effective_settings,
+            tools=[],
+        )
         retry_prompt = (
             f"Original user question:\n{user_message}\n\n"
-            f"Available tool evidence:\n{evidence[:12_000]}\n\n"
+            "Available tool evidence:\n"
+            f"{truncate_to_tokens(evidence, budget.synthesis_budget)}\n\n"
             "Answer the original user question now. Return only a complete "
             "natural-language final answer in the user's language. State the conclusion, "
             "explain the relevant relationship or evidence, and explicitly cite every "
@@ -389,6 +503,7 @@ def run_agent_chat_turn_with_debug(
         observations=tuple(dict.fromkeys(observations)),
         state=state,
         debug_runs=tuple(debug_runs),
+        success=True,
     )
 
 
@@ -397,6 +512,8 @@ def format_agent_chat_prompt(
     user_message: str,
     enable_web_search: bool,
     enable_local_knowledge: bool = False,
+    include_global_knowledge: bool = False,
+    history_max_tokens: int = 1024,
 ) -> str:
     """Build a single task prompt for smolagents Agent chat."""
     lines = [
@@ -439,12 +556,25 @@ def format_agent_chat_prompt(
         # 原因：语义检索和图路径检索解决不同问题，模型需要明确的工具选择边界。
         # 作用：内容问题使用 rag_search，实体关系问题使用 graph_search，并在检索后总结。
         lines.append(
-            "Previously uploaded local knowledge is available. Use rag_search for semantic "
-            "document evidence. Use graph_search for named-entity relationships, cross-document "
-            "links, or multi-hop paths. Do not call both unless both evidence types are necessary. "
+            "Local knowledge uploaded in this conversation is available. Use rag_search for "
+            "semantic document evidence. Use graph_search for named-entity relationships, "
+            "cross-document links, or multi-hop paths. Do not call both unless both evidence "
+            "types are necessary. "
             "After a successful Observation, synthesize it into the final answer and cite the "
-            "available local source names or pages; never expose raw Observation text."
+            "available local source names or pages; never expose raw Observation text. If the "
+            "knowledge tools return no relevant evidence, do not answer from general knowledge."
         )
+        if include_global_knowledge:
+            lines.append(
+                "The user explicitly allowed global knowledge for this turn. Use "
+                "global_rag_search or global_graph_search only when the current conversation "
+                "does not contain enough evidence, and clearly preserve global source citations."
+            )
+        else:
+            lines.append(
+                "Global knowledge is not authorized. Never claim to use files from other "
+                "conversations or call a global knowledge tool."
+            )
     else:
         lines.append(
             "Local knowledge access is disabled. Chat cannot access previously uploaded files or "
@@ -454,7 +584,10 @@ def format_agent_chat_prompt(
 
     if history:
         lines.append("\nRECENT CONVERSATION:")
-        for message in _bounded_chat_history(history):
+        for message in _bounded_chat_history(
+            history,
+            max_tokens=history_max_tokens,
+        ):
             role = message.get("role")
             content = message.get("content")
             if role in {"user", "assistant"} and content:
@@ -472,10 +605,39 @@ def format_agent_chat_prompt(
     return "\n".join(lines)
 
 
-def _bounded_chat_history(history: list[ChatMessage]) -> list[ChatMessage]:
+def _has_usable_knowledge_evidence(observations: list[str]) -> bool:
+    """Distinguish source-bearing Tool evidence from explicit empty/error observations."""
+    for observation in observations:
+        normalized = " ".join(observation.casefold().split())
+        if normalized and not any(
+            marker in normalized for marker in _NO_KNOWLEDGE_EVIDENCE_MARKERS
+        ):
+            return True
+    return False
+
+
+def _no_knowledge_evidence_answer(user_message: str) -> str:
+    """Return a deterministic refusal without asking an LLM to fill the evidence gap."""
+    if any("\u3400" <= character <= "\u9fff" for character in user_message):
+        return (
+            "当前会话的本地知识中没有检索到足够的相关证据，因此我没有使用常识补全答案。"
+            "请确认文件已上传到当前会话，或降低相关性阈值后重试。"
+        )
+    return (
+        "I could not find enough relevant evidence in this conversation's local knowledge, "
+        "so I did not fill the gap with general knowledge. Confirm that the files were uploaded "
+        "to this conversation or retry with a lower relevance threshold."
+    )
+
+
+def _bounded_chat_history(
+    history: list[ChatMessage],
+    *,
+    max_tokens: int,
+) -> list[ChatMessage]:
     """Keep recent chat context inside a predictable token budget."""
     selected: list[ChatMessage] = []
-    remaining_tokens = CHAT_HISTORY_MAX_TOKENS
+    remaining_tokens = max(0, max_tokens)
 
     for message in reversed(history[-CHAT_HISTORY_MAX_MESSAGES:]):
         role = message.get("role")

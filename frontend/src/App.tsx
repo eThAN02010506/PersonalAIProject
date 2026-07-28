@@ -1,4 +1,14 @@
-import { FileSearch, Menu, MessageCircle, Network, Search, SlidersHorizontal, Wrench, X } from "lucide-react";
+import {
+  FileSearch,
+  Globe2,
+  Menu,
+  MessageCircle,
+  Network,
+  Search,
+  SlidersHorizontal,
+  Wrench,
+  X,
+} from "lucide-react";
 import { lazy, Suspense, useCallback, useEffect, useState } from "react";
 
 import { AgentRuntimeProvider } from "./components/AgentRuntimeProvider";
@@ -36,6 +46,7 @@ export default function App() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [webSearch, setWebSearch] = useState(false);
   const [localKnowledge, setLocalKnowledge] = useState(false);
+  const [globalKnowledge, setGlobalKnowledge] = useState(false);
   const [minSourceRelevance, setMinSourceRelevance] = useState(0.55);
   const [showProcess, setShowProcess] = useState(false);
   const [isRunning, setIsRunning] = useState(false);
@@ -94,6 +105,7 @@ export default function App() {
       setActiveId(conversation.id);
       setMessages([]);
       setMode("chat");
+      setGlobalKnowledge(false);
       setSidebarOpen(false);
       setRunView(null);
       setError(null);
@@ -148,6 +160,7 @@ export default function App() {
         const started = await api.startRun(conversationId, content, {
           enableWebSearch: webSearch,
           enableLocalKnowledge: localKnowledge,
+          includeGlobalKnowledge: globalKnowledge,
           minSourceRelevance,
         });
         setRunId(started.run_id);
@@ -169,7 +182,16 @@ export default function App() {
         setRunId(null);
       }
     },
-    [activeId, isRunning, loadMessages, localKnowledge, minSourceRelevance, refreshConversations, webSearch],
+    [
+      activeId,
+      globalKnowledge,
+      isRunning,
+      loadMessages,
+      localKnowledge,
+      minSourceRelevance,
+      refreshConversations,
+      webSearch,
+    ],
   );
 
   const cancelRun = useCallback(async () => {
@@ -193,6 +215,7 @@ export default function App() {
         onSelect={(id) => {
           setActiveId(id);
           setMode("chat");
+          setGlobalKnowledge(false);
           setSidebarOpen(false);
           setRunView(null);
         }}
@@ -228,9 +251,21 @@ export default function App() {
                 <input
                   type="checkbox"
                   checked={localKnowledge}
-                  onChange={(event) => setLocalKnowledge(event.target.checked)}
+                  onChange={(event) => {
+                    setLocalKnowledge(event.target.checked);
+                    if (!event.target.checked) setGlobalKnowledge(false);
+                  }}
                 />
                 <Network size={15} /> Knowledge
+              </label>
+              <label title="Allow knowledge uploaded outside this conversation">
+                <input
+                  type="checkbox"
+                  checked={globalKnowledge}
+                  disabled={!localKnowledge}
+                  onChange={(event) => setGlobalKnowledge(event.target.checked)}
+                />
+                <Globe2 size={15} /> Global
               </label>
               <label title="Show Agent execution trace">
                 <input
@@ -291,7 +326,11 @@ export default function App() {
           </section>
         ) : (
           <Suspense fallback={<div className="workspace-loading">Loading documents...</div>}>
-            <DocumentWorkspace minSourceRelevance={minSourceRelevance} />
+            <DocumentWorkspace
+              key={activeId ?? "empty"}
+              conversationId={activeId}
+              minSourceRelevance={minSourceRelevance}
+            />
           </Suspense>
         )}
       </main>

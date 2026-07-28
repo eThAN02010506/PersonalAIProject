@@ -53,7 +53,7 @@ class SmolagentsToolsTests(unittest.TestCase):
 
         with (
             patch.dict(sys.modules, {"smolagents": fake_module}),
-            patch("qwopus_agent.integrations.smolagents_tools.urllib.request.urlopen") as urlopen,
+            patch("qwopus_agent.integrations.tavily.urllib.request.urlopen") as urlopen,
         ):
             urlopen.return_value.__enter__.return_value.read.return_value = json.dumps(
                 payload
@@ -82,7 +82,7 @@ class SmolagentsToolsTests(unittest.TestCase):
         with (
             patch.dict(sys.modules, {"smolagents": fake_module}),
             patch(
-                "qwopus_agent.integrations.smolagents_tools._resolve_tavily_api_key",
+                "qwopus_agent.integrations.tavily.resolve_tavily_api_key",
                 return_value="",
             ),
         ):
@@ -136,7 +136,10 @@ class SmolagentsToolsTests(unittest.TestCase):
         fake_module = types.SimpleNamespace(Tool=FakeTool)
 
         with patch.dict(sys.modules, {"smolagents": fake_module}):
-            tool = build_excel_schema_tool({"sales.xlsx": "schema and samples"}, max_chars=6)
+            tool = build_excel_schema_tool(
+                {"sales.xlsx": "schema and samples"},
+                max_tokens=2,
+            )
 
         self.assertTrue(tool.forward("sales.xlsx").startswith("schema"))
         self.assertIn("truncated", tool.forward("sales.xlsx"))
@@ -175,6 +178,22 @@ class SmolagentsToolsTests(unittest.TestCase):
 
         self.assertIn("MiniRAG Result 1", result)
         self.assertIn("local project knowledge", result)
+
+    def test_minirag_tool_can_expose_a_distinct_global_scope_name(self) -> None:
+        fake_module = types.SimpleNamespace(Tool=FakeTool)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            minirag = make_test_minirag(Path(tmpdir) / "global.jsonl")
+            with patch.dict(sys.modules, {"smolagents": fake_module}):
+                tool = build_minirag_search_tool(
+                    minirag,
+                    tool_name="global_rag_search",
+                    description="Search explicitly authorized global knowledge.",
+                )
+
+        # 原因：私有与全局 Tool 共用名称会造成 smolagents 注册冲突和不可审计调用。
+        # 作用：确保适配器可以保留同一 Skill 实现，同时对 Agent 暴露不同权限范围。
+        self.assertEqual(tool.name, "global_rag_search")
+        self.assertIn("authorized global", tool.description)
 
     def test_graph_tool_returns_directed_path_and_source_evidence(self) -> None:
         fake_module = types.SimpleNamespace(Tool=FakeTool)

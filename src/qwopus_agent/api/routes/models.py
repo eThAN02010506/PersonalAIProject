@@ -12,6 +12,7 @@ from qwopus_agent.api.model_runtime import (
     RuntimeModelStatus,
 )
 from qwopus_agent.api.models import ModelSettingsUpdate, ModelSettingsView
+from qwopus_agent.llm import ModelCapabilities
 
 
 def build_model_router(runtime: RuntimeModelController) -> APIRouter:
@@ -28,15 +29,29 @@ def build_model_router(runtime: RuntimeModelController) -> APIRouter:
 
     @router.put("/api/model-settings", response_model=ModelSettingsView)
     async def update_model_settings(payload: ModelSettingsUpdate) -> ModelSettingsView:
+        capabilities = ModelCapabilities(
+            context_window_tokens=payload.context_window_tokens,
+            agent_mode=payload.agent_mode,
+            supports_structured_output=payload.supports_structured_output,
+            supports_vision=payload.supports_vision,
+        )
         try:
             if payload.mode == "remote":
                 if not payload.base_url:
                     raise ModelRuntimeError("Model address is required for remote mode.")
-                status = await asyncio.to_thread(runtime.configure_remote, payload.base_url)
+                status = await asyncio.to_thread(
+                    runtime.configure_remote,
+                    payload.base_url,
+                    capabilities,
+                )
             else:
                 if not payload.model_path:
                     raise ModelRuntimeError("Model path is required for local mode.")
-                status = await asyncio.to_thread(runtime.configure_local, payload.model_path)
+                status = await asyncio.to_thread(
+                    runtime.configure_local,
+                    payload.model_path,
+                    capabilities,
+                )
         except ModelRuntimeError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return _model_settings_view(status)
@@ -52,4 +67,10 @@ def _model_settings_view(status: RuntimeModelStatus) -> ModelSettingsView:
         model=status.settings.model_id,
         base_url=status.settings.base_url,
         local_model_path=status.local_model_path,
+        context_window_tokens=status.settings.capabilities.context_window_tokens,
+        agent_mode=status.settings.capabilities.agent_mode,
+        supports_structured_output=(
+            status.settings.capabilities.supports_structured_output
+        ),
+        supports_vision=status.settings.capabilities.supports_vision,
     )

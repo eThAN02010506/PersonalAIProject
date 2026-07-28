@@ -6,7 +6,12 @@ import argparse
 import asyncio
 from pathlib import Path
 
-from qwopus_agent.agents import AgentRouter, AgentRun, Executor, Planner
+from qwopus_agent.agents import (
+    AgentRouter,
+    AgentRun,
+    SkillExecutor,
+    SkillPlanner,
+)
 from qwopus_agent.services.skill_growth_service import SkillGrowthService
 from qwopus_agent.skills import SkillRegistry
 
@@ -27,8 +32,8 @@ def build_router() -> AgentRouter:
     # 原因：CLI 是依赖装配入口，不应再维护第二套 AgentLoop/ToolRegistry 业务实现。
     # 作用：CLI、测试和未来 UI 可以共享同一 Planner → Executor → Skill 主链。
     return AgentRouter(
-        planner=Planner(skill_registry=registry),
-        executor=Executor(skill_registry=registry),
+        planner=SkillPlanner(skill_registry=registry),
+        executor=SkillExecutor(skill_registry=registry),
         observers=(growth,),
     )
 

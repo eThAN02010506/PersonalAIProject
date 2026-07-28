@@ -74,6 +74,7 @@ class AgentOrchestratorTests(unittest.TestCase):
             web = bool(kwargs["enable_web_search"])
             local = bool(kwargs["enable_local_knowledge"])
             self.assertEqual(kwargs["min_source_relevance"], 0.8)
+            self.assertEqual(bool(kwargs["include_global_knowledge"]), local)
             question = str(kwargs["user_message"])
             calls.append((web, local, question))
             if web:
@@ -98,8 +99,10 @@ class AgentOrchestratorTests(unittest.TestCase):
             AgentOrchestrator(self.settings, chat_runner=fake_chat).run(
                 OrchestrationRequest(
                     objective="Compare Company A ownership with the current web status.",
+                    conversation_id="conversation-1",
                     enable_web_search=True,
                     enable_local_knowledge=True,
+                    include_global_knowledge=True,
                     min_source_relevance=0.8,
                 )
             )
@@ -118,7 +121,7 @@ class AgentOrchestratorTests(unittest.TestCase):
         self.assertTrue(any(event.tool == "graph_search" for event in result.trace))
         self.assertEqual(len(calls), 3)
 
-    def test_one_failed_evidence_agent_does_not_cancel_synthesis(self) -> None:
+    def test_failed_evidence_is_not_misreported_as_success(self) -> None:
         def fake_chat(**kwargs):
             if kwargs["enable_web_search"]:
                 raise TimeoutError("web unavailable")
@@ -130,19 +133,58 @@ class AgentOrchestratorTests(unittest.TestCase):
             AgentOrchestrator(self.settings, chat_runner=fake_chat).run(
                 OrchestrationRequest(
                     objective="Compare available evidence.",
+                    conversation_id="conversation-1",
                     enable_web_search=True,
                     enable_local_knowledge=True,
                 )
             )
         )
 
-        # 原因：一个外部 provider 故障不应跳过依赖它的最终综合任务。
-        # 作用：验证降级贡献进入共享状态，其他证据仍能生成最终答案。
-        self.assertTrue(result.success)
-        self.assertIn("remaining local evidence", result.final_answer)
+        # 原因：异常文本过去沿用 success=True，导致 synthesis 和整体请求伪装成成功。
+        # 作用：保留已取得的本地证据供降级展示，但 terminal 未完成时状态必须为失败。
+        self.assertFalse(result.success)
+        self.assertIn("local evidence", result.final_answer)
         self.assertTrue(
             any(
                 event.status == "warning" and event.agent == "research_agent"
+                for event in result.trace
+            )
+        )
+        runs = {item.task_id: item for item in result.multi_agent_run.runs}
+        self.assertFalse(runs["research"].success)
+        self.assertFalse(runs["synthesis"].success)
+
+    def test_knowledge_only_no_evidence_preserves_refusal_and_failure(self) -> None:
+        def fake_chat(**_kwargs):
+            return ChatAgentRun(
+                answer=(
+                    "当前会话的本地知识中没有检索到足够的相关证据，"
+                    "因此我没有使用常识补全答案。"
+                ),
+                tool_calls=("rag_search",),
+                observations=("No relevant MiniRAG results.",),
+                state="max_steps_error",
+                success=False,
+                error="No relevant local knowledge evidence was found for this request.",
+            )
+
+        result = asyncio.run(
+            AgentOrchestrator(self.settings, chat_runner=fake_chat).run(
+                OrchestrationRequest(
+                    objective="对比我上传的两篇文章",
+                    conversation_id="conversation-1",
+                    enable_local_knowledge=True,
+                )
+            )
+        )
+
+        # 原因：安全拒答是有内容的失败结果，不能因文本非空而被整体状态判为成功。
+        # 作用：单 Agent 仲裁仍向用户展示明确说明，调用方同时收到 success=False。
+        self.assertFalse(result.success)
+        self.assertIn("没有检索到足够的相关证据", result.final_answer)
+        self.assertTrue(
+            any(
+                event.status == "failed" and event.agent == "knowledge_agent"
                 for event in result.trace
             )
         )

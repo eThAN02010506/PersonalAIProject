@@ -6,13 +6,22 @@ import type {
   DebugRecord,
   Health,
   RunView,
+  SavedDocument,
 } from "./types";
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, init);
+  const contentType = response.headers.get("content-type") ?? "";
   if (!response.ok) {
-    const payload = (await response.json().catch(() => null)) as { detail?: string } | null;
+    const payload = contentType.includes("application/json")
+      ? ((await response.json().catch(() => null)) as { detail?: string } | null)
+      : null;
     throw new Error(payload?.detail ?? `Request failed (${response.status})`);
+  }
+  if (!contentType.includes("application/json")) {
+    throw new Error(
+      `The API returned a web page for ${path}. Restart the backend so its routes match the frontend.`,
+    );
   }
   return (await response.json()) as T;
 }
@@ -30,6 +39,10 @@ export const api = {
     mode: "remote" | "local";
     base_url?: string;
     model_path?: string;
+    context_window_tokens: number;
+    agent_mode: "tool_calling" | "code";
+    supports_structured_output: boolean;
+    supports_vision: boolean;
   }) =>
     request<Health>("/api/model-settings", {
       method: "PUT",
@@ -54,12 +67,15 @@ export const api = {
   listMessages: (conversationId: string) =>
     request<ChatMessage[]>(`/api/conversations/${conversationId}/messages`),
 
+  listDocuments: () => request<SavedDocument[]>("/api/documents"),
+
   startRun: (
     conversationId: string,
     content: string,
     options: {
       enableWebSearch: boolean;
       enableLocalKnowledge: boolean;
+      includeGlobalKnowledge: boolean;
       minSourceRelevance: number;
     },
   ) =>
@@ -72,6 +88,7 @@ export const api = {
           content,
           enable_web_search: options.enableWebSearch,
           enable_local_knowledge: options.enableLocalKnowledge,
+          include_global_knowledge: options.includeGlobalKnowledge,
           min_source_relevance: options.minSourceRelevance,
         }),
       },
@@ -83,6 +100,7 @@ export const api = {
     request<RunView>(`/api/runs/${runId}`, { method: "DELETE" }),
 
   analyze: (
+    conversationId: string,
     files: File[],
     question: string,
     generateReport: boolean,
@@ -92,6 +110,9 @@ export const api = {
   ) => {
     const form = new FormData();
     for (const file of files) form.append("files", file);
+    // 原因：上传文件必须进入当前聊天的私有 MiniRAG，而不是进程级共享知识库。
+    // 作用：后端以 conversation_id 选择持久化目录，并拒绝不存在的聊天。
+    form.append("conversation_id", conversationId);
     form.append("question", question);
     form.append("generate_report", String(generateReport));
     form.append("min_source_relevance", String(minSourceRelevance));

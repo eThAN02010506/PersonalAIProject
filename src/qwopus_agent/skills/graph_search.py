@@ -4,13 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from qwopus_agent.memory.graph_backend import PersistentKnowledgeGraph
-from qwopus_agent.memory.graph_extraction import RuleBasedGraphExtractor
 from qwopus_agent.memory.graph_models import GraphPath
-from qwopus_agent.memory.knowledge_graph import (
-    DEFAULT_KNOWLEDGE_GRAPH_PATH,
-    KnowledgeGraphIndex,
-)
+from qwopus_agent.memory.knowledge_graph import KnowledgeGraphIndex
 from qwopus_agent.skills.base import BaseSkill, SkillRequest, SkillResponse
 
 
@@ -52,14 +47,9 @@ class GraphSearchSkill(BaseSkill):
 
 def create_skill() -> BaseSkill:
     """Factory discovered automatically by SkillRegistry."""
-    # 原因：新增 Skill 必须做到零手工注册，并能读取同一个持久化全局图谱。
-    # 作用：Registry 扫描本文件时直接构造可查询实例，生产环境仍可通过 override 注入。
-    return GraphSearchSkill(
-        index=KnowledgeGraphIndex(
-            graph=PersistentKnowledgeGraph(DEFAULT_KNOWLEDGE_GRAPH_PATH),
-            extractor=RuleBasedGraphExtractor(),
-        )
-    )
+    # 原因：自动发现若默认打开全局图谱，会绕过会话作用域和 UI 的 Global 授权。
+    # 作用：Registry 只发现能力名称，执行方必须显式注入当前获准的图谱实例。
+    return GraphSearchSkill()
 
 
 def _render_path(path: GraphPath, *, number: int) -> str:

@@ -19,6 +19,7 @@ from qwopus_agent.integrations.smolagents_runtime import (
     check_model_connection,
     resolve_model_settings,
 )
+from qwopus_agent.llm import ModelCapabilities
 
 LOCAL_MLX_LOG = Path("logs/local_mlx_server.log")
 
@@ -81,12 +82,20 @@ class RuntimeModelController:
                 ),
             )
 
-    def configure_remote(self, base_url: str) -> RuntimeModelStatus:
+    def configure_remote(
+        self,
+        base_url: str,
+        capabilities: ModelCapabilities | None = None,
+    ) -> RuntimeModelStatus:
         """Switch to a reachable OpenAI-compatible server."""
         normalized_url = _normalize_base_url(base_url)
         with self._configuration_lock:
             with self._state_lock:
-                candidate = replace(self._settings, base_url=normalized_url)
+                candidate = replace(
+                    self._settings,
+                    base_url=normalized_url,
+                    capabilities=capabilities or self._settings.capabilities,
+                )
             online, message = check_model_connection(candidate)
             if not online:
                 raise ModelRuntimeError(message)
@@ -101,7 +110,11 @@ class RuntimeModelController:
             self._close_local_log()
         return self.status()
 
-    def configure_local(self, model_path: str) -> RuntimeModelStatus:
+    def configure_local(
+        self,
+        model_path: str,
+        capabilities: ModelCapabilities | None = None,
+    ) -> RuntimeModelStatus:
         """Start an MLX server for a local model directory and select it."""
         path = _validate_model_path(model_path)
         executable = _find_mlx_server(path)
@@ -121,7 +134,12 @@ class RuntimeModelController:
 
             port = _available_port()
             base_url = f"http://127.0.0.1:{port}/v1"
-            candidate = replace(self._settings, model_id=path.name, base_url=base_url)
+            candidate = replace(
+                self._settings,
+                model_id=path.name,
+                base_url=base_url,
+                capabilities=capabilities or self._settings.capabilities,
+            )
             process = self._start_local_process(executable, path, port)
             try:
                 _wait_for_server(

@@ -1,6 +1,11 @@
 """Planner, Executor, and Router for the production Agent architecture."""
 
-from qwopus_agent.agents.executor import ExecutionResult, Executor, StepExecution
+from qwopus_agent.agents.executor import (
+    ExecutionResult,
+    Executor,
+    SkillExecutor,
+    StepExecution,
+)
 from qwopus_agent.agents.multi_agent import (
     AgentContribution,
     AgentProfile,
@@ -18,7 +23,14 @@ from qwopus_agent.agents.multi_agent import (
     NamedAgentRun,
     SharedAgentState,
 )
-from qwopus_agent.agents.planner import Plan, Planner, PlanStep
+from qwopus_agent.agents.planner import (
+    AgentPlan,
+    AgentPlanningRequest,
+    Plan,
+    Planner,
+    PlanStep,
+    SkillPlanner,
+)
 from qwopus_agent.agents.research import ResearchAgent, ResearchRun
 from qwopus_agent.agents.router import AgentRouter, AgentRun, AgentRunObserver
 
@@ -28,6 +40,8 @@ __all__ = [
     "AgentRunObserver",
     "AgentContribution",
     "AgentProfile",
+    "AgentPlan",
+    "AgentPlanningRequest",
     "ArbitrationDecision",
     "ConsensusArbiter",
     "DebateStatement",
@@ -48,5 +62,7 @@ __all__ = [
     "ResearchAgent",
     "ResearchRun",
     "SharedAgentState",
+    "SkillExecutor",
+    "SkillPlanner",
     "StepExecution",
 ]

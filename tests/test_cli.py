@@ -1,7 +1,7 @@
 import asyncio
 import unittest
 
-from qwopus_agent.agents import AgentRouter, Executor, Planner
+from qwopus_agent.agents import AgentRouter, SkillExecutor, SkillPlanner
 from qwopus_agent.cli import build_parser, run_objective
 from qwopus_agent.skills import BaseSkill, SkillRegistry, SkillRequest, SkillResponse
 
@@ -18,7 +18,7 @@ class CLITests(unittest.TestCase):
     def test_cli_uses_production_router_and_skill_contract(self) -> None:
         registry = SkillRegistry()
         registry.register(EchoSkill())
-        router = AgentRouter(Planner(registry), Executor(registry))
+        router = AgentRouter(SkillPlanner(registry), SkillExecutor(registry))
 
         # 原因：删除旧 AgentLoop 后必须证明 CLI 通过当前异步 Router/Skill 主链执行。
         # 作用：防止未来再次引入平行的同步 Agent 或 ToolRegistry。

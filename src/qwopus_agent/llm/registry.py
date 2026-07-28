@@ -10,7 +10,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from qwopus_agent.llm.base import BaseLLM
-from qwopus_agent.llm.config import LLMConfig
+from qwopus_agent.llm.config import LLMConfig, ModelSettings
 from qwopus_agent.llm.local_mlx import LocalMLXLLM
 from qwopus_agent.llm.openai_compatible import OpenAICompatibleLLM
 
@@ -41,6 +41,12 @@ class LLMRegistry:
     def list_providers(self) -> list[str]:
         """Return provider names in deterministic order."""
         return sorted(self._factories)
+
+    def create_from_settings(self, settings: ModelSettings) -> BaseLLM:
+        """Build the BaseLLM adapter from the same settings used by smolagents."""
+        # 原因：Agent runtime 与 BaseLLM 使用不同配置会在切换模型后指向不同 endpoint。
+        # 作用：统一通过 ModelSettings 转换，模型 ID、地址和凭据只有一个来源。
+        return self.create(settings.to_llm_config())
 
 
 def create_default_llm_registry() -> LLMRegistry:

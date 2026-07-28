@@ -401,7 +401,10 @@ def _build_analysis_tools(
     if document_structures:
         tools.extend(
             [
-                build_document_outline_tool(document_structures),
+                build_document_outline_tool(
+                    document_structures,
+                    budget_manager=budget_manager,
+                ),
                 build_document_search_tool(
                     minirag,
                     document_structures,
@@ -423,7 +426,10 @@ def _build_analysis_tools(
     if spreadsheet_contexts:
         tools.extend(
             [
-                build_excel_schema_tool(spreadsheet_contexts),
+                build_excel_schema_tool(
+                    spreadsheet_contexts,
+                    budget_manager=budget_manager,
+                ),
                 build_excel_analysis_tool(spreadsheet_paths),
             ]
         )
@@ -431,6 +437,7 @@ def _build_analysis_tools(
         build_minirag_search_tool(
             minirag,
             min_relevance=min_source_relevance,
+            budget_manager=budget_manager,
         )
     )
     return tools

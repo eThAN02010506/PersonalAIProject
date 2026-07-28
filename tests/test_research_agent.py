@@ -1,7 +1,12 @@
 import asyncio
 import unittest
 
-from qwopus_agent.agents import AgentRouter, Executor, Planner, ResearchAgent
+from qwopus_agent.agents import (
+    AgentRouter,
+    ResearchAgent,
+    SkillExecutor,
+    SkillPlanner,
+)
 from qwopus_agent.skills import BaseSkill, SkillRegistry, SkillRequest, SkillResponse
 
 
@@ -26,8 +31,8 @@ class ResearchAgentTests(unittest.TestCase):
         registry.register(ResearchEchoSkill())
         agent = ResearchAgent(
             router=AgentRouter(
-                planner=Planner(skill_registry=registry),
-                executor=Executor(skill_registry=registry),
+                planner=SkillPlanner(skill_registry=registry),
+                executor=SkillExecutor(skill_registry=registry),
             )
         )
 

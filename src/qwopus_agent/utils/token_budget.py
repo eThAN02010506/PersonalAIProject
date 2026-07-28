@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from math import ceil
 
 _TOKEN_UNIT = re.compile(r"[\u3400-\u9fff]|[A-Za-z0-9_]+|[^\s]")
+_MAX_TOOL_OBSERVATION_TOKENS = 6000
+_MAX_SYNTHESIS_TOKENS = 12000
 
 
 def estimate_tokens(text: str) -> int:
@@ -41,17 +43,52 @@ class TokenBudgetManager:
     context_window: int = 32768
     output_reserve: int = 4096
     system_reserve: int = 4096
-    history_reserve: int = 4096
+    history_reserve: int = 1024
     safety_reserve: int = 2048
+
+    def __post_init__(self) -> None:
+        if self.context_window < 2048:
+            raise ValueError("context_window must be at least 2048 tokens")
+        if min(
+            self.output_reserve,
+            self.system_reserve,
+            self.history_reserve,
+            self.safety_reserve,
+        ) < 0:
+            raise ValueError("token reserves cannot be negative")
+
+    @property
+    def input_budget(self) -> int:
+        """Return the total prompt space after adaptive output and safety reserves."""
+        output = min(self.output_reserve, self.context_window // 2)
+        safety = min(self.safety_reserve, self.context_window // 8)
+        return max(256, self.context_window - output - safety)
+
+    @property
+    def system_budget(self) -> int:
+        """Cap system instructions when a model exposes a small context window."""
+        return min(self.system_reserve, max(128, self.input_budget // 3))
+
+    @property
+    def history_budget(self) -> int:
+        """Allocate recent conversation context from the same model window."""
+        return min(self.history_reserve, max(128, self.input_budget // 3))
 
     @property
     def evidence_budget(self) -> int:
         # 原因：模型、Tool、历史和输出共享同一个上下文窗口，证据不能使用固定字符上限。
         # 作用：为每次运行计算稳定的剩余 token，模型窗口变化时无需修改文档工具。
-        reserved = (
-            self.output_reserve
-            + self.system_reserve
-            + self.history_reserve
-            + self.safety_reserve
+        return max(
+            256,
+            self.input_budget - self.system_budget - self.history_budget,
         )
-        return max(512, self.context_window - reserved)
+
+    @property
+    def observation_budget(self) -> int:
+        """Bound one Tool result so later calls and the final answer still fit."""
+        return min(_MAX_TOOL_OBSERVATION_TOKENS, self.evidence_budget)
+
+    @property
+    def synthesis_budget(self) -> int:
+        """Bound combined Agent evidence without using character-count slices."""
+        return min(_MAX_SYNTHESIS_TOKENS, self.evidence_budget)

@@ -48,6 +48,16 @@ export type DocumentOutline = {
   sections: DocumentSection[];
 };
 
+export type SavedDocument = {
+  document_id: string;
+  source: string;
+  file_type: string;
+  size_bytes: number;
+  section_count: number;
+  saved_at: string;
+  summary_available: boolean;
+};
+
 export type Health = {
   status: string;
   mode: "remote" | "local";
@@ -56,6 +66,10 @@ export type Health = {
   model: string;
   base_url: string;
   local_model_path?: string;
+  context_window_tokens: number;
+  agent_mode: "tool_calling" | "code";
+  supports_structured_output: boolean;
+  supports_vision: boolean;
 };
 
 export type DebugAgentRun = {

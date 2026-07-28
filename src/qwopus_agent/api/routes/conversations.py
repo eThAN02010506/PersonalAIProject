@@ -16,16 +16,18 @@ from qwopus_agent.api.models import (
 )
 from qwopus_agent.api.repository import ConversationRepository
 from qwopus_agent.api.runs import ChatRunRegistry
+from qwopus_agent.memory import ConversationKnowledgeManager
 
 
 def build_conversation_router(
     repository: ConversationRepository,
     runs: ChatRunRegistry,
     runtime: RuntimeModelController,
+    knowledge: ConversationKnowledgeManager,
 ) -> APIRouter:
     """Build routes around one injected conversation repository and run registry."""
     router = APIRouter()
-    endpoints = _ConversationEndpoints(repository, runs, runtime)
+    endpoints = _ConversationEndpoints(repository, runs, runtime, knowledge)
     router.add_api_route(
         "/api/conversations",
         endpoints.conversations,
@@ -86,10 +88,12 @@ class _ConversationEndpoints:
         repository: ConversationRepository,
         runs: ChatRunRegistry,
         runtime: RuntimeModelController,
+        knowledge: ConversationKnowledgeManager,
     ) -> None:
         self.repository = repository
         self.runs = runs
         self.runtime = runtime
+        self.knowledge = knowledge
 
     def conversations(self) -> list[ConversationView]:
         return [
@@ -113,8 +117,12 @@ class _ConversationEndpoints:
         return ConversationView.model_validate(record)
 
     def delete_conversation(self, conversation_id: str) -> None:
-        if not self.repository.delete_conversation(conversation_id):
+        if self.repository.get_conversation(conversation_id) is None:
             raise HTTPException(status_code=404, detail="Conversation not found.")
+        # 原因：会话记录删除后，其私有向量与图谱目录不应变成不可见的孤立数据。
+        # 作用：显式删除聊天时同步清理该 conversation_id 的知识库，不影响其他聊天。
+        self.knowledge.delete(conversation_id)
+        self.repository.delete_conversation(conversation_id)
 
     def messages(self, conversation_id: str) -> list[MessageView]:
         if self.repository.get_conversation(conversation_id) is None:
@@ -143,6 +151,7 @@ class _ConversationEndpoints:
             self.runtime.current_settings(),
             enable_web_search=payload.enable_web_search,
             enable_local_knowledge=payload.enable_local_knowledge,
+            include_global_knowledge=payload.include_global_knowledge,
             min_source_relevance=payload.min_source_relevance,
         )
         return RunStarted(run_id=run_id)

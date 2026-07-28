@@ -6,7 +6,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
 
-from qwopus_agent.agents import AgentRouter, Executor, Plan, PlanStep
+from qwopus_agent.agents import AgentRouter, Plan, PlanStep, SkillExecutor
 from qwopus_agent.services.skill_growth_service import (
     SkillGrowthPolicy,
     SkillGrowthService,
@@ -99,7 +99,7 @@ class SkillGrowthServiceTests(unittest.TestCase):
                         PlanStep("beta", "run", arguments),
                     ]
                 ),
-                executor=Executor(registry),
+                executor=SkillExecutor(registry),
                 observers=(service,),
             )
 
@@ -145,7 +145,7 @@ class SkillGrowthServiceTests(unittest.TestCase):
                 planner=StaticPlanner(
                     [PlanStep("alpha", "run"), PlanStep("beta", "run")]
                 ),
-                executor=Executor(registry),
+                executor=SkillExecutor(registry),
                 observers=(service,),
             )
 
@@ -168,7 +168,7 @@ class SkillGrowthServiceTests(unittest.TestCase):
                             PlanStep("beta", "run", arguments),
                         ]
                     ),
-                    executor=Executor(registry),
+                    executor=SkillExecutor(registry),
                     observers=(service,),
                 )
                 await router.run("version workflow")
@@ -192,7 +192,7 @@ class SkillGrowthServiceTests(unittest.TestCase):
                 planner=StaticPlanner(
                     [PlanStep("alpha", "run"), PlanStep("beta", "run")]
                 ),
-                executor=Executor(registry),
+                executor=SkillExecutor(registry),
                 observers=(service,),
             )
             asyncio.run(router.run("deploy workflow"))
@@ -221,7 +221,7 @@ class SkillGrowthServiceTests(unittest.TestCase):
             registry, _, service, _, _ = self._components(root, min_successes=1)
             router = AgentRouter(
                 planner=StaticPlanner([PlanStep("alpha", "run")]),
-                executor=Executor(registry),
+                executor=SkillExecutor(registry),
                 observers=(service,),
             )
             asyncio.run(router.run("deploy one step"))
@@ -244,7 +244,7 @@ class SkillGrowthServiceTests(unittest.TestCase):
         registry.register(RecordingSkill("alpha"))
         router = AgentRouter(
             planner=StaticPlanner([PlanStep("alpha", "run")]),
-            executor=Executor(registry),
+            executor=SkillExecutor(registry),
             observers=(BrokenObserver(),),
         )
 

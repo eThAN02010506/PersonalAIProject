@@ -1,7 +1,7 @@
-"""Executor Agent.
+"""Executors for production Agent DAGs and direct Skill plans.
 
-Executor is responsible only for running a previously created plan. It does not decide what should
-be done; it only resolves skills and executes the steps in order.
+Executor runs a previously created Agent plan through Supervisor. SkillExecutor retains the
+lightweight sequential Skill workflow and never decides what should be done.
 """
 
 from __future__ import annotations
@@ -9,7 +9,13 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from qwopus_agent.agents.planner import Plan
+from qwopus_agent.agents.multi_agent import (
+    AgentProfile,
+    MultiAgentRun,
+    MultiAgentSupervisor,
+    RunnableAgent,
+)
+from qwopus_agent.agents.planner import AgentPlan, Plan
 from qwopus_agent.skills import SkillRegistry, SkillRequest, SkillResponse
 
 
@@ -39,8 +45,8 @@ class ExecutionResult:
 
 
 @dataclass
-class Executor:
-    """Executes plan steps through registered skills."""
+class SkillExecutor:
+    """Execute direct Skill plan steps through the Registry."""
 
     # Reason: Dependency injection allows tests to provide fake skills while production can
     # auto-discover its real skills.
@@ -80,4 +86,41 @@ class Executor:
             success=True,
             steps=executed_steps,
             content="\n".join(contents),
+        )
+
+
+@dataclass
+class Executor:
+    """Execute a planned Agent DAG without making routing decisions."""
+
+    max_parallel: int = 3
+    debate_rounds: int = 0
+
+    async def execute(
+        self,
+        plan: AgentPlan,
+        *,
+        agents: dict[str, RunnableAgent],
+        profiles: dict[str, AgentProfile],
+        context: dict[str, Any] | None = None,
+    ) -> MultiAgentRun:
+        """Run exactly the tasks and dependencies supplied by Planner."""
+        task_ids = {task.task_id for task in plan.delegation.tasks}
+        if plan.terminal_task_id not in task_ids:
+            raise ValueError(
+                f"Agent plan terminal task is missing: {plan.terminal_task_id}"
+            )
+        supervisor = MultiAgentSupervisor(
+            agents=agents,
+            profiles=profiles,
+            max_parallel=self.max_parallel,
+            debate_rounds=self.debate_rounds,
+        )
+        execution_context = dict(context or {})
+        # 原因：Supervisor 的默认 delegator 不应重新解释已经验证过的 Planner 输出。
+        # 作用：把类型化 DAG 作为唯一执行依据，Executor 只调度而不增删任务。
+        execution_context["delegation_plan"] = plan.delegation
+        return await supervisor.run(
+            plan.delegation.objective,
+            context=execution_context,
         )

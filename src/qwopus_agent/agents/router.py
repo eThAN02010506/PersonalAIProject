@@ -9,8 +9,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
-from qwopus_agent.agents.executor import ExecutionResult, Executor
-from qwopus_agent.agents.planner import Plan, Planner
+from qwopus_agent.agents.executor import ExecutionResult, SkillExecutor
+from qwopus_agent.agents.planner import Plan, SkillPlanner
 
 
 @dataclass(frozen=True)
@@ -41,11 +41,11 @@ class AgentRunObserver(Protocol):
 
 @dataclass
 class AgentRouter:
-    """Coordinates planning followed by execution."""
+    """Compatibility router for direct Skill workflows."""
 
     # Reason: Router depends on abstractions so CLI/UI does not contain business logic.
-    planner: Planner
-    executor: Executor
+    planner: SkillPlanner
+    executor: SkillExecutor
 
     # Reason: Reflection and growth are post-run concerns and must remain injectable.
     # Role: Observers receive the complete trace after Planner and Executor finish.

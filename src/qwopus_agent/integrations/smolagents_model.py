@@ -3,45 +3,20 @@
 from __future__ import annotations
 
 import json
-import os
 import urllib.error
 import urllib.request
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from typing import Any
 
 from dotenv import load_dotenv
 
+from qwopus_agent.llm import ModelCapabilities, ModelSettings
+
 load_dotenv()
 
-
-@dataclass(frozen=True)
-class SmolagentsModelSettings:
-    """Configuration for an arbitrary OpenAI-compatible model server."""
-
-    model_id: str
-    base_url: str
-    api_key: str = "sk-optiq-local"
-    timeout_seconds: int = 120
-    temperature: float = 0.2
-    max_tokens: int = 1024
-    context_window_tokens: int = 32768
-
-    @classmethod
-    def from_env(cls) -> SmolagentsModelSettings:
-        return cls(
-            model_id=os.getenv(
-                "QWOPUS_MLX_MODEL",
-                "gemma-4-12B-it-qat-OptiQ-4bit",
-            ),
-            base_url=os.getenv("QWOPUS_MLX_BASE_URL", "http://127.0.0.1:8080/v1"),
-            api_key=os.getenv("QWOPUS_SMOLAGENTS_API_KEY", "sk-optiq-local"),
-            timeout_seconds=int(os.getenv("QWOPUS_SMOLAGENTS_TIMEOUT_SECONDS", "120")),
-            temperature=float(os.getenv("QWOPUS_SMOLAGENTS_TEMPERATURE", "0.2")),
-            max_tokens=int(os.getenv("QWOPUS_SMOLAGENTS_MAX_TOKENS", "1024")),
-            context_window_tokens=int(
-                os.getenv("QWOPUS_SMOLAGENTS_CONTEXT_WINDOW_TOKENS", "32768")
-            ),
-        )
+# 原因：旧名称曾被 API、测试和插件引用，直接删除会造成不必要的导入破坏。
+# 作用：保留兼容名称，但真实配置类型只在 llm.config 中维护一份。
+SmolagentsModelSettings = ModelSettings
 
 
 def resolve_model_settings(
@@ -54,13 +29,17 @@ def resolve_model_settings(
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError):
         return settings
 
-    model_id = _extract_server_model_id(payload) if 200 <= status < 300 else None
+    model_entry = _extract_server_model_entry(payload) if 200 <= status < 300 else None
+    if model_entry is None:
+        return settings
+    model_id = _extract_server_model_id(payload)
     if not model_id:
         return settings
 
-    # 原因：服务器加载的模型会变化，环境变量中的静态名称可能已经过期。
-    # 作用：每次请求模型列表后使用实时 id，同时保留其他连接参数不变。
-    return replace(settings, model_id=model_id)
+    capabilities = _capabilities_from_server(model_entry, settings.capabilities)
+    # 原因：服务器加载的模型和上下文能力都可能在不重启 Qwopus 时变化。
+    # 作用：每次请求模型列表后刷新可发现字段，用户显式配置的其余能力保持不变。
+    return replace(settings, model_id=model_id, capabilities=capabilities)
 
 
 def check_model_connection(
@@ -95,19 +74,53 @@ def _request_models(settings: SmolagentsModelSettings) -> tuple[int, dict[str, A
 
 def _extract_server_model_id(payload: dict[str, Any]) -> str | None:
     """Read a model id from common OpenAI-compatible response shapes."""
-    data = payload.get("data")
-    if isinstance(data, list) and data and isinstance(data[0], dict):
-        model_id = data[0].get("id")
+    entry = _extract_server_model_entry(payload)
+    if entry is not None:
+        model_id = entry.get("id")
         if isinstance(model_id, str) and model_id:
             return model_id
 
-    models = payload.get("models")
-    if isinstance(models, list) and models and isinstance(models[0], dict):
+        # 原因：部分兼容服务器返回 models[].model 或 models[].name，而不是 id。
+        # 作用：模型实时发现不绑定某一种服务端响应形状。
         for key in ("model", "name"):
-            model_id = models[0].get(key)
+            model_id = entry.get(key)
             if isinstance(model_id, str) and model_id:
                 return model_id
     return None
+
+
+def _extract_server_model_entry(payload: dict[str, Any]) -> dict[str, Any] | None:
+    for key in ("data", "models"):
+        items = payload.get(key)
+        if isinstance(items, list) and items and isinstance(items[0], dict):
+            return items[0]
+    return None
+
+
+def _capabilities_from_server(
+    entry: dict[str, Any],
+    fallback: ModelCapabilities,
+) -> ModelCapabilities:
+    """Read optional non-standard capability metadata conservatively."""
+    context_window = next(
+        (
+            int(entry[key])
+            for key in ("context_window", "context_length", "max_model_len")
+            if isinstance(entry.get(key), (int, float)) and int(entry[key]) >= 2048
+        ),
+        fallback.context_window_tokens,
+    )
+    return replace(
+        fallback,
+        context_window_tokens=context_window,
+        supports_vision=bool(entry.get("supports_vision", fallback.supports_vision)),
+        supports_structured_output=bool(
+            entry.get(
+                "supports_structured_output",
+                fallback.supports_structured_output,
+            )
+        ),
+    )
 
 
 def _display_model_name(model_id: str) -> str:
