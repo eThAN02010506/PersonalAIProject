@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pandas as pd
+from openpyxl import Workbook
 
 from qwopus_agent.documents import (
     build_document_structure,
@@ -346,6 +347,32 @@ class SmolagentsToolsTests(unittest.TestCase):
 
         self.assertIn("East", result)
         self.assertIn("40", result)
+
+    def test_excel_analysis_tool_exposes_secondary_table_regions(self) -> None:
+        fake_module = types.SimpleNamespace(Tool=FakeTool)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "multiple.xlsx"
+            workbook = Workbook()
+            sheet = workbook.active
+            sheet.title = "Data"
+            sheet.append(["region", "revenue"])
+            sheet.append(["East", 10])
+            sheet.append([])
+            sheet.append(["team", "tickets"])
+            sheet.append(["Alpha", 7])
+            workbook.save(path)
+
+            with patch.dict(sys.modules, {"smolagents": fake_module}):
+                tool = build_excel_analysis_tool({"multiple.xlsx": path})
+
+            # 原因：现实工作簿常在同一工作表纵向放置多张表，主表之外的数据也必须可计算。
+            # 作用：锁定 schema 所展示的 Sheet::table_N 名称在 pandas 沙箱中确实可访问。
+            result = tool.forward(
+                "multiple.xlsx",
+                'df = dfs["Data::table_2"]\nresult = df["tickets"].sum()',
+            )
+
+        self.assertEqual(result, "7")
 
     def test_minirag_tool_returns_bounded_search_results(self) -> None:
         fake_module = types.SimpleNamespace(Tool=FakeTool)

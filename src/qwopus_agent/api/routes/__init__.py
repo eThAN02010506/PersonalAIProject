@@ -7,6 +7,7 @@ from qwopus_agent.api.routes.documents import build_document_router
 from qwopus_agent.api.routes.local_folders import build_local_folder_router
 from qwopus_agent.api.routes.models import build_model_router
 from qwopus_agent.api.routes.reports import build_report_router
+from qwopus_agent.api.routes.skills import build_skill_router
 
 __all__ = [
     "build_analysis_router",
@@ -16,4 +17,5 @@ __all__ = [
     "build_local_folder_router",
     "build_model_router",
     "build_report_router",
+    "build_skill_router",
 ]

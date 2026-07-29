@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 from qwopus_agent.integrations.smolagents_runtime import (
     SmolagentsModelSettings,
+    _build_answer_quality_checks,
     build_chat_messages,
     build_local_knowledge_tools,
     build_smolagents_code_agent,
@@ -22,6 +23,8 @@ from qwopus_agent.integrations.smolagents_runtime import (
     run_smolagents_chat_turn,
     run_smolagents_file_analysis_with_debug,
 )
+from qwopus_agent.services.orchestration_models import AnswerContract
+from qwopus_agent.skills import WorkflowSpec
 
 
 class FakeOpenAIModel:
@@ -49,6 +52,10 @@ class FakeCodeAgent:
 
     def run(self, prompt):
         return f"ok: {prompt}"
+
+
+class FakeTool:
+    """Minimal smolagents Tool base used by request-scoped Skill adapters."""
 
 
 class FakeToolCallingAgent:
@@ -134,6 +141,7 @@ class SmolagentsRuntimeTests(unittest.TestCase):
         fake_module = types.ModuleType("smolagents")
         fake_module.OpenAIModel = FakeOpenAIModel
         fake_module.CodeAgent = FakeCodeAgent
+        fake_module.Tool = FakeTool
         fake_module.ToolCallingAgent = FakeToolCallingAgent
         sys.modules["smolagents"] = fake_module
 
@@ -184,6 +192,39 @@ class SmolagentsRuntimeTests(unittest.TestCase):
         self.assertEqual(agent.tools, tools)
         self.assertIs(agent.model, FakeOpenAIModel.last_instance)
 
+    def test_complex_answer_contract_uses_native_final_answer_check(self) -> None:
+        contract = AnswerContract(
+            task_type="analyze",
+            complexity="complex",
+            response_detail="detailed",
+            required_facets=("findings", "evidence", "limitations"),
+        )
+        checks = _build_answer_quality_checks(contract)
+
+        self.assertEqual(len(checks), 1)
+        self.assertFalse(checks[0]("结论可行。", None, agent=None))
+        detailed = (
+            "## 主要发现\n\n当前结构把规划、执行和持久化职责分开，"
+            "因此组件可以独立测试，模型替换也不会改变业务接口。"
+            "依赖注入让测试能够替换模型、知识库和外部搜索实现。\n\n"
+            "## 证据与影响\n\n运行入口只依赖统一请求对象，后台任务使用版本化消息，"
+            "失败状态不会覆盖最后一个成功任务。这个设计降低了跨进程状态漂移风险，"
+            "也使 Debug 记录能够关联到真实请求。\n\n"
+            "## 风险与限制\n\n仍需验证并发完成顺序、模型断线恢复和持久化迁移。"
+            "对高风险工具还应增加权限校验与人工确认，避免文档中的指令改变工具行为。"
+            "完成这些验证后，方案才适合进入稳定部署。"
+        )
+        self.assertTrue(checks[0](detailed, None, agent=None))
+
+        agent = build_smolagents_tool_calling_agent(
+            settings=SmolagentsModelSettings(
+                model_id="any-model",
+                base_url="http://127.0.0.1:8080/v1",
+            ),
+            final_answer_checks=checks,
+        )
+        self.assertEqual(agent.kwargs["final_answer_checks"], checks)
+
     def test_run_agent_chat_turn_uses_smolagents_driver_without_web_tool(self) -> None:
         settings = SmolagentsModelSettings(
             model_id="any-model",
@@ -200,6 +241,64 @@ class SmolagentsRuntimeTests(unittest.TestCase):
         self.assertIn("agent reply:", result)
         self.assertEqual(FakeToolCallingAgent.last_instance.tools, [])
         self.assertIn("Internet search is disabled", FakeToolCallingAgent.last_instance.prompt)
+
+    def test_promoted_workflow_is_injected_only_with_its_authorized_tool(self) -> None:
+        class RuntimeSearchTool:
+            name = "tavily_search"
+            description = "Search current sources."
+
+            def forward(self, query: str) -> str:
+                return f"current evidence for {query}"
+
+        workflow = WorkflowSpec(
+            name="learned_web_search",
+            version="0.1.0",
+            description="Validated recurring web research.",
+            intent_examples=("research the current topic",),
+            steps=({"skill_name": "web_search"},),
+            source_signature="signature",
+        ).sealed()
+        FakeToolCallingAgent.queued_results = [
+            types.SimpleNamespace(
+                output="A complete current answer based on the retrieved source.",
+                state="success",
+                steps=[
+                    {
+                        "tool_calls": [
+                            {"function": {"name": "learned_web_search"}}
+                        ],
+                        "observations": "current evidence with https://example.com",
+                    }
+                ],
+            )
+        ]
+
+        with patch(
+            "qwopus_agent.integrations.smolagents_runtime.build_tavily_search_tool",
+            return_value=RuntimeSearchTool(),
+        ):
+            result = run_agent_chat_turn_with_debug(
+                user_message="research the current topic",
+                history=[],
+                settings=SmolagentsModelSettings(
+                    model_id="any-model",
+                    base_url="http://127.0.0.1:8080/v1",
+                ),
+                enable_web_search=True,
+                promoted_workflows=(workflow,),
+            )
+
+        tool_names = [
+            getattr(tool, "name", "")
+            for tool in FakeToolCallingAgent.last_instance.tools
+        ]
+        # 原因：人工 promote 必须改变下一次实际运行，而不只是 Catalog 状态。
+        # 作用：证明 smolagents 同时收到原始授权 Tool 和已校验的复用工作流。
+        self.assertTrue(result.success)
+        self.assertEqual(
+            tool_names,
+            ["tavily_search", "learned_web_search"],
+        )
 
     def test_local_tool_factory_opens_global_store_only_when_authorized(self) -> None:
         class FakeMemory:
@@ -737,6 +836,28 @@ class SmolagentsRuntimeTests(unittest.TestCase):
         self.assertIn("thorough, information-dense final answer", detailed)
         self.assertIn("practical steps or examples", detailed)
         self.assertIn("fixed length", detailed)
+
+    def test_format_agent_chat_prompt_separates_language_source_and_resolved_task(
+        self,
+    ) -> None:
+        prompt = format_agent_chat_prompt(
+            history=[],
+            user_message=(
+                "Previous objective: 分析上下文管理方案\n"
+                "Current instruction: 再详细一点"
+            ),
+            response_language_source="再详细一点",
+            enable_web_search=False,
+            answer_contract=AnswerContract(
+                task_type="analyze",
+                required_facets=("findings", "evidence", "limitations"),
+            ),
+        )
+
+        self.assertIn("CURRENT USER QUESTION", prompt)
+        self.assertIn("RESOLVED TASK TO EXECUTE", prompt)
+        self.assertIn("task type=analyze", prompt)
+        self.assertIn("findings, evidence, limitations", prompt)
 
     def test_format_agent_chat_prompt_bounds_history_characters(self) -> None:
         prompt = format_agent_chat_prompt(

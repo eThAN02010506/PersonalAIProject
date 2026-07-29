@@ -10,11 +10,13 @@ from qwopus_agent.analysis import AnalysisResult
 from qwopus_agent.api.app import SPAStaticFiles, create_app
 from qwopus_agent.api.model_runtime import ModelRuntimeError, RuntimeModelStatus
 from qwopus_agent.api.repository import ConversationRepository
+from qwopus_agent.api.routes.analysis import analysis_view
 from qwopus_agent.documents import DocumentStore, build_document_structure, chunk_document_structure
 from qwopus_agent.integrations.smolagents_runtime import AgentDebugRun, SmolagentsModelSettings
 from qwopus_agent.llm import ModelCapabilities
 from qwopus_agent.memory import ConversationKnowledgeManager
 from qwopus_agent.services.orchestration_models import OrchestrationResult
+from qwopus_agent.services.skill_growth_service import SkillRunTrace, SkillTraceStep
 from qwopus_agent.utils.debug_store import load_debug_records
 
 
@@ -97,6 +99,37 @@ class ApiTests(unittest.TestCase):
             404,
         )
 
+    def test_ambiguous_continuation_clarifies_without_model_service(self) -> None:
+        conversation_id = self.client.post(
+            "/api/conversations",
+            json={"title": "New chat"},
+        ).json()["id"]
+        self.model_runtime.require_online_settings.reset_mock()
+        self.model_runtime.require_online_settings.side_effect = ModelRuntimeError(
+            "offline"
+        )
+
+        started = self.client.post(
+            f"/api/conversations/{conversation_id}/runs",
+            json={
+                "content": "继续",
+                "interpretation_mode": "contextual",
+            },
+        )
+        result = self.client.get(f"/api/runs/{started.json()['run_id']}")
+        messages = self.client.get(
+            f"/api/conversations/{conversation_id}/messages"
+        ).json()
+
+        # 原因：没有上一任务时让模型猜“继续什么”既不可靠，也不应依赖模型在线。
+        # 作用：锁定意图层直接返回同语言澄清，并沿用标准 run/message 协议。
+        self.assertEqual(started.status_code, 200)
+        self.assertEqual(result.json()["status"], "completed")
+        self.assertEqual(result.json()["phase"], "clarification")
+        self.assertIn("具体任务", result.json()["answer"])
+        self.assertEqual([message["role"] for message in messages], ["user", "assistant"])
+        self.model_runtime.require_online_settings.assert_not_called()
+
     def test_deleting_conversation_cancels_its_active_runs_first(self) -> None:
         conversation_id = self.client.post(
             "/api/conversations",
@@ -134,6 +167,59 @@ class ApiTests(unittest.TestCase):
         self.assertIn("/api/model-settings", schema["paths"])
         self.assertIn("/api/reports/{filename}", schema["paths"])
         self.assertIn("/api/debug", schema["paths"])
+        self.assertIn("/api/skills", schema["paths"])
+
+    def test_skill_api_promotes_and_rolls_back_reviewed_versions(self) -> None:
+        growth = self.client.app.state.skill_growth
+        first_trace = SkillRunTrace(
+            success=True,
+            output=(
+                "A complete reusable research result with sources, context, "
+                "and a clear conclusion."
+            ),
+            steps=(SkillTraceStep("web_search"),),
+        )
+        for objective in ("research current prices", "research current schedules"):
+            growth.observe_trace(objective, first_trace)
+
+        listed = self.client.get("/api/skills")
+        promoted = self.client.post(
+            "/api/skills/learned_web_search/0.1.0/promote"
+        )
+
+        self.assertEqual(listed.status_code, 200)
+        self.assertEqual(listed.json()[0]["status"], "candidate")
+        self.assertTrue(listed.json()[0]["spec_valid"])
+        self.assertEqual(promoted.status_code, 200)
+        self.assertEqual(promoted.json()["status"], "active")
+        self.assertNotIn("spec_path", promoted.json())
+
+        second_trace = SkillRunTrace(
+            success=True,
+            output=(
+                "A complete reusable research summary with sources, context, "
+                "and a clear conclusion."
+            ),
+            steps=(SkillTraceStep("web_search", {"mode": "summary"}),),
+        )
+        for objective in ("summarize current prices", "summarize current schedules"):
+            growth.observe_trace(objective, second_trace)
+        promoted_second = self.client.post(
+            "/api/skills/learned_web_search/0.1.1/promote"
+        )
+        rolled_back = self.client.post(
+            "/api/skills/learned_web_search/0.1.0/rollback"
+        )
+
+        self.assertEqual(promoted_second.status_code, 200)
+        self.assertEqual(rolled_back.status_code, 200)
+        self.assertEqual(rolled_back.json()["version"], "0.1.0")
+        self.assertEqual(
+            self.client.app.state.skill_catalog.active(
+                "learned_web_search"
+            ).version,
+            "0.1.0",
+        )
 
     def test_spa_static_files_do_not_serve_parent_files(self) -> None:
         root = Path(self.temp_directory.name)
@@ -327,6 +413,61 @@ class ApiTests(unittest.TestCase):
             request.selected_sections[structure.document_id],
             (structure.sections[0].id,),
         )
+
+    def test_analysis_view_exposes_bounded_workbook_structure(self) -> None:
+        columns = [f"column-{index}" for index in range(45)]
+        result = OrchestrationResult(
+            success=True,
+            final_answer="Analyzed",
+            route="single_agent",
+            analysis_result=AnalysisResult(
+                markdown_summary="# Workbook",
+                metadata={
+                    "files": [
+                        {
+                            "file_name": "sales.xlsx",
+                            "metadata": {
+                                "source_type": "spreadsheet",
+                                "workbook_profile": {
+                                    "sheet_count": 1,
+                                    "formula_count": 2,
+                                    "merged_range_count": 1,
+                                    "chart_count": 1,
+                                    "image_count": 0,
+                                    "data_validation_count": 3,
+                                    "sheets": [
+                                        {
+                                            "name": "Data",
+                                            "kind": "multi_table",
+                                            "table_regions": [{}, {}],
+                                            "formula_count": 2,
+                                            "merged_range_count": 1,
+                                            "chart_count": 1,
+                                            "image_count": 0,
+                                            "data_validation_count": 3,
+                                        }
+                                    ],
+                                },
+                                "analysis_tables": {
+                                    "Data": {
+                                        "rows": 10,
+                                        "columns": 45,
+                                        "column_names": columns,
+                                    }
+                                },
+                            },
+                        }
+                    ]
+                },
+            ),
+        )
+
+        view = analysis_view(result)
+
+        self.assertEqual(view.spreadsheets[0].source, "sales.xlsx")
+        self.assertEqual(view.spreadsheets[0].sheets[0].region_count, 2)
+        self.assertEqual(len(view.spreadsheets[0].tables[0].column_names), 40)
+        self.assertTrue(view.spreadsheets[0].tables[0].columns_truncated)
 
     def test_analysis_rejects_unknown_conversation_scope(self) -> None:
         response = self.client.post(

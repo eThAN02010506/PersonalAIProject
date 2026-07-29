@@ -12,13 +12,16 @@ from typing import Any, Literal, cast
 from qwopus_agent.integrations.smolagents_runtime import ChatMessage, SmolagentsModelSettings
 from qwopus_agent.memory import DEFAULT_CONVERSATION_KNOWLEDGE_ROOT
 from qwopus_agent.services.agent_orchestrator import AgentOrchestrator
+from qwopus_agent.services.intent_resolver import IntentResolver
 from qwopus_agent.services.orchestration_models import (
     ConversationTurn,
     OrchestrationRequest,
+    ResolvedIntent,
 )
+from qwopus_agent.skills import WorkflowSpec
 
 ChatTaskStatus = Literal["completed", "failed"]
-CHAT_WORKER_REQUEST_SCHEMA_VERSION = 1
+CHAT_WORKER_REQUEST_SCHEMA_VERSION = 3
 
 
 @dataclass(frozen=True)
@@ -30,11 +33,13 @@ class ChatWorkerRequest:
     history: tuple[ChatMessage, ...]
     settings: SmolagentsModelSettings
     enable_web_search: bool
+    resolved_intent: ResolvedIntent | None = None
     enable_local_knowledge: bool = False
     include_global_knowledge: bool = False
     min_source_relevance: float = 0.55
     response_detail: Literal["concise", "balanced", "detailed"] = "detailed"
     knowledge_root: Path = DEFAULT_CONVERSATION_KNOWLEDGE_ROOT
+    workflow_specs: tuple[WorkflowSpec, ...] = ()
     schema_version: int = CHAT_WORKER_REQUEST_SCHEMA_VERSION
 
     def validate_schema(self) -> None:
@@ -149,22 +154,32 @@ def start_chat_task(
     min_source_relevance: float = 0.55,
     response_detail: Literal["concise", "balanced", "detailed"] = "detailed",
     knowledge_root: Path = DEFAULT_CONVERSATION_KNOWLEDGE_ROOT,
+    resolved_intent: ResolvedIntent | None = None,
+    workflow_specs: tuple[WorkflowSpec, ...] = (),
 ) -> BackgroundChatTask:
     """Start one cancelable Agent request in a spawned process."""
     context = multiprocessing.get_context("spawn")
     result_queue = context.Queue()
     progress_queue = context.Queue()
+    # 原因：CLI 或旧测试可直接调用该服务而不经过 FastAPI 的上下文准备阶段。
+    # 作用：正式链路使用预解析结果，兼容入口则退化为无历史的确定性解析。
+    resolved = resolved_intent or IntentResolver().resolve(
+        user_message,
+        response_detail=response_detail,
+    )
     request = ChatWorkerRequest(
         conversation_id=conversation_id,
         user_message=user_message,
         history=tuple(dict(item) for item in history),
         settings=settings,
         enable_web_search=enable_web_search,
+        resolved_intent=resolved,
         enable_local_knowledge=enable_local_knowledge,
         include_global_knowledge=include_global_knowledge,
         min_source_relevance=min_source_relevance,
         response_detail=response_detail,
         knowledge_root=Path(knowledge_root),
+        workflow_specs=workflow_specs,
     )
     process = context.Process(
         target=_run_chat_task,
@@ -201,9 +216,16 @@ def _run_chat_task(
         result = AgentOrchestrator(
             settings=request.settings,
             knowledge_root=request.knowledge_root,
+            workflow_specs=request.workflow_specs,
         ).run_sync(
             OrchestrationRequest(
                 objective=request.user_message,
+                resolved_intent=request.resolved_intent,
+                interpretation_mode=(
+                    request.resolved_intent.interpretation_mode
+                    if request.resolved_intent is not None
+                    else "contextual"
+                ),
                 conversation_id=request.conversation_id,
                 history=tuple(
                     ConversationTurn(

@@ -15,6 +15,9 @@ from qwopus_agent.api.models import (
     DocumentOutlineView,
     DocumentSectionView,
     SourceCoverageView,
+    SpreadsheetSheetView,
+    SpreadsheetTableView,
+    SpreadsheetWorkbookView,
 )
 from qwopus_agent.api.repository import ConversationRepository
 from qwopus_agent.documents.parser import SUPPORTED_DOCUMENT_EXTENSIONS
@@ -198,6 +201,7 @@ def analysis_view(result: OrchestrationResult) -> AnalysisView:
         citations=[item.model_dump(mode="json") for item in result.citations],
         trace=[item.model_dump(mode="json") for item in result.trace],
         reports=reports,
+        spreadsheets=_spreadsheet_views(result),
         source_coverage=(
             SourceCoverageView.model_validate(source_coverage)
             if isinstance(source_coverage, dict)
@@ -232,3 +236,84 @@ def analysis_view(result: OrchestrationResult) -> AnalysisView:
             )
         ],
     )
+
+
+def _spreadsheet_views(
+    result: OrchestrationResult,
+) -> list[SpreadsheetWorkbookView]:
+    """Extract only bounded workbook structure from internal analysis metadata."""
+    if result.analysis_result is None:
+        return []
+    root_metadata = result.analysis_result.metadata
+    file_records = root_metadata.get("files")
+    if not isinstance(file_records, list):
+        file_records = [
+            {
+                "file_name": "spreadsheet",
+                "metadata": root_metadata,
+            }
+        ]
+
+    workbooks: list[SpreadsheetWorkbookView] = []
+    for record in file_records:
+        if not isinstance(record, dict):
+            continue
+        metadata = record.get("metadata")
+        if not isinstance(metadata, dict) or metadata.get("source_type") != "spreadsheet":
+            continue
+        profile = metadata.get("workbook_profile")
+        analysis_tables = metadata.get("analysis_tables")
+        if not isinstance(profile, dict) or not isinstance(analysis_tables, dict):
+            continue
+
+        sheet_views = [
+            SpreadsheetSheetView(
+                name=str(sheet.get("name", "")),
+                kind=sheet.get("kind", "matrix"),
+                region_count=len(sheet.get("table_regions", ())),
+                formula_count=int(sheet.get("formula_count", 0)),
+                merged_range_count=int(sheet.get("merged_range_count", 0)),
+                chart_count=int(sheet.get("chart_count", 0)),
+                image_count=int(sheet.get("image_count", 0)),
+                data_validation_count=int(sheet.get("data_validation_count", 0)),
+                hidden=bool(sheet.get("hidden", False)),
+            )
+            for sheet in profile.get("sheets", ())
+            if isinstance(sheet, dict)
+        ]
+        table_views: list[SpreadsheetTableView] = []
+        for table_name, table in analysis_tables.items():
+            if not isinstance(table, dict):
+                continue
+            raw_column_names = table.get("column_names", ())
+            column_names = (
+                [str(name)[:120] for name in raw_column_names]
+                if isinstance(raw_column_names, list)
+                else []
+            )
+            # 原因：复杂模板可能有数百列或公式式字段名，完整透传会拖慢响应并破坏布局。
+            # 作用：API 只展示前 40 个 schema 名称；完整结构仍保留在本地分析结果与调试记录中。
+            table_views.append(
+                SpreadsheetTableView(
+                    name=str(table_name),
+                    source_sheet=str(table_name).split("::", maxsplit=1)[0],
+                    rows=int(table.get("rows", 0)),
+                    columns=int(table.get("columns", 0)),
+                    column_names=column_names[:40],
+                    columns_truncated=len(column_names) > 40,
+                )
+            )
+        workbooks.append(
+            SpreadsheetWorkbookView(
+                source=str(record.get("file_name", profile.get("source", "spreadsheet"))),
+                sheet_count=int(profile.get("sheet_count", len(sheet_views))),
+                formula_count=int(profile.get("formula_count", 0)),
+                merged_range_count=int(profile.get("merged_range_count", 0)),
+                chart_count=int(profile.get("chart_count", 0)),
+                image_count=int(profile.get("image_count", 0)),
+                data_validation_count=int(profile.get("data_validation_count", 0)),
+                sheets=sheet_views,
+                tables=table_views,
+            )
+        )
+    return workbooks

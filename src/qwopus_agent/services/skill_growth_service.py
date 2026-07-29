@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import json
 import re
+import threading
 import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -49,7 +49,7 @@ class SkillGrowthPolicy:
     min_successes: int = 2
     min_output_chars: int = 40
     name_prefix: str = "learned_"
-    auto_promote: bool = True
+    auto_promote: bool = False
 
     def __post_init__(self) -> None:
         if self.min_successes < 1:
@@ -70,6 +70,23 @@ class SkillGrowthDecision:
     manifest: SkillManifest | None = None
 
 
+@dataclass(frozen=True)
+class SkillTraceStep:
+    """One reusable capability call retained from a successful run."""
+
+    skill_name: str
+    arguments: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class SkillRunTrace:
+    """Framework-neutral execution trace evaluated by the growth service."""
+
+    success: bool
+    output: str
+    steps: tuple[SkillTraceStep, ...] = ()
+
+
 @dataclass
 class SkillGrowthService:
     """Learn safe declarative workflows from repeated successful Agent runs."""
@@ -79,7 +96,11 @@ class SkillGrowthService:
     workflow_root: Path = DEFAULT_WORKFLOW_ROOT
     history_path: Path = DEFAULT_GROWTH_HISTORY_PATH
     policy: SkillGrowthPolicy = field(default_factory=SkillGrowthPolicy)
-    _lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
+    _lock: threading.RLock = field(
+        default_factory=threading.RLock,
+        init=False,
+        repr=False,
+    )
 
     async def observe(
         self,
@@ -87,28 +108,60 @@ class SkillGrowthService:
         run: AgentRun,
         context: dict[str, Any] | None = None,
     ) -> SkillGrowthDecision:
-        """Observe one run and deploy a workflow only after all gates pass."""
-        if not run.execution.success:
-            return SkillGrowthDecision("ignored", "Execution was not successful.")
-        if not run.plan.steps or len(run.execution.steps) != len(run.plan.steps):
+        """Adapt the legacy Planner/Executor result to the shared trace contract."""
+        complete_trace = bool(
+            run.plan.steps
+            and len(run.execution.steps) == len(run.plan.steps)
+        )
+        if not complete_trace:
             return SkillGrowthDecision("ignored", "Run has no complete execution trace.")
-        if len(run.execution.content.strip()) < self.policy.min_output_chars:
+        return self.observe_trace(
+            objective,
+            SkillRunTrace(
+                success=run.execution.success,
+                output=run.execution.content,
+                steps=tuple(
+                    SkillTraceStep(
+                        skill_name=step.skill_name,
+                        arguments=dict(step.arguments),
+                    )
+                    for step in run.plan.steps
+                ),
+            ),
+            context=context,
+        )
+
+    def observe_trace(
+        self,
+        objective: str,
+        trace: SkillRunTrace,
+        context: dict[str, Any] | None = None,
+    ) -> SkillGrowthDecision:
+        """Create a candidate from one framework-neutral successful execution trace."""
+        if not trace.success:
+            return SkillGrowthDecision("ignored", "Execution was not successful.")
+        if not trace.steps:
+            return SkillGrowthDecision("ignored", "Run has no complete execution trace.")
+        if len(trace.output.strip()) < self.policy.min_output_chars:
             return SkillGrowthDecision(
                 "ignored",
                 "Successful output is too short to validate reuse.",
             )
-        if any(step.skill_name.startswith(self.policy.name_prefix) for step in run.plan.steps):
+        if any(
+            step.skill_name.startswith(self.policy.name_prefix)
+            for step in trace.steps
+        ):
             return SkillGrowthDecision("ignored", "Learned workflows are not learned recursively.")
 
-        signature = self._signature(run)
-        async with self._lock:
+        signature = self._signature(trace)
+        with self._lock:
             history = self._load_history()
             record = dict(history.get(signature, {}))
             successes = int(record.get("successes", 0)) + 1
             record.update(
                 {
                     "successes": successes,
-                    "skills": [step.skill_name for step in run.plan.steps],
+                    "skills": [step.skill_name for step in trace.steps],
                     "last_objective": objective,
                     "intent_examples": _append_intent_example(
                         record.get("intent_examples"),
@@ -126,7 +179,7 @@ class SkillGrowthService:
                     signature,
                 )
 
-            skill_name = self._skill_name(run)
+            skill_name = self._skill_name(trace)
             active = self.catalog.active(skill_name)
             if active is not None and active.source_signature == signature:
                 return SkillGrowthDecision(
@@ -141,7 +194,7 @@ class SkillGrowthService:
                 skill_name,
                 version,
                 signature,
-                run,
+                trace,
                 intent_examples=tuple(record["intent_examples"]),
             ).sealed()
             self.validate(spec)
@@ -181,6 +234,55 @@ class SkillGrowthService:
 
     def promote(self, name: str, version: str) -> SkillManifest:
         """Validate and activate one persisted candidate workflow."""
+        with self._lock:
+            return self._activate_version(
+                name,
+                version,
+                required_status="candidate",
+            )
+
+    def reject(self, name: str, version: str) -> SkillManifest:
+        """Reject one candidate without deleting its spec or provenance."""
+        with self._lock:
+            return self.catalog.reject(name, version)
+
+    def rollback(self, name: str, version: str) -> SkillManifest:
+        """Reactivate one archived version after repeating every safety check."""
+        with self._lock:
+            return self._activate_version(
+                name,
+                version,
+                required_status="archived",
+            )
+
+    def spec_for(self, manifest: SkillManifest) -> WorkflowSpec | None:
+        """Load one valid confined spec for review without activating it."""
+        if manifest.spec_path is None:
+            return None
+        try:
+            spec_path = self._confined_spec_path(manifest.spec_path)
+            spec = WorkflowSpec.model_validate_json(
+                spec_path.read_text(encoding="utf-8")
+            )
+        except (OSError, ValueError):
+            return None
+        if (
+            spec.name != manifest.name
+            or spec.version != manifest.version
+            or spec.checksum != manifest.checksum
+            or not spec.checksum_is_valid()
+        ):
+            return None
+        return spec
+
+    def _activate_version(
+        self,
+        name: str,
+        version: str,
+        *,
+        required_status: str,
+    ) -> SkillManifest:
+        """Load, validate, register, and atomically activate one exact version."""
         manifest = next(
             (
                 item
@@ -191,14 +293,32 @@ class SkillGrowthService:
         )
         if manifest is None or manifest.spec_path is None:
             raise KeyError(f"Unknown workflow candidate: {name}@{version}")
-        spec = WorkflowSpec.model_validate_json(
-            Path(manifest.spec_path).read_text(encoding="utf-8")
-        )
+        if manifest.status != required_status:
+            raise ValueError(
+                f"Skill {name}@{version} must be {required_status}, "
+                f"not {manifest.status}."
+            )
+        spec = self.spec_for(manifest)
+        if spec is None:
+            raise ValueError("Workflow spec is missing, outside its root, or invalid.")
         self.validate(spec)
         # 原因：Catalog 的 active 状态不能证明当前进程已经加载了可执行 Skill。
         # 作用：先完成完整性校验和热注册，再原子切换持久化激活版本。
         self.registry.register(WorkflowSkill(spec, self.registry), replace=True)
         return self.catalog.activate(name, version)
+
+    def _confined_spec_path(self, spec_path: str) -> Path:
+        allowed_root = self.workflow_root.resolve()
+        resolved = Path(spec_path).resolve()
+        try:
+            resolved.relative_to(allowed_root)
+        except ValueError as exc:
+            # 原因：Catalog 是可编辑本地文件，不能把其中的绝对路径直接当成可信输入。
+            # 作用：Promote、Rollback 和管理 API 都只能读取当前 workflow_root 内的 spec。
+            raise ValueError("Workflow spec path is outside the workflow root.") from exc
+        if not resolved.is_file():
+            raise ValueError("Workflow spec file does not exist.")
+        return resolved
 
     def validate(self, spec: WorkflowSpec) -> None:
         """Validate integrity, references, recursion, and persisted arguments."""
@@ -217,16 +337,18 @@ class SkillGrowthService:
             if _contains_sensitive_key(step.arguments):
                 raise ValueError("Workflow contains sensitive or runtime-specific arguments.")
 
-    def _signature(self, run: AgentRun) -> str:
+    def _signature(self, trace: SkillRunTrace) -> str:
         payload = {
-            "skills": [step.skill_name for step in run.plan.steps],
-            "argument_keys": [sorted(step.arguments) for step in run.plan.steps],
+            "skills": [step.skill_name for step in trace.steps],
+            "argument_keys": [sorted(step.arguments) for step in trace.steps],
         }
         serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True)
         return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
-    def _skill_name(self, run: AgentRun) -> str:
-        sequence = "_then_".join(_safe_name(step.skill_name) for step in run.plan.steps)
+    def _skill_name(self, trace: SkillRunTrace) -> str:
+        sequence = "_then_".join(
+            _safe_name(step.skill_name) for step in trace.steps
+        )
         name = f"{self.policy.name_prefix}{sequence}"
         if len(name) <= 90:
             return name
@@ -238,7 +360,7 @@ class SkillGrowthService:
         name: str,
         version: str,
         signature: str,
-        run: AgentRun,
+        trace: SkillRunTrace,
         *,
         intent_examples: tuple[str, ...],
     ) -> WorkflowSpec:
@@ -248,9 +370,9 @@ class SkillGrowthService:
                 query_template="{query}",
                 arguments=_sanitize_arguments(step.arguments),
             )
-            for step in run.plan.steps
+            for step in trace.steps
         )
-        sequence = " -> ".join(step.skill_name for step in run.plan.steps)
+        sequence = " -> ".join(step.skill_name for step in trace.steps)
         return WorkflowSpec(
             name=name,
             version=version,

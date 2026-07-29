@@ -76,7 +76,6 @@ def analyze_uploaded_file(
 def _analyze_spreadsheet(path: Path, user_question: str = "") -> AnalysisResult:
     """Inspect spreadsheet schema, sample rows, and safe local summaries."""
     spreadsheet = read_spreadsheet(path)
-    sheets = spreadsheet.sheets
     summary_lines = [
         f"# Spreadsheet Analysis: {path.name}",
         "",
@@ -84,9 +83,19 @@ def _analyze_spreadsheet(path: Path, user_question: str = "") -> AnalysisResult:
         "Full table data is not sent to an LLM.",
     ]
     tables: dict[str, pd.DataFrame] = {}
-    metadata: dict[str, Any] = {"source_type": "spreadsheet", "sheets": {}}
+    metadata: dict[str, Any] = {
+        "source_type": "spreadsheet",
+        "sheets": {},
+        "analysis_tables": {},
+        "workbook_profile": (
+            spreadsheet.profile.model_dump(mode="json")
+            if spreadsheet.profile is not None
+            else None
+        ),
+    }
 
-    for sheet_name, df in sheets.items():
+    for table_name, df in spreadsheet.analysis_frames().items():
+        sheet_name = table_name.split("::", maxsplit=1)[0]
         schema = pd.DataFrame(
             {
                 "column": [str(column) for column in df.columns],
@@ -99,19 +108,23 @@ def _analyze_spreadsheet(path: Path, user_question: str = "") -> AnalysisResult:
         numeric_summary = _numeric_summary(df)
         missing_summary = _missing_summary(df)
         categorical_summary = _categorical_summary(df)
-        form_summary = spreadsheet.form_summaries.get(sheet_name, pd.DataFrame())
+        form_summary = (
+            spreadsheet.form_summaries.get(sheet_name, pd.DataFrame())
+            if table_name == sheet_name
+            else pd.DataFrame()
+        )
 
-        tables[f"{sheet_name}_schema"] = schema
-        tables[f"{sheet_name}_sample"] = sample
-        tables[f"{sheet_name}_missing_summary"] = missing_summary
+        tables[f"{table_name}_schema"] = schema
+        tables[f"{table_name}_sample"] = sample
+        tables[f"{table_name}_missing_summary"] = missing_summary
         if not numeric_summary.empty:
-            tables[f"{sheet_name}_numeric_summary"] = numeric_summary
+            tables[f"{table_name}_numeric_summary"] = numeric_summary
         if not categorical_summary.empty:
-            tables[f"{sheet_name}_categorical_summary"] = categorical_summary
+            tables[f"{table_name}_categorical_summary"] = categorical_summary
         if not form_summary.empty:
             tables[f"{sheet_name}_form_summary"] = form_summary
 
-        metadata["sheets"][sheet_name] = {
+        table_metadata = {
             "rows": int(len(df)),
             "columns": int(len(df.columns)),
             "column_names": [str(column) for column in df.columns],
@@ -125,26 +138,30 @@ def _analyze_spreadsheet(path: Path, user_question: str = "") -> AnalysisResult:
             ],
             **spreadsheet.metadata.get(sheet_name, {}),
         }
+        metadata["analysis_tables"][table_name] = table_metadata
+        if table_name == sheet_name:
+            metadata["sheets"][sheet_name] = table_metadata
 
         # 原因：展示层需要快速看出文件规模和字段情况。
         # 作用：生成不包含全量数据的摘要文本。
+        heading = "Sheet" if table_name == sheet_name else "Table"
         summary_lines.extend(
             [
                 "",
-                f"## Sheet: {sheet_name}",
+                f"## {heading}: {table_name}",
                 f"- Rows: {len(df)}",
                 f"- Columns: {len(df.columns)}",
-                f"- Column names: {', '.join(str(column) for column in df.columns)}",
+                f"- Column names: {_format_column_names(df)}",
                 (
                     "- Numeric columns: "
-                    f"{', '.join(metadata['sheets'][sheet_name]['numeric_columns']) or 'None'}"
+                    f"{', '.join(table_metadata['numeric_columns']) or 'None'}"
                 ),
                 (
                     "- Categorical columns: "
-                    f"{', '.join(metadata['sheets'][sheet_name]['categorical_columns']) or 'None'}"
+                    f"{', '.join(table_metadata['categorical_columns']) or 'None'}"
                 ),
-                f"- Header row: {metadata['sheets'][sheet_name].get('header_row', 'default')}",
-                f"- Form pairs: {metadata['sheets'][sheet_name].get('form_pairs', 0)}",
+                f"- Header row: {table_metadata.get('header_row', 'default')}",
+                f"- Form pairs: {table_metadata.get('form_pairs', 0)}",
             ]
         )
 
@@ -213,11 +230,27 @@ def _spreadsheet_analysis_context(
 ) -> str:
     """Build a bounded LLM context from schema/sample/summary tables only."""
     sections = ["\n".join(summary_lines)]
-    for table_name, dataframe in tables.items():
+    ordered_tables = sorted(
+        tables.items(),
+        key=lambda item: (
+            0 if item[0].endswith("_schema") else 1,
+            item[0],
+        ),
+    )
+    for table_name, dataframe in ordered_tables:
         # 原因：Excel 分析不能把整表塞给 LLM。
-        # 作用：只提供 schema、前几行 sample 和数值统计这些安全摘要。
+        # 作用：先列出所有 schema，再提供样本和统计，避免前几个样本挤掉后续工作表结构。
         sections.append(f"## {table_name}\n\n{dataframe.head(8).to_string(index=False)}")
     return "\n\n".join(sections)
+
+
+def _format_column_names(dataframe: pd.DataFrame, limit: int = 24) -> str:
+    """Render a bounded field list for the human-readable workbook index."""
+    names = [str(column) for column in dataframe.columns]
+    visible = names[:limit]
+    remainder = len(names) - len(visible)
+    suffix = f", ... (+{remainder} more)" if remainder else ""
+    return f"{', '.join(visible)}{suffix}"
 
 
 def _analyze_markdown_document(

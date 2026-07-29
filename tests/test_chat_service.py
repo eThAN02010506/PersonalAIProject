@@ -24,6 +24,7 @@ from qwopus_agent.services.orchestration_models import (
     ProcessEvent,
     SourceCitation,
 )
+from qwopus_agent.skills import WorkflowSpec
 
 
 class ChatServiceTests(unittest.TestCase):
@@ -45,12 +46,20 @@ class ChatServiceTests(unittest.TestCase):
         result_queue: queue.Queue[Any] = queue.Queue()
         progress_queue: queue.Queue[Any] = queue.Queue()
         settings = SmolagentsModelSettings(model_id="test", base_url="http://local/v1")
+        workflow = WorkflowSpec(
+            name="learned_web_search",
+            version="0.1.0",
+            description="Validated web research workflow.",
+            steps=({"skill_name": "web_search"},),
+            source_signature="signature",
+        ).sealed()
 
         def fake_orchestrator_run(
             _self: Any,
             request: OrchestrationRequest,
             progress_callback: Callable[[str], None] | None = None,
         ) -> OrchestrationResult:
+            self.assertEqual(_self.workflow_specs, (workflow,))
             self.assertTrue(request.enable_local_knowledge)
             self.assertEqual(request.conversation_id, "conversation-1")
             self.assertEqual(request.min_source_relevance, 0.8)
@@ -96,6 +105,7 @@ class ChatServiceTests(unittest.TestCase):
                     enable_local_knowledge=True,
                     min_source_relevance=0.8,
                     response_detail="balanced",
+                    workflow_specs=(workflow,),
                 ),
             )
 
@@ -137,6 +147,13 @@ class ChatServiceTests(unittest.TestCase):
         context.Process.return_value = process
         settings = SmolagentsModelSettings(model_id="test", base_url="http://local/v1")
         history = [{"role": "assistant", "content": "previous"}]
+        workflow = WorkflowSpec(
+            name="learned_web_search",
+            version="0.1.0",
+            description="Validated web research workflow.",
+            steps=({"skill_name": "web_search"},),
+            source_signature="signature",
+        ).sealed()
 
         with patch(
             "qwopus_agent.services.chat_service.multiprocessing.get_context",
@@ -153,6 +170,7 @@ class ChatServiceTests(unittest.TestCase):
                 min_source_relevance=0.72,
                 response_detail="concise",
                 knowledge_root=Path("/tmp/conversation-knowledge"),
+                workflow_specs=(workflow,),
             )
 
         process_kwargs = context.Process.call_args.kwargs
@@ -175,6 +193,7 @@ class ChatServiceTests(unittest.TestCase):
         self.assertEqual(request.min_source_relevance, 0.72)
         self.assertEqual(request.response_detail, "concise")
         self.assertEqual(request.knowledge_root, Path("/tmp/conversation-knowledge"))
+        self.assertEqual(request.workflow_specs, (workflow,))
         self.assertIs(task.process, process)
         process.start.assert_called_once_with()
 

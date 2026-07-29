@@ -59,6 +59,25 @@ class SkillCatalogTests(unittest.TestCase):
             statuses = {item.version: item.status for item in catalog.list()}
             self.assertEqual(statuses, {"0.9.0": "archived", "0.10.0": "active"})
 
+    def test_catalog_rejects_only_candidate_versions(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            catalog = SkillCatalog(storage_path=Path(tmpdir) / "catalog.json")
+            catalog.register(
+                SkillManifest(
+                    "demo",
+                    "1.0.0",
+                    "candidate",
+                    "workflow",
+                    status="candidate",
+                )
+            )
+
+            rejected = catalog.reject("demo", "1.0.0")
+
+            self.assertEqual(rejected.status, "rejected")
+            with self.assertRaisesRegex(ValueError, "Only candidate"):
+                catalog.reject("demo", "1.0.0")
+
 
 if __name__ == "__main__":
     unittest.main()

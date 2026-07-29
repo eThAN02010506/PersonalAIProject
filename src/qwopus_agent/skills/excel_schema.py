@@ -49,9 +49,11 @@ class ExcelSchemaSkill(BaseSkill):
 
         sheets: dict[str, Any] = {}
         content_lines = [f"# Excel Schema: {path.name}"]
-        for sheet_name, dataframe in spreadsheet.sheets.items():
+        for table_name, dataframe in spreadsheet.analysis_frames().items():
+            source_sheet = table_name.split("::", maxsplit=1)[0]
             column_names = [str(column) for column in dataframe.columns]
             sheet_data = {
+                "source_sheet": source_sheet,
                 "rows": int(len(dataframe)),
                 "columns": int(len(dataframe.columns)),
                 "column_names": column_names,
@@ -60,15 +62,16 @@ class ExcelSchemaSkill(BaseSkill):
                     for column, dtype in dataframe.dtypes.items()
                 },
                 "sample_rows": dataframe.head(3).fillna("").to_dict(orient="records"),
-                "metadata": spreadsheet.metadata.get(sheet_name, {}),
+                "metadata": spreadsheet.metadata.get(source_sheet, {}),
             }
-            sheets[sheet_name] = sheet_data
+            sheets[table_name] = sheet_data
             # 原因：SkillResponse.content 要给 Planner/LLM 一个简短可读摘要。
             # 作用：把结构信息压缩成 Markdown，避免 UI 或 Agent 解析复杂对象。
+            heading = "Sheet" if table_name == source_sheet else "Table"
             content_lines.extend(
                 [
                     "",
-                    f"## Sheet: {sheet_name}",
+                    f"## {heading}: {table_name}",
                     f"- Rows: {sheet_data['rows']}",
                     f"- Columns: {sheet_data['columns']}",
                     f"- Column names: {', '.join(column_names)}",
@@ -78,7 +81,15 @@ class ExcelSchemaSkill(BaseSkill):
         return SkillResponse(
             success=True,
             content="\n".join(content_lines),
-            data={"file_path": str(path), "sheets": sheets},
+            data={
+                "file_path": str(path),
+                "sheets": sheets,
+                "workbook_profile": (
+                    spreadsheet.profile.model_dump(mode="json")
+                    if spreadsheet.profile is not None
+                    else None
+                ),
+            },
         )
 
 

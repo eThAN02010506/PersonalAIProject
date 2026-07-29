@@ -8,8 +8,14 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
-from openpyxl import load_workbook
-from openpyxl.worksheet.worksheet import Worksheet
+
+from qwopus_agent.analysis.workbook_profile import (
+    TableRegionProfile,
+    WorkbookProfile,
+    inspect_workbook,
+)
+
+MAX_ANALYSIS_REGIONS_PER_SHEET = 12
 
 
 @dataclass(frozen=True)
@@ -22,6 +28,43 @@ class SpreadsheetReadResult:
 
     form_summaries: dict[str, pd.DataFrame] = field(default_factory=dict)
 
+    region_sheets: dict[str, dict[str, pd.DataFrame]] = field(default_factory=dict)
+
+    profile: WorkbookProfile | None = None
+
+    def analysis_frames(self) -> dict[str, pd.DataFrame]:
+        """Return every locally analyzable table under a stable unique name."""
+        frames = dict(self.sheets)
+        if self.profile is None:
+            return frames
+        for sheet_profile in self.profile.sheets:
+            sheet_frames = self.region_sheets.get(sheet_profile.name, {})
+            secondary_regions = sorted(
+                (
+                    region
+                    for region in sheet_profile.table_regions
+                    if region.region_id != sheet_profile.primary_region_id
+                    and region.non_empty_cells >= 4
+                    and len(sheet_frames.get(region.region_id, ())) > 0
+                    and len(
+                        getattr(sheet_frames.get(region.region_id), "columns", ())
+                    )
+                    >= 2
+                ),
+                key=lambda region: (
+                    region.non_empty_cells,
+                    region.confidence,
+                ),
+                reverse=True,
+            )[:MAX_ANALYSIS_REGIONS_PER_SHEET]
+            for region in secondary_regions:
+                # 原因：一个工作表可能包含多张独立表，只暴露主区域会让 Agent 永远看不到其他数据。
+                # 作用：保留主表名，并以 Sheet::table_N 暴露有数据的高信息次级区域，过滤说明碎片。
+                frames[f"{sheet_profile.name}::{region.region_id}"] = sheet_frames[
+                    region.region_id
+                ]
+        return frames
+
 
 def read_spreadsheet(path: Path) -> SpreadsheetReadResult:
     """Read CSV or Excel with Excel-specific header detection."""
@@ -29,84 +72,80 @@ def read_spreadsheet(path: Path) -> SpreadsheetReadResult:
     if suffix == ".csv":
         return SpreadsheetReadResult(sheets={"csv": pd.read_csv(path)})
     if suffix == ".xlsx":
-        return _read_xlsx_with_detected_headers(path)
+        return _read_xlsx_with_profiles(path)
     if suffix == ".xls":
         return SpreadsheetReadResult(sheets=pd.read_excel(path, sheet_name=None))
     raise ValueError(f"Unsupported spreadsheet type: {suffix}")
 
 
-def _read_xlsx_with_detected_headers(path: Path) -> SpreadsheetReadResult:
-    """Read XLSX sheets after detecting the likely header row."""
-    workbook = load_workbook(path, read_only=True, data_only=True)
+def _read_xlsx_with_profiles(path: Path) -> SpreadsheetReadResult:
+    """Read XLSX sheets from an explicit workbook structure profile."""
+    profile = inspect_workbook(path)
+    raw_sheets = pd.read_excel(path, sheet_name=None, header=None)
     sheets: dict[str, pd.DataFrame] = {}
     metadata: dict[str, dict[str, Any]] = {}
     form_summaries: dict[str, pd.DataFrame] = {}
+    region_sheets: dict[str, dict[str, pd.DataFrame]] = {}
 
-    try:
-        for sheet_name in workbook.sheetnames:
-            worksheet = workbook[sheet_name]
-            header_row = _detect_header_row(worksheet)
-            form_summary = _extract_form_summary(worksheet)
-            # 原因：很多 Excel 文件前几行是标题、说明或空行，pandas 默认 header=0 会误判字段。
-            # 作用：先用 openpyxl 找真实表头，再交给 pandas 做类型推断和后续分析。
-            dataframe = pd.read_excel(path, sheet_name=sheet_name, header=header_row)
-            dataframe = _clean_loaded_dataframe(dataframe)
-            sheets[sheet_name] = dataframe
-            form_summaries[sheet_name] = form_summary
-            metadata[sheet_name] = {
-                "header_row": header_row + 1,
-                "header_detection": "openpyxl",
-                "form_pairs": int(len(form_summary)),
-            }
-    finally:
-        workbook.close()
+    for sheet_profile in profile.sheets:
+        raw = raw_sheets.get(sheet_profile.name, pd.DataFrame())
+        form_summary = (
+            _extract_form_summary(raw)
+            if sheet_profile.kind == "form"
+            else pd.DataFrame()
+        )
+        frames = {
+            region.region_id: _dataframe_from_region(
+                raw,
+                region,
+                use_headers=sheet_profile.kind != "form",
+            )
+            for region in sheet_profile.table_regions
+        }
+        primary = sheet_profile.primary_region()
+        dataframe = (
+            frames[primary.region_id]
+            if primary is not None
+            else _generic_dataframe(raw)
+        )
+        sheets[sheet_profile.name] = dataframe
+        region_sheets[sheet_profile.name] = frames
+        form_summaries[sheet_profile.name] = form_summary
+        profile_data = sheet_profile.model_dump(mode="json")
+        metadata[sheet_profile.name] = {
+            "header_row": (
+                primary.header_rows[-1]
+                if primary is not None and primary.header_rows
+                else None
+            ),
+            "header_rows": list(primary.header_rows) if primary is not None else [],
+            "header_detection": "workbook_profile",
+            "sheet_kind": sheet_profile.kind,
+            "form_pairs": int(len(form_summary)),
+            "table_regions": profile_data["table_regions"],
+            "primary_region_id": sheet_profile.primary_region_id,
+            "formula_count": sheet_profile.formula_count,
+            "broken_formula_reference_count": (
+                sheet_profile.broken_formula_reference_count
+            ),
+            "merged_range_count": sheet_profile.merged_range_count,
+            "chart_count": sheet_profile.chart_count,
+            "image_count": sheet_profile.image_count,
+            "data_validation_count": sheet_profile.data_validation_count,
+            "profile_truncated": sheet_profile.profile_truncated,
+        }
 
     return SpreadsheetReadResult(
         sheets=sheets,
         metadata=metadata,
         form_summaries=form_summaries,
+        region_sheets=region_sheets,
+        profile=profile,
     )
-
-
-def _detect_header_row(worksheet: Worksheet, max_scan_rows: int = 25) -> int:
-    """Detect the most likely 0-based header row index."""
-    rows = list(
-        worksheet.iter_rows(
-            min_row=1,
-            max_row=min(max_scan_rows, worksheet.max_row),
-            values_only=True,
-        )
-    )
-    best_index = 0
-    best_score = -1
-    for index, row in enumerate(rows):
-        next_row = rows[index + 1] if index + 1 < len(rows) else ()
-        score = _header_score(row, next_row)
-        if score > best_score:
-            best_score = score
-            best_index = index
-    return best_index
-
-
-def _header_score(row: tuple[Any, ...], next_row: tuple[Any, ...]) -> int:
-    values = [_normalize_cell(value) for value in row]
-    non_empty_values = [value for value in values if value]
-    if len(non_empty_values) < 2:
-        return -1
-
-    unique_count = len(set(non_empty_values))
-    text_count = sum(1 for value in non_empty_values if not _looks_numeric(value))
-    next_non_empty_count = sum(1 for value in next_row if _normalize_cell(value))
-    if text_count == 0:
-        return -1
-
-    # 原因：真实表头通常有多个非空、文本型、相对唯一的字段，并且下一行有数据。
-    # 作用：用轻量启发式避开“报表标题”“日期说明”等单行描述。
-    return len(non_empty_values) * 2 + unique_count + text_count * 2 + next_non_empty_count
 
 
 def _normalize_cell(value: Any) -> str:
-    if value is None:
+    if value is None or bool(pd.isna(value)):
         return ""
     return str(value).strip()
 
@@ -120,20 +159,19 @@ def _looks_numeric(value: str) -> bool:
 
 
 def _extract_form_summary(
-        worksheet: Worksheet,
-        max_rows: int = 200,
-        max_columns: int = 80,
-        max_pairs: int = 120,
+    dataframe: pd.DataFrame,
+    max_rows: int = 200,
+    max_columns: int = 80,
+    max_pairs: int = 120,
 ) -> pd.DataFrame:
     """Extract key-value pairs from form-like sheets."""
-    rows = list(
-        worksheet.iter_rows(
-            min_row=1,
-            max_row=min(max_rows, worksheet.max_row),
-            max_col=min(max_columns, worksheet.max_column),
-            values_only=True,
+    rows = [
+        tuple(row)
+        for row in dataframe.iloc[:max_rows, :max_columns].itertuples(
+            index=False,
+            name=None,
         )
-    )
+    ]
     pairs: list[dict[str, Any]] = []
     seen: set[tuple[str, str, str]] = set()
 
@@ -176,8 +214,16 @@ def _neighbor_values(
     column_index: int,
 ) -> Iterator[tuple[str, Any]]:
     row = rows[row_index]
-    if column_index + 1 < len(row):
-        yield "right", row[column_index + 1]
+    for offset in range(1, 4):
+        right_index = column_index + offset
+        if right_index >= len(row):
+            break
+        if _normalize_cell(row[right_index]):
+            # 原因：合并标签在 pandas 中会留下一个或多个 NaN 占位列。
+            # 作用：跨过这些空列找到同一行的实际表单值，同时限制搜索半径避免串到远处字段。
+            direction = "right" if offset == 1 else f"right+{offset}"
+            yield direction, row[right_index]
+            break
     if row_index + 1 < len(rows):
         next_row = rows[row_index + 1]
         if column_index < len(next_row):
@@ -198,4 +244,31 @@ def _clean_loaded_dataframe(dataframe: pd.DataFrame) -> pd.DataFrame:
         str(column).strip()
         for column in dataframe.columns
     ]
-    return dataframe
+    # 原因：header=None 会让包含表头文字的原始列先变成 object，切掉表头后不会自动恢复数字类型。
+    # 作用：在区域裁剪完成后重新推断 int/float/datetime，保证统计和 pandas 沙箱按真实类型运行。
+    return dataframe.infer_objects()
+
+
+def _dataframe_from_region(
+    raw: pd.DataFrame,
+    region: TableRegionProfile,
+    *,
+    use_headers: bool,
+) -> pd.DataFrame:
+    window = raw.iloc[
+        region.min_row - 1 : region.max_row,
+        region.min_column - 1 : region.max_column,
+    ].copy()
+    if use_headers and region.header_rows and region.data_start_row is not None:
+        data_offset = max(0, region.data_start_row - region.min_row)
+        window = window.iloc[data_offset:].copy()
+    window.columns = list(region.column_names)
+    return _clean_loaded_dataframe(window)
+
+
+def _generic_dataframe(raw: pd.DataFrame) -> pd.DataFrame:
+    dataframe = raw.copy()
+    dataframe.columns = [
+        f"column_{index}" for index in range(1, len(dataframe.columns) + 1)
+    ]
+    return _clean_loaded_dataframe(dataframe)

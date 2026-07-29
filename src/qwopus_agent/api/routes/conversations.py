@@ -146,6 +146,21 @@ class _ConversationEndpoints:
                 conversation_id,
                 _conversation_title(payload.content),
             )
+        prepared = self.runs.prepare(
+            conversation_id,
+            payload.content,
+            response_detail=payload.response_detail,
+            interpretation_mode=payload.interpretation_mode,
+        )
+        if prepared.resolved_intent.requires_clarification:
+            # 原因：缺少指代对象时调用模型只会放大猜测，并无谓占用远程或本地推理资源。
+            # 作用：澄清作为正常完成的聊天轮次持久化，前端沿用同一轮询协议显示问题。
+            return RunStarted(
+                run_id=self.runs.complete_clarification(
+                    conversation_id,
+                    prepared,
+                )
+            )
         try:
             settings = self.runtime.require_online_settings()
         except ModelRuntimeError as exc:
@@ -164,6 +179,8 @@ class _ConversationEndpoints:
             include_global_knowledge=payload.include_global_knowledge,
             min_source_relevance=payload.min_source_relevance,
             response_detail=payload.response_detail,
+            interpretation_mode=payload.interpretation_mode,
+            prepared=prepared,
         )
         return RunStarted(run_id=run_id)
 

@@ -7,9 +7,11 @@ import re
 from builtins import list as list_type
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
+from typing import Literal
 
 DEFAULT_SKILL_CATALOG_PATH = Path("storage/skills/catalog.json")
 SKILL_STATUSES = {"candidate", "active", "archived", "rejected"}
+SkillStatus = Literal["candidate", "active", "archived", "rejected"]
 SEMANTIC_VERSION_PATTERN = re.compile(r"^(\d+)\.(\d+)\.(\d+)$")
 
 
@@ -22,7 +24,7 @@ class SkillManifest:
     description: str
     module_path: str
     checksum: str = ""
-    status: str = "active"
+    status: SkillStatus = "active"
     spec_path: str | None = None
     created_at: str = ""
     source_run_id: str | None = None
@@ -59,7 +61,11 @@ class SkillCatalog:
         payload = json.loads(self.storage_path.read_text(encoding="utf-8"))
         return [SkillManifest(**item) for item in payload.get("skills", [])]
 
-    def latest(self, name: str, status: str | None = None) -> SkillManifest | None:
+    def latest(
+        self,
+        name: str,
+        status: SkillStatus | None = None,
+    ) -> SkillManifest | None:
         """Return the newest matching semantic version."""
         candidates = [
             manifest
@@ -105,6 +111,26 @@ class SkillCatalog:
                 updated.append(manifest)
         if target is None:
             raise KeyError(f"Unknown skill version: {name}@{version}")
+        self._write(sorted(updated, key=lambda item: (item.name, _version_key(item.version))))
+        return target
+
+    def reject(self, name: str, version: str) -> SkillManifest:
+        """Reject one candidate while preserving its immutable audit record."""
+        manifests = self.list()
+        target: SkillManifest | None = None
+        updated: list_type[SkillManifest] = []
+        for manifest in manifests:
+            if manifest.name == name and manifest.version == version:
+                if manifest.status != "candidate":
+                    raise ValueError("Only candidate Skill versions can be rejected.")
+                target = replace(manifest, status="rejected")
+                updated.append(target)
+            else:
+                updated.append(manifest)
+        if target is None:
+            raise KeyError(f"Unknown skill version: {name}@{version}")
+        # 原因：删除拒绝记录会失去“为什么这个版本未部署”的审计链。
+        # 作用：只改变状态并原子写回，spec 和来源 run id 继续可供 Debug 检查。
         self._write(sorted(updated, key=lambda item: (item.name, _version_key(item.version))))
         return target
 

@@ -8,6 +8,7 @@ import {
   LoaderCircle,
   RefreshCw,
   Search,
+  TableProperties,
   Upload,
   X,
 } from "lucide-react";
@@ -548,6 +549,63 @@ export function DocumentWorkspace({
                     </label>
                   ))}
                 </div>
+              ))}
+            </section>
+          )}
+          {result.spreadsheets.length > 0 && (
+            <section className="workbook-results">
+              <div className="outline-heading">
+                <TableProperties size={17} />
+                <h2>Workbook structure</h2>
+              </div>
+              {result.spreadsheets.map((workbook) => (
+                <details className="workbook-detail" key={workbook.source}>
+                  <summary>
+                    <strong>{workbook.source}</strong>
+                    <span>
+                      {workbook.sheet_count} sheets · {workbook.tables.length} analysis tables
+                    </span>
+                  </summary>
+                  <div className="workbook-metrics">
+                    <span>{workbook.formula_count} formulas</span>
+                    <span>{workbook.merged_range_count} merged ranges</span>
+                    <span>{workbook.chart_count} charts</span>
+                    <span>{workbook.image_count} images</span>
+                    <span>{workbook.data_validation_count} validations</span>
+                  </div>
+                  <div className="workbook-sheet-list">
+                    {workbook.sheets.map((sheet) => (
+                      <div key={sheet.name}>
+                        <strong>{sheet.name}</strong>
+                        <span>{sheet.kind.replace("_", " ")}</span>
+                        <small>{sheet.region_count} regions</small>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="workbook-table-scroll">
+                    <table className="workbook-table">
+                      <thead>
+                        <tr>
+                          <th>Analysis table</th>
+                          <th>Size</th>
+                          <th>Columns</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {workbook.tables.map((table) => (
+                          <tr key={table.name}>
+                            <td>{table.name}</td>
+                            <td>{table.rows} × {table.columns}</td>
+                            <td>
+                              {table.column_names.join(", ")}
+                              {table.columns_truncated ? ", ..." : ""}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </details>
               ))}
             </section>
           )}

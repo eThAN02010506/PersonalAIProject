@@ -23,9 +23,12 @@ from qwopus_agent.api.routes import (
     build_local_folder_router,
     build_model_router,
     build_report_router,
+    build_skill_router,
 )
 from qwopus_agent.documents import DocumentStore
 from qwopus_agent.memory import ConversationKnowledgeManager
+from qwopus_agent.services.skill_growth_service import SkillGrowthService
+from qwopus_agent.skills import SkillCatalog, SkillRegistry
 from qwopus_agent.utils.debug_store import DEFAULT_DEBUG_DIRECTORY
 from qwopus_agent.utils.logging_config import (
     DEFAULT_RUNTIME_LOG_PATH,
@@ -75,10 +78,25 @@ def create_app(
     repo = repository or ConversationRepository()
     debug_path = debug_directory if debug_directory is not None else DEFAULT_DEBUG_DIRECTORY
     knowledge = knowledge_manager or ConversationKnowledgeManager()
+    skill_root = repo.database_path.parent / "skills"
+    skill_catalog = SkillCatalog(storage_path=skill_root / "catalog.json")
+    skill_registry = SkillRegistry.discover(
+        catalog=skill_catalog,
+        workflow_root=skill_root / "workflows",
+    )
+    skill_growth = SkillGrowthService(
+        registry=skill_registry,
+        catalog=skill_catalog,
+        workflow_root=skill_root / "workflows",
+        history_path=skill_root / "growth_history.json",
+    )
     runs = ChatRunRegistry(
         repo,
         debug_directory=debug_path,
         knowledge_root=knowledge.root,
+        knowledge_manager=knowledge,
+        skill_catalog=skill_catalog,
+        skill_growth=skill_growth,
     )
     runtime = model_runtime or RuntimeModelController()
     documents = document_store or DocumentStore()
@@ -106,6 +124,9 @@ def create_app(
     api.state.runs = runs
     api.state.model_runtime = runtime
     api.state.knowledge_manager = knowledge
+    api.state.skill_catalog = skill_catalog
+    api.state.skill_registry = skill_registry
+    api.state.skill_growth = skill_growth
     api.add_middleware(
         CORSMiddleware,
         allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
@@ -129,6 +150,7 @@ def create_app(
     )
     api.include_router(build_local_folder_router(runtime, repo, debug_path))
     api.include_router(build_report_router(REPORT_DIRECTORY))
+    api.include_router(build_skill_router(skill_growth))
     api.include_router(
         build_debug_router(
             runtime,

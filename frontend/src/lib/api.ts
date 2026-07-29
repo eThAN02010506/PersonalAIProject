@@ -5,9 +5,11 @@ import type {
   DebugOverview,
   DebugRecord,
   Health,
+  InterpretationMode,
   LocalFolderTree,
   RunView,
   SavedDocument,
+  SkillVersion,
 } from "./types";
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -70,6 +72,17 @@ export const api = {
 
   listDocuments: () => request<SavedDocument[]>("/api/documents"),
 
+  listSkills: () => request<SkillVersion[]>("/api/skills"),
+
+  promoteSkill: (name: string, version: string) =>
+    skillAction(name, version, "promote"),
+
+  rejectSkill: (name: string, version: string) =>
+    skillAction(name, version, "reject"),
+
+  rollbackSkill: (name: string, version: string) =>
+    skillAction(name, version, "rollback"),
+
   attachSavedDocuments: (conversationId: string, documentIds: string[]) =>
     request<{
       conversation_id: string;
@@ -120,6 +133,7 @@ export const api = {
       includeGlobalKnowledge: boolean;
       minSourceRelevance: number;
       responseDetail: "concise" | "balanced" | "detailed";
+      interpretationMode: InterpretationMode;
     },
   ) =>
     request<{ run_id: string; status: "running" }>(
@@ -134,6 +148,7 @@ export const api = {
           include_global_knowledge: options.includeGlobalKnowledge,
           min_source_relevance: options.minSourceRelevance,
           response_detail: options.responseDetail,
+          interpretation_mode: options.interpretationMode,
         }),
       },
     ),
@@ -188,6 +203,17 @@ export const api = {
       }),
     }),
 };
+
+function skillAction(
+  name: string,
+  version: string,
+  action: "promote" | "reject" | "rollback",
+): Promise<SkillVersion> {
+  return request<SkillVersion>(
+    `/api/skills/${encodeURIComponent(name)}/${encodeURIComponent(version)}/${action}`,
+    { method: "POST" },
+  );
+}
 
 export async function waitForRun(
   runId: string,

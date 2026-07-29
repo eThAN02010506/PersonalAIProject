@@ -6,6 +6,7 @@ such as optiq serve / mlx_lm.server.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -17,9 +18,13 @@ from qwopus_agent.integrations import (
     smolagents_model,
     smolagents_prompts,
 )
+from qwopus_agent.integrations.skill_tools import build_promoted_workflow_tools
 from qwopus_agent.memory import DEFAULT_CONVERSATION_KNOWLEDGE_ROOT
 from qwopus_agent.reports import contract as report_contract
 from qwopus_agent.reports import grounded
+from qwopus_agent.services.answer_quality import AnswerQualityEvaluator
+from qwopus_agent.services.orchestration_models import AnswerContract
+from qwopus_agent.skills import WorkflowSpec
 from qwopus_agent.utils.token_budget import (
     TokenBudgetManager,
     truncate_to_tokens,
@@ -183,6 +188,7 @@ def build_smolagents_model(settings: SmolagentsModelSettings | None = None) -> A
 def build_smolagents_code_agent(
     settings: SmolagentsModelSettings | None = None,
     tools: list[Any] | None = None,
+    final_answer_checks: list[Callable[..., bool]] | None = None,
 ) -> Any:
     try:
         from smolagents import CodeAgent
@@ -198,12 +204,14 @@ def build_smolagents_code_agent(
         # 原因：聊天 Tool 不需要任意文件、进程或 shell 访问；授权 os/subprocess 会扩大风险。
         # 作用：Code 兼容模式只能组合已注册 Tool，数据计算继续使用独立 pandas 沙箱。
         additional_authorized_imports=[],
+        final_answer_checks=final_answer_checks,
     )
 
 
 def build_smolagents_tool_calling_agent(
     settings: SmolagentsModelSettings | None = None,
     tools: list[Any] | None = None,
+    final_answer_checks: list[Callable[..., bool]] | None = None,
 ) -> Any:
     """Build the smolagents Agent runtime used as Qwopus' chat driver."""
     try:
@@ -214,7 +222,11 @@ def build_smolagents_tool_calling_agent(
 
     settings = settings or SmolagentsModelSettings.from_env()
     if settings.capabilities.agent_mode == "code":
-        return build_smolagents_code_agent(settings=settings, tools=tools)
+        return build_smolagents_code_agent(
+            settings=settings,
+            tools=tools,
+            final_answer_checks=final_answer_checks,
+        )
 
     model = build_smolagents_model(settings)
     # 原因：smolagents 是整体 Agent 驱动入口，工具选择应由 Agent runtime 处理。
@@ -222,6 +234,7 @@ def build_smolagents_tool_calling_agent(
     return ToolCallingAgent(
         tools=tools or [],
         model=model,
+        final_answer_checks=final_answer_checks,
     )
 
 
@@ -249,6 +262,9 @@ def run_agent_chat_turn(
     knowledge_scope: str | None = None,
     knowledge_root: Path = DEFAULT_CONVERSATION_KNOWLEDGE_ROOT,
     document_evidence_available: bool = False,
+    response_language_source: str | None = None,
+    answer_contract: AnswerContract | None = None,
+    promoted_workflows: tuple[WorkflowSpec, ...] = (),
     progress_callback: Callable[[str], None] | None = None,
 ) -> str:
     """Run one chat turn through smolagents as the Agent driver."""
@@ -264,6 +280,9 @@ def run_agent_chat_turn(
         knowledge_scope=knowledge_scope,
         knowledge_root=knowledge_root,
         document_evidence_available=document_evidence_available,
+        response_language_source=response_language_source,
+        answer_contract=answer_contract,
+        promoted_workflows=promoted_workflows,
         progress_callback=progress_callback,
     ).answer
 
@@ -280,6 +299,9 @@ def run_agent_chat_turn_with_debug(
     knowledge_scope: str | None = None,
     knowledge_root: Path = DEFAULT_CONVERSATION_KNOWLEDGE_ROOT,
     document_evidence_available: bool = False,
+    response_language_source: str | None = None,
+    answer_contract: AnswerContract | None = None,
+    promoted_workflows: tuple[WorkflowSpec, ...] = (),
     progress_callback: Callable[[str], None] | None = None,
 ) -> ChatAgentRun:
     """Run chat and retain only the safe Tool metadata needed by orchestration."""
@@ -318,6 +340,28 @@ def run_agent_chat_turn_with_debug(
         )
         tools.extend(knowledge_tools)
 
+    promoted_tools = (
+        build_promoted_workflow_tools(
+            promoted_workflows,
+            tools,
+            max_output_tokens=budget.observation_budget,
+        )
+        if promoted_workflows
+        else []
+    )
+    # 原因：已晋升工作流只有进入 smolagents 的本轮 Tool 列表才是真正可复用能力。
+    # 作用：工作流复用现有授权 Tool；缺少 Web/Knowledge 权限时适配器会拒绝装配。
+    tools.extend(promoted_tools)
+    promoted_local_tools = {
+        spec.name
+        for spec in promoted_workflows
+        if any(
+            step.skill_name in {"rag_search", "graph_search"}
+            for step in spec.steps
+        )
+        and any(getattr(tool, "name", None) == spec.name for tool in promoted_tools)
+    }
+
     accessible_document_evidence = (
         document_evidence_available
         or bool(private_sources)
@@ -342,7 +386,12 @@ def run_agent_chat_turn_with_debug(
             ),
         )
 
-    agent = build_smolagents_tool_calling_agent(settings=effective_settings, tools=tools)
+    final_answer_checks = _build_answer_quality_checks(answer_contract)
+    agent = build_smolagents_tool_calling_agent(
+        settings=effective_settings,
+        tools=tools,
+        final_answer_checks=final_answer_checks,
+    )
     prompt = format_agent_chat_prompt(
         history=history,
         user_message=user_message,
@@ -352,6 +401,8 @@ def run_agent_chat_turn_with_debug(
         knowledge_primary_scope=knowledge_primary_scope,
         history_max_tokens=budget.history_budget,
         response_detail=response_detail,
+        response_language_source=response_language_source,
+        answer_contract=answer_contract,
     )
     if progress_callback is not None:
         progress_callback("planning")
@@ -365,7 +416,9 @@ def run_agent_chat_turn_with_debug(
             and knowledge_primary_scope == "private"
         )
     )
-    run_max_steps = max_steps if tools else 2
+    # 原因：原生 final_answer_checks 拒绝一次短答后，需要同一 Agent 再有一步完成修正。
+    # 作用：只为复杂任务增加一次机会，简单问答和明确简洁请求维持原延迟上限。
+    run_max_steps = (max_steps if tools else 2) + int(bool(final_answer_checks))
     run_result = agent.run(
         prompt,
         max_steps=run_max_steps,
@@ -386,7 +439,9 @@ def run_agent_chat_turn_with_debug(
     observations = _extract_agent_observations(steps)
     final_answer = _extract_final_answer(answer)
 
-    local_tool_used = bool(_LOCAL_KNOWLEDGE_TOOLS.intersection(tool_calls))
+    local_tool_used = bool(
+        (_LOCAL_KNOWLEDGE_TOOLS | promoted_local_tools).intersection(tool_calls)
+    )
     if (
         enable_local_knowledge
         and not enable_web_search
@@ -467,6 +522,47 @@ def run_agent_chat_turn_with_debug(
         state=state,
         debug_runs=tuple(debug_runs),
         success=True,
+    )
+
+
+def _build_answer_quality_checks(
+    contract: AnswerContract | None,
+) -> list[Callable[..., bool]]:
+    """Build a request-scoped smolagents final-answer validator."""
+    if (
+        contract is None
+        or contract.response_detail == "concise"
+        or contract.complexity == "simple"
+    ):
+        return []
+    evaluator = AnswerQualityEvaluator()
+
+    def qwopus_answer_quality(
+        final_answer: Any,
+        _memory: Any,
+        *,
+        agent: Any = None,
+    ) -> bool:
+        del agent
+        answer = str(final_answer)
+        report = evaluator.evaluate(
+            answer,
+            contract,
+            has_citations=_answer_contains_source(answer),
+        )
+        return report.passed
+
+    return [qwopus_answer_quality]
+
+
+def _answer_contains_source(answer: str) -> bool:
+    return bool(
+        re.search(r"https?://", answer, re.I)
+        or re.search(
+            r"\b[^\s/\\]+\.(?:pdf|docx|md|txt|png|jpe?g|csv|xlsx?|xls)\b",
+            answer,
+            re.I,
+        )
     )
 
 

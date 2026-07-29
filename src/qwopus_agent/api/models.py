@@ -7,6 +7,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from qwopus_agent.documents.local_folder import MAX_LOCAL_FOLDER_SELECTION
+from qwopus_agent.services.orchestration_models import InterpretationMode
 
 
 class ConversationCreate(BaseModel):
@@ -57,6 +58,9 @@ class ChatStartRequest(BaseModel):
     # 原因：用户需要控制答案的信息密度，而不是被固定最少字数拖慢每次生成。
     # 作用：默认请求详细答案，并允许前端按当前问题切换详略。
     response_detail: Literal["concise", "balanced", "detailed"] = "detailed"
+    # 原因：抽象请求可以按字面、对话上下文或探索式扩展产生不同的安全执行目标。
+    # 作用：前端显式控制解析半径，默认只使用当前对话内已授权的上下文。
+    interpretation_mode: InterpretationMode = "contextual"
 
     @model_validator(mode="after")
     def validate_global_permission(self) -> ChatStartRequest:
@@ -94,6 +98,65 @@ class SourceCoverageView(BaseModel):
     complete: bool = False
 
 
+class SpreadsheetSheetView(BaseModel):
+    """Safe structural summary for one worksheet."""
+
+    name: str
+    kind: Literal["empty", "table", "multi_table", "form", "matrix"]
+    region_count: int = Field(ge=0)
+    formula_count: int = Field(ge=0)
+    merged_range_count: int = Field(ge=0)
+    chart_count: int = Field(ge=0)
+    image_count: int = Field(ge=0)
+    data_validation_count: int = Field(ge=0)
+    hidden: bool = False
+
+
+class SpreadsheetTableView(BaseModel):
+    """Safe schema for one dataframe exposed to the pandas sandbox."""
+
+    name: str
+    source_sheet: str
+    rows: int = Field(ge=0)
+    columns: int = Field(ge=0)
+    column_names: list[str] = Field(default_factory=list)
+    columns_truncated: bool = False
+
+
+class SpreadsheetWorkbookView(BaseModel):
+    """Workbook profile shown without raw spreadsheet cell values."""
+
+    source: str
+    sheet_count: int = Field(ge=0)
+    formula_count: int = Field(ge=0)
+    merged_range_count: int = Field(ge=0)
+    chart_count: int = Field(ge=0)
+    image_count: int = Field(ge=0)
+    data_validation_count: int = Field(ge=0)
+    sheets: list[SpreadsheetSheetView] = Field(default_factory=list)
+    tables: list[SpreadsheetTableView] = Field(default_factory=list)
+
+
+class SkillStepView(BaseModel):
+    """One reviewed step without persisted argument values."""
+
+    skill_name: str
+
+
+class SkillVersionView(BaseModel):
+    """Safe lifecycle record for one reusable Skill version."""
+
+    name: str
+    version: str
+    description: str
+    status: Literal["candidate", "active", "archived", "rejected"]
+    created_at: str
+    source_run_id: str | None = None
+    intent_examples: list[str] = Field(default_factory=list)
+    steps: list[SkillStepView] = Field(default_factory=list)
+    spec_valid: bool = False
+
+
 class AnalysisView(BaseModel):
     """Final document-analysis response and downloadable artifacts."""
 
@@ -103,6 +166,7 @@ class AnalysisView(BaseModel):
     trace: list[dict[str, Any]] = Field(default_factory=list)
     reports: list[dict[str, str]] = Field(default_factory=list)
     documents: list[DocumentOutlineView] = Field(default_factory=list)
+    spreadsheets: list[SpreadsheetWorkbookView] = Field(default_factory=list)
     source_coverage: SourceCoverageView | None = None
     generation_mode: str | None = None
 

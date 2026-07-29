@@ -1,7 +1,7 @@
 import asyncio
 import json
 import unittest
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
@@ -10,6 +10,8 @@ from qwopus_agent.agents import AgentRouter, Plan, PlanStep, SkillExecutor, Skil
 from qwopus_agent.services.skill_growth_service import (
     SkillGrowthPolicy,
     SkillGrowthService,
+    SkillRunTrace,
+    SkillTraceStep,
 )
 from qwopus_agent.skills import (
     BaseSkill,
@@ -182,6 +184,36 @@ class SkillGrowthServiceTests(unittest.TestCase):
             self.assertEqual(promoted.status, "active")
             self.assertIn("learned_alpha_then_beta", registry.list_names())
 
+    def test_framework_neutral_trace_creates_manual_candidate(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            registry, catalog, service, _, _ = self._components(
+                root,
+                min_successes=1,
+                auto_promote=False,
+            )
+
+            decision = service.observe_trace(
+                "research and summarize the current topic",
+                SkillRunTrace(
+                    success=True,
+                    output="A complete source-grounded result.",
+                    steps=(
+                        SkillTraceStep("alpha"),
+                        SkillTraceStep("beta", {"mode": "summary"}),
+                    ),
+                ),
+                context={"trace_id": "production-run-1"},
+            )
+
+            self.assertEqual(decision.status, "candidate")
+            self.assertEqual(decision.manifest.source_run_id, "production-run-1")
+            self.assertEqual(catalog.latest("learned_alpha_then_beta").status, "candidate")
+            self.assertNotIn("learned_alpha_then_beta", registry.list_names())
+
+    def test_growth_policy_never_auto_promotes_by_default(self) -> None:
+        self.assertFalse(SkillGrowthPolicy().auto_promote)
+
     def test_failed_execution_is_never_observed_as_a_skill(self) -> None:
         with TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -232,6 +264,84 @@ class SkillGrowthServiceTests(unittest.TestCase):
             self.assertEqual([item.status for item in manifests], ["archived", "active"])
             active_skill = registry.get("learned_alpha_then_beta")
             self.assertEqual(active_skill.spec.version, "0.1.1")
+
+            rolled_back = service.rollback("learned_alpha_then_beta", "0.1.0")
+
+            self.assertEqual(rolled_back.status, "active")
+            self.assertEqual(
+                registry.get("learned_alpha_then_beta").spec.version,
+                "0.1.0",
+            )
+            self.assertEqual(
+                catalog.latest("learned_alpha_then_beta", status="archived").version,
+                "0.1.1",
+            )
+
+    def test_rejected_candidate_cannot_be_promoted(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            _, catalog, service, _, _ = self._components(
+                root,
+                min_successes=1,
+                auto_promote=False,
+            )
+            decision = service.observe_trace(
+                "repeat alpha",
+                SkillRunTrace(
+                    success=True,
+                    output="A complete reusable output.",
+                    steps=(SkillTraceStep("alpha"),),
+                ),
+            )
+            assert decision.manifest is not None
+
+            rejected = service.reject(
+                decision.manifest.name,
+                decision.manifest.version,
+            )
+
+            self.assertEqual(rejected.status, "rejected")
+            self.assertEqual(
+                catalog.latest(decision.manifest.name).status,
+                "rejected",
+            )
+            with self.assertRaisesRegex(ValueError, "must be candidate"):
+                service.promote(
+                    decision.manifest.name,
+                    decision.manifest.version,
+                )
+
+    def test_promotion_rejects_catalog_spec_path_outside_workflow_root(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            _, catalog, service, _, _ = self._components(
+                root,
+                min_successes=1,
+                auto_promote=False,
+            )
+            decision = service.observe_trace(
+                "repeat alpha safely",
+                SkillRunTrace(
+                    success=True,
+                    output="A complete reusable output.",
+                    steps=(SkillTraceStep("alpha"),),
+                ),
+            )
+            assert decision.manifest is not None
+            outside = root / "outside.json"
+            outside.write_text(
+                Path(decision.manifest.spec_path).read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
+            catalog.register(
+                replace(decision.manifest, spec_path=str(outside))
+            )
+
+            with self.assertRaisesRegex(ValueError, "outside"):
+                service.promote(
+                    decision.manifest.name,
+                    decision.manifest.version,
+                )
 
     def test_deployed_workflow_reloads_and_tampered_spec_is_rejected(self) -> None:
         with TemporaryDirectory() as tmpdir:

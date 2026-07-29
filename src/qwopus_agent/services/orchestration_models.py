@@ -24,6 +24,95 @@ class ConversationTurn(BaseModel):
     content: str = Field(min_length=1)
 
 
+InterpretationMode = Literal["precise", "contextual", "exploratory"]
+TaskType = Literal[
+    "answer",
+    "explain",
+    "how_to",
+    "compare",
+    "summarize",
+    "analyze",
+    "report",
+    "continue",
+]
+
+
+class ContextReference(BaseModel):
+    """One trusted context item used to resolve the current request."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    kind: Literal["conversation", "task", "document", "skill", "preference"]
+    identifier: str = Field(min_length=1)
+    label: str = Field(min_length=1)
+
+
+class ContextSnapshot(BaseModel):
+    """Bounded conversation facts available to the intent resolver."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    conversation_id: str | None = None
+    previous_objective: str | None = None
+    open_tasks: tuple[str, ...] = ()
+    document_sources: tuple[str, ...] = ()
+    active_skill_names: tuple[str, ...] = ()
+
+
+class AnswerContract(BaseModel):
+    """Task-specific requirements that make answer depth testable."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    task_type: TaskType = "answer"
+    complexity: Literal["simple", "standard", "complex"] = "standard"
+    response_detail: Literal["concise", "balanced", "detailed"] = "detailed"
+    response_language: str = "auto"
+    output_format: str = "adaptive"
+    required_facets: tuple[str, ...] = ()
+
+
+class ResolvedIntent(BaseModel):
+    """Operational objective produced from literal text and authorized context."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    original_request: str = Field(min_length=1)
+    operational_objective: str = Field(min_length=1)
+    interpretation_mode: InterpretationMode = "contextual"
+    task_type: TaskType = "answer"
+    confidence: float = Field(default=1.0, ge=0.0, le=1.0)
+    context_references: tuple[ContextReference, ...] = ()
+    assumptions: tuple[str, ...] = ()
+    requires_clarification: bool = False
+    clarification_question: str | None = None
+    answer_contract: AnswerContract = Field(default_factory=AnswerContract)
+
+    @model_validator(mode="after")
+    def validate_clarification(self) -> ResolvedIntent:
+        """Require an actionable question whenever execution must pause."""
+        if self.requires_clarification and not (
+            self.clarification_question and self.clarification_question.strip()
+        ):
+            raise ValueError("A clarification question is required.")
+        return self
+
+
+class ConversationTaskState(BaseModel):
+    """Structured state from the last successful task in one conversation."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    last_successful_objective: str | None = None
+    last_task_type: TaskType | None = None
+    last_answer_contract: AnswerContract | None = None
+    active_document_sources: tuple[str, ...] = ()
+    last_skill_name: str | None = None
+    last_skill_version: str | None = None
+    open_tasks: tuple[str, ...] = ()
+    updated_at: str = ""
+
+
 class OrchestrationFile(BaseModel):
     """Framework-neutral uploaded or explicitly selected local file."""
 
@@ -47,6 +136,10 @@ class OrchestrationRequest(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     objective: str
+    # 原因：原始文字和经上下文解析的执行目标必须同时保留，不能由 Prompt 临时改写。
+    # 作用：Planner 使用稳定的操作目标，最终回答仍可遵循用户原话和语言。
+    resolved_intent: ResolvedIntent | None = None
+    interpretation_mode: InterpretationMode = "contextual"
     # 原因：开启本地知识时，全局 MiniRAG 会让一个聊天检索到其他聊天上传的文件。
     # 作用：把隔离键作为编排请求的一部分，所有知识 Tool 只能打开当前会话目录。
     conversation_id: str | None = None
@@ -108,6 +201,10 @@ class OrchestrationResult:
     analysis_result: AnalysisResult | None = None
     report: GeneratedReport | None = None
     multi_agent_run: MultiAgentRun | None = None
+    # 原因：父进程只有在任务成功后才能安全更新会话状态。
+    # 作用：把本轮解析结果和状态更新作为内部产物返回，不让 worker 直接写 SQLite。
+    resolved_intent: ResolvedIntent | None = None
+    task_state: ConversationTaskState | None = None
     # 原因：本地调试台需要完整 Agent 步骤，但公开 API 与正式前端不能自动暴露这些内容。
     # 作用：把 raw debug 作为内部结果旁路传递；FastAPI response models 明确忽略该字段。
     debug_runs: tuple[AgentDebugRun, ...] = ()

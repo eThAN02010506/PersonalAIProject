@@ -13,6 +13,8 @@ export type ChatMessage = {
   created_at: string;
 };
 
+export type InterpretationMode = "precise" | "contextual" | "exploratory";
+
 export type RunView = {
   run_id: string;
   status: "running" | "completed" | "failed" | "cancelled";
@@ -30,8 +32,54 @@ export type AnalysisResult = {
   trace: Record<string, unknown>[];
   reports: Array<{ kind: string; name: string; url: string }>;
   documents: DocumentOutline[];
+  spreadsheets: SpreadsheetWorkbook[];
   source_coverage?: SourceCoverage;
   generation_mode?: string;
+};
+
+export type SpreadsheetSheet = {
+  name: string;
+  kind: "empty" | "table" | "multi_table" | "form" | "matrix";
+  region_count: number;
+  formula_count: number;
+  merged_range_count: number;
+  chart_count: number;
+  image_count: number;
+  data_validation_count: number;
+  hidden: boolean;
+};
+
+export type SpreadsheetTable = {
+  name: string;
+  source_sheet: string;
+  rows: number;
+  columns: number;
+  column_names: string[];
+  columns_truncated: boolean;
+};
+
+export type SpreadsheetWorkbook = {
+  source: string;
+  sheet_count: number;
+  formula_count: number;
+  merged_range_count: number;
+  chart_count: number;
+  image_count: number;
+  data_validation_count: number;
+  sheets: SpreadsheetSheet[];
+  tables: SpreadsheetTable[];
+};
+
+export type SkillVersion = {
+  name: string;
+  version: string;
+  description: string;
+  status: "candidate" | "active" | "archived" | "rejected";
+  created_at: string;
+  source_run_id?: string;
+  intent_examples: string[];
+  steps: Array<{ skill_name: string }>;
+  spec_valid: boolean;
 };
 
 export type SourceCoverage = {

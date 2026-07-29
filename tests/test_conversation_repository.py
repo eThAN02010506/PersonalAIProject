@@ -1,8 +1,13 @@
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
 
 from qwopus_agent.api.repository import ConversationRepository
+from qwopus_agent.services.orchestration_models import (
+    AnswerContract,
+    ConversationTaskState,
+)
 
 
 class ConversationRepositoryTests(unittest.TestCase):
@@ -51,6 +56,81 @@ class ConversationRepositoryTests(unittest.TestCase):
 
         self.assertIn("Qwopus-Agent", history[0]["content"])
         self.assertIn("document pipeline", history[0]["content"])
+
+    def test_task_state_round_trips_without_replacing_memory_context(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repository = ConversationRepository(
+                Path(tmpdir) / "qwopus.db",
+                import_legacy=False,
+            )
+            repository.initialize()
+            conversation = repository.create_conversation()
+            repository.set_memory_context(
+                conversation.id,
+                pinned_facts=("Keep this fact.",),
+                open_tasks=("Old task",),
+            )
+            repository.set_task_state(
+                conversation.id,
+                ConversationTaskState(
+                    last_successful_objective="Compare the selected documents.",
+                    last_task_type="compare",
+                    last_answer_contract=AnswerContract(
+                        task_type="compare",
+                        required_facets=("differences", "conclusion"),
+                    ),
+                    active_document_sources=("alpha.pdf", "beta.pdf"),
+                    open_tasks=("Review the conclusion.",),
+                    updated_at="2026-07-29T00:00:00+00:00",
+                ),
+            )
+
+            memory = repository.get_memory(conversation.id)
+
+        self.assertIsNotNone(memory)
+        assert memory is not None
+        self.assertEqual(memory.pinned_facts, ("Keep this fact.",))
+        self.assertEqual(memory.open_tasks, ("Review the conclusion.",))
+        self.assertEqual(
+            memory.task_state.active_document_sources,
+            ("alpha.pdf", "beta.pdf"),
+        )
+        self.assertEqual(memory.task_state.last_task_type, "compare")
+
+    def test_initialize_migrates_legacy_memory_table(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            database_path = Path(tmpdir) / "qwopus.db"
+            with sqlite3.connect(database_path) as connection:
+                connection.executescript(
+                    """
+                    CREATE TABLE conversations (
+                        id TEXT PRIMARY KEY,
+                        title TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                    );
+                    CREATE TABLE conversation_memory (
+                        conversation_id TEXT PRIMARY KEY,
+                        summary TEXT NOT NULL DEFAULT '',
+                        summary_until_message_id TEXT,
+                        pinned_facts TEXT NOT NULL DEFAULT '[]',
+                        open_tasks TEXT NOT NULL DEFAULT '[]',
+                        updated_at TEXT NOT NULL
+                    );
+                    """
+                )
+
+            repository = ConversationRepository(database_path, import_legacy=False)
+            repository.initialize()
+            with sqlite3.connect(database_path) as connection:
+                columns = {
+                    row[1]
+                    for row in connection.execute(
+                        "PRAGMA table_info(conversation_memory)"
+                    ).fetchall()
+                }
+
+        self.assertIn("task_state", columns)
 
 
 if __name__ == "__main__":

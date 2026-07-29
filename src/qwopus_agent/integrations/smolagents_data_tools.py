@@ -99,8 +99,8 @@ def build_excel_analysis_tool(spreadsheets: Mapping[str, str | Path]) -> Any:
                 raise FileNotFoundError(f"Spreadsheet does not exist: {path}")
             spreadsheet = read_spreadsheet(path)
             # 原因：模型负责提出分析代码，但不能直接运行任意 Python 或读取本机文件。
-            # 作用：在 AST 受限沙箱内针对本地 DataFrame 执行，只把计算结果返回 Agent。
-            execution = execute_pandas_code(code, spreadsheet.sheets)
+            # 作用：在 AST 受限沙箱内针对所有检测到的表区域执行，只把计算结果返回 Agent。
+            execution = execute_pandas_code(code, spreadsheet.analysis_frames())
             return str(execution.markdown)
 
     return ExcelAnalysisTool()

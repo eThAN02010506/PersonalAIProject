@@ -117,6 +117,22 @@ class ConversationKnowledgeManager:
         """Return the process-local MiniRAG instance for one conversation."""
         return self._entry_for(conversation_id).memory
 
+    def list_sources(self, conversation_id: str) -> list[str]:
+        """Return source names without creating an empty knowledge store."""
+        storage_path = self.storage_path(conversation_id)
+        with self._entries_lock:
+            entry = self._entries.get(conversation_id)
+        if entry is None:
+            if not storage_path.is_file():
+                return []
+            entry = self._entry_for(conversation_id)
+        with entry.lock:
+            if not entry.active:
+                return []
+            # 原因：意图解析只需要可引用文件名，不能读取或注入文档正文。
+            # 作用：为“这个文档/第二份文档”提供有界清单，并复用 MiniRAG 的持久化来源索引。
+            return entry.memory.list_sources()
+
     def _entry_for(self, conversation_id: str) -> _KnowledgeEntry:
         """Resolve one entry atomically against concurrent deletion."""
         storage_path = self.storage_path(conversation_id)

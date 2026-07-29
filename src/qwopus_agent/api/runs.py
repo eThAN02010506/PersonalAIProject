@@ -5,24 +5,55 @@ from __future__ import annotations
 import time
 from collections import OrderedDict
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from threading import Lock
 from typing import Literal
 from uuid import uuid4
 
 from qwopus_agent.integrations.smolagents_runtime import SmolagentsModelSettings
-from qwopus_agent.memory import DEFAULT_CONVERSATION_KNOWLEDGE_ROOT
-from qwopus_agent.services.chat_service import BackgroundChatTask, start_chat_task
+from qwopus_agent.memory import (
+    DEFAULT_CONVERSATION_KNOWLEDGE_ROOT,
+    ConversationKnowledgeManager,
+)
+from qwopus_agent.services.chat_service import (
+    BackgroundChatTask,
+    ChatTaskResult,
+    start_chat_task,
+)
+from qwopus_agent.services.intent_resolver import IntentResolver, build_context_snapshot
+from qwopus_agent.services.orchestration_models import (
+    ContextSnapshot,
+    ConversationTaskState,
+    InterpretationMode,
+    ResolvedIntent,
+)
+from qwopus_agent.services.skill_growth_service import (
+    SkillGrowthService,
+    SkillRunTrace,
+    SkillTraceStep,
+)
+from qwopus_agent.skills import SkillCatalog, WorkflowSkill, WorkflowSpec
 from qwopus_agent.utils.debug_store import DEFAULT_DEBUG_DIRECTORY, append_debug_record
 
 from .models import RunView
-from .repository import ConversationRepository
+from .repository import ConversationMemoryRecord, ConversationRepository
+
+
+@dataclass(frozen=True)
+class PreparedChatRequest:
+    """Resolved request and bounded state captured before a worker starts."""
+
+    resolved_intent: ResolvedIntent
+    snapshot: ContextSnapshot
+    previous_task_state: ConversationTaskState
 
 
 @dataclass
 class _ActiveRun:
     conversation_id: str
     task: BackgroundChatTask
+    prepared: PreparedChatRequest
 
 
 @dataclass(frozen=True)
@@ -33,6 +64,11 @@ class _CompletedRun:
 
 DEFAULT_COMPLETED_RUN_TTL_SECONDS = 60 * 60
 DEFAULT_MAX_COMPLETED_RUNS = 500
+_REUSABLE_TOOL_SKILLS = {
+    "tavily_search": "web_search",
+    "rag_search": "rag_search",
+    "graph_search": "graph_search",
+}
 
 
 class ChatRunRegistry:
@@ -43,12 +79,20 @@ class ChatRunRegistry:
         repository: ConversationRepository,
         debug_directory: Path = DEFAULT_DEBUG_DIRECTORY,
         knowledge_root: Path = DEFAULT_CONVERSATION_KNOWLEDGE_ROOT,
+        knowledge_manager: ConversationKnowledgeManager | None = None,
+        skill_catalog: SkillCatalog | None = None,
+        skill_growth: SkillGrowthService | None = None,
+        intent_resolver: IntentResolver | None = None,
         completed_ttl_seconds: float = DEFAULT_COMPLETED_RUN_TTL_SECONDS,
         max_completed_runs: int = DEFAULT_MAX_COMPLETED_RUNS,
     ) -> None:
         self.repository = repository
         self.debug_directory = debug_directory
         self.knowledge_root = Path(knowledge_root)
+        self.knowledge_manager = knowledge_manager
+        self.skill_catalog = skill_catalog or SkillCatalog()
+        self.skill_growth = skill_growth
+        self.intent_resolver = intent_resolver or IntentResolver()
         self.completed_ttl_seconds = completed_ttl_seconds
         self.max_completed_runs = max_completed_runs
         self._runs: dict[str, _ActiveRun] = {}
@@ -67,8 +111,18 @@ class ChatRunRegistry:
         include_global_knowledge: bool = False,
         min_source_relevance: float = 0.55,
         response_detail: Literal["concise", "balanced", "detailed"] = "detailed",
+        interpretation_mode: InterpretationMode = "contextual",
+        prepared: PreparedChatRequest | None = None,
     ) -> str:
         self.reap()
+        resolved_request = prepared or self.prepare(
+            conversation_id,
+            content,
+            response_detail=response_detail,
+            interpretation_mode=interpretation_mode,
+        )
+        if resolved_request.resolved_intent.requires_clarification:
+            raise ValueError("A clarification request cannot start an Agent worker.")
         history = self.repository.build_model_history(conversation_id)
         self.repository.add_message(conversation_id, "user", content)
         task = start_chat_task(
@@ -82,10 +136,119 @@ class ChatRunRegistry:
             min_source_relevance=min_source_relevance,
             response_detail=response_detail,
             knowledge_root=self.knowledge_root,
+            resolved_intent=resolved_request.resolved_intent,
+            workflow_specs=self._active_workflow_specs(),
         )
         run_id = uuid4().hex
         with self._lock:
-            self._runs[run_id] = _ActiveRun(conversation_id, task)
+            self._runs[run_id] = _ActiveRun(
+                conversation_id,
+                task,
+                resolved_request,
+            )
+        return run_id
+
+    def _active_workflow_specs(self) -> tuple[WorkflowSpec, ...]:
+        """Capture immutable, active workflow versions for one worker request."""
+        if self.skill_growth is None:
+            return ()
+        specs: list[WorkflowSpec] = []
+        for manifest in self.skill_growth.catalog.deployed():
+            try:
+                skill = self.skill_growth.registry.get(manifest.name)
+            except KeyError:
+                continue
+            if (
+                isinstance(skill, WorkflowSkill)
+                and skill.spec.version == manifest.version
+                and skill.spec.checksum == manifest.checksum
+                and skill.spec.checksum_is_valid()
+            ):
+                specs.append(skill.spec)
+        # 原因：spawn worker 不能依赖父进程中的可变 Registry，且运行中可能发生 promote/rollback。
+        # 作用：每次请求固定使用启动时已激活且通过 checksum 校验的版本。
+        return tuple(specs)
+
+    def prepare(
+        self,
+        conversation_id: str,
+        content: str,
+        *,
+        response_detail: Literal["concise", "balanced", "detailed"] = "detailed",
+        interpretation_mode: InterpretationMode = "contextual",
+    ) -> PreparedChatRequest:
+        """Resolve one request from persisted task state and safe source names."""
+        memory = self.repository.get_memory(conversation_id)
+        task_state = (
+            memory.task_state
+            if isinstance(memory, ConversationMemoryRecord)
+            else ConversationTaskState()
+        )
+        sources = (
+            self.knowledge_manager.list_sources(conversation_id)
+            if self.knowledge_manager is not None
+            else ()
+        )
+        active_skills = tuple(
+            manifest.name for manifest in self.skill_catalog.deployed()
+        )
+        snapshot = build_context_snapshot(
+            conversation_id=conversation_id,
+            task_state=task_state,
+            document_sources=sources,
+            active_skill_names=active_skills,
+        )
+        return PreparedChatRequest(
+            resolved_intent=self.intent_resolver.resolve(
+                content,
+                snapshot=snapshot,
+                interpretation_mode=interpretation_mode,
+                response_detail=response_detail,
+            ),
+            snapshot=snapshot,
+            previous_task_state=task_state,
+        )
+
+    def complete_clarification(
+        self,
+        conversation_id: str,
+        prepared: PreparedChatRequest,
+    ) -> str:
+        """Persist a clarification without starting or requiring a model."""
+        question = prepared.resolved_intent.clarification_question
+        if not prepared.resolved_intent.requires_clarification or not question:
+            raise ValueError("The prepared request does not require clarification.")
+        self.reap()
+        self.repository.add_message(
+            conversation_id,
+            "user",
+            prepared.resolved_intent.original_request,
+        )
+        self.repository.add_message(conversation_id, "assistant", question)
+        run_id = uuid4().hex
+        view = RunView(
+            run_id=run_id,
+            status="completed",
+            phase="clarification",
+            answer=question,
+            trace=[
+                {
+                    "phase": "intent_resolution",
+                    "status": "completed",
+                    "message": "Clarification required before Agent execution.",
+                }
+            ],
+        )
+        append_debug_record(
+            source="chat",
+            status="completed",
+            result=question,
+            trace=view.trace,
+            debug_runs=(),
+            run_id=run_id,
+            directory=self.debug_directory,
+        )
+        self._store_completed(run_id, view)
         return run_id
 
     def poll(self, run_id: str) -> RunView | None:
@@ -198,18 +361,30 @@ class ChatRunRegistry:
             self._runs.pop(run_id, None)
 
         try:
+            public_trace = list(result.trace)
             if result.status == "completed":
                 self.repository.add_message(
                     active.conversation_id,
                     "assistant",
                     result.content,
                 )
+                self.repository.set_task_state(
+                    active.conversation_id,
+                    _completed_task_state(active.prepared),
+                )
+                public_trace.extend(
+                    self._observe_skill_growth(
+                        run_id,
+                        active,
+                        result,
+                    )
+                )
                 view = RunView(
                     run_id=run_id,
                     status="completed",
                     phase="completed",
                     answer=result.content,
-                    trace=list(result.trace),
+                    trace=public_trace,
                     citations=list(result.citations),
                 )
             else:
@@ -218,7 +393,7 @@ class ChatRunRegistry:
                     status="failed",
                     phase="failed",
                     error=result.content,
-                    trace=list(result.trace),
+                    trace=public_trace,
                 )
             # 原因：正式 API 不能返回 raw debug_runs，但独立 Console 必须能观察正式请求。
             # 作用：即使浏览器放弃轮询，reap 仍会持久化终态和完整内部诊断。
@@ -226,7 +401,7 @@ class ChatRunRegistry:
                 source="chat",
                 status=result.status,
                 result=result.content,
-                trace=result.trace,
+                trace=public_trace,
                 debug_runs=result.debug_runs,
                 run_id=run_id,
                 directory=self.debug_directory,
@@ -235,6 +410,40 @@ class ChatRunRegistry:
             active.task.close()
         self._store_completed(run_id, view)
         return view
+
+    def _observe_skill_growth(
+        self,
+        run_id: str,
+        active: _ActiveRun,
+        result: ChatTaskResult,
+    ) -> list[dict[str, str]]:
+        """Submit only safe reusable Tool names after a successful final answer."""
+        if self.skill_growth is None:
+            return []
+        trace = _reusable_skill_trace(result.trace, result.content)
+        if trace is None:
+            return []
+        try:
+            decision = self.skill_growth.observe_trace(
+                active.prepared.resolved_intent.operational_objective,
+                trace,
+                context={"trace_id": run_id},
+            )
+        except Exception as exc:  # noqa: BLE001 - growth is a non-fatal observer.
+            return [
+                {
+                    "phase": "skill_growth",
+                    "status": "warning",
+                    "message": f"Skill candidate evaluation failed: {type(exc).__name__}.",
+                }
+            ]
+        return [
+            {
+                "phase": "skill_growth",
+                "status": "completed",
+                "message": decision.reason,
+            }
+        ]
 
     def _store_completed(self, run_id: str, view: RunView) -> None:
         with self._lock:
@@ -256,3 +465,44 @@ class ChatRunRegistry:
             # 作用：TTL 和容量共同限制常驻内存，不影响已经持久化的聊天消息。
             while len(self._completed) > self.max_completed_runs:
                 self._completed.popitem(last=False)
+
+
+def _completed_task_state(prepared: PreparedChatRequest) -> ConversationTaskState:
+    """Create the next state only after the final answer succeeds."""
+    previous = prepared.previous_task_state
+    intent = prepared.resolved_intent
+    # 原因：失败或澄清轮次不能覆盖可继续的最后成功任务。
+    # 作用：成功终态一次性保存解析目标、答案契约和可引用文档，同时保留 Skill 版本。
+    return ConversationTaskState(
+        last_successful_objective=intent.operational_objective,
+        last_task_type=intent.task_type,
+        last_answer_contract=intent.answer_contract,
+        active_document_sources=prepared.snapshot.document_sources,
+        last_skill_name=previous.last_skill_name,
+        last_skill_version=previous.last_skill_version,
+        open_tasks=previous.open_tasks,
+        updated_at=datetime.now(UTC).isoformat(),
+    )
+
+
+def _reusable_skill_trace(
+    events: tuple[dict[str, object], ...],
+    output: str,
+) -> SkillRunTrace | None:
+    """Map one safe Tool trace to reusable BaseSkill names without observations."""
+    steps: list[SkillTraceStep] = []
+    for event in events:
+        if event.get("phase") != "tool_call" or event.get("status") != "completed":
+            continue
+        tool_name = event.get("tool")
+        if not isinstance(tool_name, str):
+            return None
+        skill_name = _REUSABLE_TOOL_SKILLS.get(tool_name)
+        if skill_name is None:
+            # 原因：全局知识、文档读取和文件 Tool 带有本轮权限或路径，不能固化成通用 Skill。
+            # 作用：只要轨迹含不可安全复用的 Tool，就放弃整个候选而不是学习残缺子序列。
+            return None
+        steps.append(SkillTraceStep(skill_name))
+    if not steps:
+        return None
+    return SkillRunTrace(success=True, output=output, steps=tuple(steps))

@@ -4,8 +4,12 @@ import types
 import unittest
 from dataclasses import dataclass
 
-from qwopus_agent.integrations.skill_tools import build_skill_tool
+from qwopus_agent.integrations.skill_tools import (
+    build_promoted_workflow_tools,
+    build_skill_tool,
+)
 from qwopus_agent.skills.base import BaseSkill, SkillRequest, SkillResponse
+from qwopus_agent.skills.workflow import WorkflowSpec
 
 
 class FakeTool:
@@ -56,6 +60,38 @@ class SkillToolAdapterTests(unittest.TestCase):
         result = tool.forward("中文内容很长", 2)
 
         self.assertIn("truncated", result)
+
+    def test_promoted_workflow_uses_only_authorized_runtime_tools(self) -> None:
+        class RuntimeSearchTool:
+            name = "tavily_search"
+            description = "Search current sources."
+
+            def forward(self, query: str) -> str:
+                return f"evidence for {query}"
+
+        spec = WorkflowSpec(
+            name="learned_web_search",
+            version="0.1.0",
+            description="Validated research workflow.",
+            intent_examples=("research current prices",),
+            steps=({"skill_name": "web_search"},),
+            source_signature="signature",
+        ).sealed()
+        fake_module = types.SimpleNamespace(Tool=FakeTool)
+        with unittest.mock.patch.dict(sys.modules, {"smolagents": fake_module}):
+            enabled = build_promoted_workflow_tools(
+                (spec,),
+                [RuntimeSearchTool()],
+            )
+            disabled = build_promoted_workflow_tools((spec,), [])
+
+        self.assertEqual(len(enabled), 1)
+        self.assertEqual(
+            enabled[0].forward("current prices"),
+            "evidence for current prices",
+        )
+        self.assertNotIn("research current prices", enabled[0].description)
+        self.assertEqual(disabled, [])
 
 
 if __name__ == "__main__":

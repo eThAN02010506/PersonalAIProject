@@ -1,10 +1,12 @@
 import {
   FileSearch,
   Globe2,
+  Layers3,
   Menu,
   MessageCircle,
   Network,
   Search,
+  ScanText,
   SlidersHorizontal,
   TextSelect,
   Wrench,
@@ -16,7 +18,13 @@ import { AgentRuntimeProvider } from "./components/AgentRuntimeProvider";
 import { ChatThread } from "./components/ChatThread";
 import { Sidebar } from "./components/Sidebar";
 import { api, waitForRun } from "./lib/api";
-import type { ChatMessage, Conversation, Health, RunView } from "./lib/types";
+import type {
+  ChatMessage,
+  Conversation,
+  Health,
+  InterpretationMode,
+  RunView,
+} from "./lib/types";
 
 // 原因：文档、过程和模型设置不是默认聊天首屏的必需代码。
 // 作用：仅在用户打开对应功能时加载模块，降低初始 JavaScript 解析成本。
@@ -35,8 +43,13 @@ const RunInspector = lazy(() =>
     default: module.RunInspector,
   })),
 );
+const SkillWorkspace = lazy(() =>
+  import("./components/SkillWorkspace").then((module) => ({
+    default: module.SkillWorkspace,
+  })),
+);
 
-type ViewMode = "chat" | "documents";
+type ViewMode = "chat" | "documents" | "skills";
 type ResponseDetail = "concise" | "balanced" | "detailed";
 
 export default function App() {
@@ -51,6 +64,8 @@ export default function App() {
   const [globalKnowledge, setGlobalKnowledge] = useState(false);
   const [minSourceRelevance, setMinSourceRelevance] = useState(0.55);
   const [responseDetail, setResponseDetail] = useState<ResponseDetail>("detailed");
+  const [interpretationMode, setInterpretationMode] =
+    useState<InterpretationMode>("contextual");
   const [showProcess, setShowProcess] = useState(false);
   const [isRunning, setIsRunning] = useState(false);
   const [runId, setRunId] = useState<string | null>(null);
@@ -166,6 +181,7 @@ export default function App() {
           includeGlobalKnowledge: globalKnowledge,
           minSourceRelevance,
           responseDetail,
+          interpretationMode,
         });
         setRunId(started.run_id);
         await loadMessages(conversationId);
@@ -190,6 +206,7 @@ export default function App() {
       activeId,
       globalKnowledge,
       isRunning,
+      interpretationMode,
       loadMessages,
       localKnowledge,
       minSourceRelevance,
@@ -244,6 +261,12 @@ export default function App() {
             >
               <FileSearch size={16} /> Documents
             </button>
+            <button
+              className={mode === "skills" ? "active" : ""}
+              onClick={() => setMode("skills")}
+            >
+              <Layers3 size={16} /> Skills
+            </button>
           </div>
 
           {mode === "chat" && (
@@ -258,6 +281,23 @@ export default function App() {
                   <option value="concise">Concise</option>
                   <option value="balanced">Balanced</option>
                   <option value="detailed">Detailed</option>
+                </select>
+              </label>
+              <label
+                className="detail-select"
+                title="Control how broadly the Agent interprets your request"
+              >
+                <ScanText size={15} />
+                <select
+                  value={interpretationMode}
+                  onChange={(event) =>
+                    setInterpretationMode(event.target.value as InterpretationMode)
+                  }
+                  aria-label="Interpretation range"
+                >
+                  <option value="precise">Precise</option>
+                  <option value="contextual">Context</option>
+                  <option value="exploratory">Explore</option>
                 </select>
               </label>
               <label title="Allow Tavily web search">
@@ -341,13 +381,17 @@ export default function App() {
               </Suspense>
             )}
           </section>
-        ) : (
+        ) : mode === "documents" ? (
           <Suspense fallback={<div className="workspace-loading">Loading documents...</div>}>
             <DocumentWorkspace
               key={activeId ?? "empty"}
               conversationId={activeId}
               minSourceRelevance={minSourceRelevance}
             />
+          </Suspense>
+        ) : (
+          <Suspense fallback={<div className="workspace-loading">Loading Skills...</div>}>
+            <SkillWorkspace />
           </Suspense>
         )}
       </main>

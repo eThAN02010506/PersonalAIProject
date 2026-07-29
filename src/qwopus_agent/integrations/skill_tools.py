@@ -5,12 +5,19 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from typing import Any
 
+from qwopus_agent.skills import SkillRegistry, WorkflowSkill, WorkflowSpec
 from qwopus_agent.skills.base import BaseSkill, SkillRequest, SkillResponse
 from qwopus_agent.utils.token_budget import estimate_tokens, truncate_to_tokens
 
 SkillRequestFactory = Callable[[Mapping[str, Any]], SkillRequest]
+_RUNTIME_SKILL_ALIASES = {
+    "tavily_search": "web_search",
+    "rag_search": "rag_search",
+    "graph_search": "graph_search",
+}
 
 
 def build_skill_tool(
@@ -98,3 +105,81 @@ def _run_skill(skill: BaseSkill, request: SkillRequest) -> SkillResponse:
     # 作用：只在该少见边界使用一个短线程，保持 BaseSkill 的异步公共契约不变。
     with ThreadPoolExecutor(max_workers=1) as executor:
         return executor.submit(lambda: asyncio.run(skill.run(request))).result()
+
+
+@dataclass
+class _RuntimeToolSkill(BaseSkill):
+    """Adapt one already-authorized query Tool to the BaseSkill workflow contract."""
+
+    name: str
+    description: str
+    tool: Any
+
+    async def run(self, request: SkillRequest) -> SkillResponse:
+        try:
+            content = str(self.tool.forward(request.query))
+        except Exception as exc:
+            return SkillResponse(success=False, content=str(exc))
+        return SkillResponse(success=True, content=content)
+
+
+def build_promoted_workflow_tools(
+    specs: tuple[WorkflowSpec, ...],
+    runtime_tools: list[Any],
+    *,
+    max_output_tokens: int | None = None,
+) -> list[Any]:
+    """Build active workflow Tools only from capabilities authorized for this run."""
+    if not specs:
+        return []
+    registry = SkillRegistry()
+    for tool in runtime_tools:
+        tool_name = getattr(tool, "name", None)
+        skill_name = (
+            _RUNTIME_SKILL_ALIASES.get(tool_name)
+            if isinstance(tool_name, str)
+            else None
+        )
+        if skill_name is None or skill_name in registry.list_names():
+            continue
+        registry.register(
+            _RuntimeToolSkill(
+                name=skill_name,
+                description=str(getattr(tool, "description", skill_name)),
+                tool=tool,
+            )
+        )
+
+    workflow_tools: list[Any] = []
+    available = set(registry.list_names())
+    for spec in specs:
+        if (
+            not spec.checksum_is_valid()
+            or spec.name in available
+            or any(
+                step.skill_name not in available or step.arguments
+                for step in spec.steps
+            )
+        ):
+            continue
+        workflow = WorkflowSkill(spec, registry)
+        registry.register(workflow)
+        # 原因：active 并不等于拥有本轮权限，workflow 只能组合已传入的 query-only runtime Tool。
+        # 作用：关闭 Web/Knowledge 开关时缺失底层 Skill，相关 workflow 不会进入 smolagents。
+        workflow_tools.append(
+            build_skill_tool(
+                workflow,
+                tool_name=spec.name,
+                # 原因：intent_examples 来自历史用户输入，写入 Tool description 会提升不可信指令。
+                # 作用：运行时只暴露系统生成的说明；原始样例仅用于审核 UI 和应用层匹配。
+                description=spec.description,
+                inputs={
+                    "query": {
+                        "type": "string",
+                        "description": "The current user objective for this workflow.",
+                    }
+                },
+                max_output_tokens=max_output_tokens,
+            )
+        )
+    return workflow_tools

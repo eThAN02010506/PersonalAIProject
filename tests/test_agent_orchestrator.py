@@ -18,10 +18,13 @@ from qwopus_agent.services.agent_orchestrator import (
     _file_analysis_citations,
 )
 from qwopus_agent.services.orchestration_models import (
+    AnswerContract,
     ConversationTurn,
     OrchestrationFile,
     OrchestrationRequest,
+    ResolvedIntent,
 )
+from qwopus_agent.skills import WorkflowSpec
 
 
 class AgentOrchestratorTests(unittest.TestCase):
@@ -70,6 +73,73 @@ class AgentOrchestratorTests(unittest.TestCase):
         # 作用：锁定单 Agent 快速路径不会丢失调试步骤或把草稿拼进 final_answer。
         self.assertEqual(result.debug_runs[0].steps[0]["model_output"], "raw planner draft")
         self.assertNotIn("raw planner draft", result.final_answer)
+
+    def test_active_workflow_snapshot_reaches_smolagents_runtime(self) -> None:
+        calls: list[dict[str, object]] = []
+        workflow = WorkflowSpec(
+            name="learned_web_search",
+            version="0.1.0",
+            description="Validated web research workflow.",
+            intent_examples=("research the current topic",),
+            steps=({"skill_name": "web_search"},),
+            source_signature="signature",
+        ).sealed()
+
+        def fake_chat(**kwargs):
+            calls.append(kwargs)
+            return ChatAgentRun(answer="current sourced answer", state="success")
+
+        result = asyncio.run(
+            AgentOrchestrator(
+                self.settings,
+                chat_runner=fake_chat,
+                workflow_specs=(workflow,),
+            ).run(
+                OrchestrationRequest(
+                    objective="research the current topic",
+                    enable_web_search=True,
+                )
+            )
+        )
+
+        # 原因：Catalog 中 active 不代表子 Agent 已拥有该能力。
+        # 作用：锁定 Orchestrator 把父进程选定的不可变版本传给真实 chat runtime。
+        self.assertTrue(result.success)
+        self.assertEqual(calls[0]["promoted_workflows"], (workflow,))
+
+    def test_resolved_objective_drives_agent_while_original_controls_language(self) -> None:
+        calls: list[dict[str, object]] = []
+
+        def fake_chat(**kwargs):
+            calls.append(kwargs)
+            return ChatAgentRun(answer="更完整的分析", state="success")
+
+        intent = ResolvedIntent(
+            original_request="再详细一点",
+            operational_objective=(
+                "Previous objective: 分析上下文管理方案\n"
+                "Current instruction: 再详细一点"
+            ),
+            task_type="analyze",
+            answer_contract=AnswerContract(
+                task_type="analyze",
+                required_facets=("findings", "evidence", "limitations"),
+            ),
+        )
+        result = asyncio.run(
+            AgentOrchestrator(self.settings, chat_runner=fake_chat).run(
+                OrchestrationRequest(
+                    objective="再详细一点",
+                    resolved_intent=intent,
+                )
+            )
+        )
+
+        self.assertTrue(result.success)
+        self.assertIn("分析上下文管理方案", calls[0]["user_message"])
+        self.assertEqual(calls[0]["response_language_source"], "再详细一点")
+        self.assertEqual(calls[0]["answer_contract"], intent.answer_contract)
+        self.assertEqual(result.resolved_intent, intent)
 
     def test_web_and_local_knowledge_use_supervisor_and_merge_citations(self) -> None:
         calls: list[tuple[bool, bool, str]] = []

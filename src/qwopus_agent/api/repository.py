@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
+from qwopus_agent.services.orchestration_models import ConversationTaskState
 from qwopus_agent.utils.conversation_log import list_conversations, load_chat_messages
 from qwopus_agent.utils.token_budget import estimate_tokens, truncate_to_tokens
 
@@ -45,6 +46,7 @@ class ConversationMemoryRecord:
     summary_until_message_id: str | None
     pinned_facts: tuple[str, ...]
     open_tasks: tuple[str, ...]
+    task_state: ConversationTaskState
     updated_at: str
 
 
@@ -88,10 +90,14 @@ class ConversationRepository:
                     summary_until_message_id TEXT,
                     pinned_facts TEXT NOT NULL DEFAULT '[]',
                     open_tasks TEXT NOT NULL DEFAULT '[]',
+                    task_state TEXT NOT NULL DEFAULT '{}',
                     updated_at TEXT NOT NULL
                 );
                 """
             )
+            # 原因：已有用户数据库早于结构化任务状态，CREATE TABLE IF NOT EXISTS 不会补列。
+            # 作用：只追加带默认值的兼容字段，不删除或重写任何历史会话和消息。
+            _ensure_task_state_column(connection)
             count = connection.execute("SELECT COUNT(*) FROM conversations").fetchone()[0]
         # 原因：正式前端首次启动要继承 Streamlit 历史，但隔离测试不能读取用户真实日志。
         # 作用：生产环境默认迁移一次，测试或全新部署可显式关闭旧日志导入。
@@ -169,7 +175,7 @@ class ConversationRepository:
         with self._connect() as connection:
             row = connection.execute(
                 "SELECT conversation_id, summary, summary_until_message_id, "
-                "pinned_facts, open_tasks, updated_at FROM conversation_memory "
+                "pinned_facts, open_tasks, task_state, updated_at FROM conversation_memory "
                 "WHERE conversation_id = ?",
                 (conversation_id,),
             ).fetchone()
@@ -181,6 +187,9 @@ class ConversationRepository:
             summary_until_message_id=row["summary_until_message_id"],
             pinned_facts=tuple(json.loads(row["pinned_facts"])),
             open_tasks=tuple(json.loads(row["open_tasks"])),
+            task_state=ConversationTaskState.model_validate_json(
+                row["task_state"] or "{}"
+            ),
             updated_at=row["updated_at"],
         )
 
@@ -201,6 +210,28 @@ class ConversationRepository:
                 ),
                 pinned_facts=pinned_facts,
                 open_tasks=open_tasks,
+                task_state=current.task_state if current else ConversationTaskState(),
+                updated_at=_now(),
+            )
+        )
+
+    def set_task_state(
+        self,
+        conversation_id: str,
+        task_state: ConversationTaskState,
+    ) -> None:
+        """Persist one successful task without replacing compressed history."""
+        current = self.get_memory(conversation_id)
+        self._write_memory(
+            ConversationMemoryRecord(
+                conversation_id=conversation_id,
+                summary=current.summary if current else "",
+                summary_until_message_id=(
+                    current.summary_until_message_id if current else None
+                ),
+                pinned_facts=current.pinned_facts if current else (),
+                open_tasks=task_state.open_tasks,
+                task_state=task_state,
                 updated_at=_now(),
             )
         )
@@ -233,6 +264,7 @@ class ConversationRepository:
                 summary_until_message_id=candidates[-1].id,
                 pinned_facts=memory.pinned_facts if memory else (),
                 open_tasks=memory.open_tasks if memory else (),
+                task_state=memory.task_state if memory else ConversationTaskState(),
                 updated_at=_now(),
             )
             self._write_memory(memory)
@@ -257,11 +289,12 @@ class ConversationRepository:
             connection.execute(
                 "INSERT INTO conversation_memory("
                 "conversation_id, summary, summary_until_message_id, pinned_facts, "
-                "open_tasks, updated_at) VALUES (?, ?, ?, ?, ?, ?) "
+                "open_tasks, task_state, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT(conversation_id) DO UPDATE SET "
                 "summary=excluded.summary, "
                 "summary_until_message_id=excluded.summary_until_message_id, "
                 "pinned_facts=excluded.pinned_facts, open_tasks=excluded.open_tasks, "
+                "task_state=excluded.task_state, "
                 "updated_at=excluded.updated_at",
                 (
                     memory.conversation_id,
@@ -269,6 +302,7 @@ class ConversationRepository:
                     memory.summary_until_message_id,
                     json.dumps(memory.pinned_facts, ensure_ascii=False),
                     json.dumps(memory.open_tasks, ensure_ascii=False),
+                    memory.task_state.model_dump_json(),
                     memory.updated_at,
                 ),
             )
@@ -296,6 +330,18 @@ class ConversationRepository:
 
 def _now() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def _ensure_task_state_column(connection: sqlite3.Connection) -> None:
+    columns = {
+        str(row["name"])
+        for row in connection.execute("PRAGMA table_info(conversation_memory)").fetchall()
+    }
+    if "task_state" not in columns:
+        connection.execute(
+            "ALTER TABLE conversation_memory "
+            "ADD COLUMN task_state TEXT NOT NULL DEFAULT '{}'"
+        )
 
 
 def _message_index(messages: list[MessageRecord], message_id: str | None) -> int:

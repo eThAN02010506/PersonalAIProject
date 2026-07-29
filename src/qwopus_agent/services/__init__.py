@@ -7,11 +7,18 @@ from typing import Any
 
 _EXPORTS = {
     "AgentOrchestrator": ("agent_orchestrator", "AgentOrchestrator"),
+    "AnswerQualityEvaluator": ("answer_quality", "AnswerQualityEvaluator"),
+    "AnswerQualityReport": ("answer_quality", "AnswerQualityReport"),
+    "AnswerContract": ("orchestration_models", "AnswerContract"),
+    "ContextReference": ("orchestration_models", "ContextReference"),
+    "ContextSnapshot": ("orchestration_models", "ContextSnapshot"),
+    "ConversationTaskState": ("orchestration_models", "ConversationTaskState"),
     "ConversationTurn": ("orchestration_models", "ConversationTurn"),
     "OrchestrationFile": ("orchestration_models", "OrchestrationFile"),
     "OrchestrationRequest": ("orchestration_models", "OrchestrationRequest"),
     "OrchestrationResult": ("orchestration_models", "OrchestrationResult"),
     "ProcessEvent": ("orchestration_models", "ProcessEvent"),
+    "ResolvedIntent": ("orchestration_models", "ResolvedIntent"),
     "SourceCitation": ("orchestration_models", "SourceCitation"),
     "UploadedFileInput": ("analysis_service", "UploadedFileInput"),
     "UploadAnalysisOutcome": ("analysis_service", "UploadAnalysisOutcome"),
@@ -21,6 +28,8 @@ _EXPORTS = {
     "ChatTaskResult": ("chat_service", "ChatTaskResult"),
     "start_chat_task": ("chat_service", "start_chat_task"),
     "KnowledgeGraphService": ("knowledge_graph_service", "KnowledgeGraphService"),
+    "IntentResolver": ("intent_resolver", "IntentResolver"),
+    "build_context_snapshot": ("intent_resolver", "build_context_snapshot"),
     "KnowledgeMaintenanceService": (
         "knowledge_maintenance_service",
         "KnowledgeMaintenanceService",
@@ -28,6 +37,8 @@ _EXPORTS = {
     "SkillGrowthDecision": ("skill_growth_service", "SkillGrowthDecision"),
     "SkillGrowthPolicy": ("skill_growth_service", "SkillGrowthPolicy"),
     "SkillGrowthService": ("skill_growth_service", "SkillGrowthService"),
+    "SkillRunTrace": ("skill_growth_service", "SkillRunTrace"),
+    "SkillTraceStep": ("skill_growth_service", "SkillTraceStep"),
 }
 
 __all__ = sorted(_EXPORTS)

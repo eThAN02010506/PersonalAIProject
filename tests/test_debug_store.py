@@ -9,10 +9,16 @@ from unittest.mock import MagicMock, patch
 
 from pydantic import BaseModel
 
+from qwopus_agent.api.repository import ConversationRepository
 from qwopus_agent.api.routes.debug import _debug_host_is_allowed
 from qwopus_agent.api.runs import ChatRunRegistry
 from qwopus_agent.integrations.smolagents_runtime import SmolagentsModelSettings
 from qwopus_agent.services.chat_service import ChatTaskResult
+from qwopus_agent.services.skill_growth_service import (
+    SkillGrowthPolicy,
+    SkillGrowthService,
+)
+from qwopus_agent.skills import SkillCatalog, SkillRegistry
 from qwopus_agent.utils.debug_store import (
     _prune_debug_records,
     append_debug_record,
@@ -118,6 +124,113 @@ class DebugStoreTests(unittest.TestCase):
                 "raw",
             )
             task.close.assert_called_once_with()
+
+    def test_completed_chat_run_persists_resolved_task_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            repository = ConversationRepository(
+                root / "qwopus.db",
+                import_legacy=False,
+            )
+            repository.initialize()
+            conversation = repository.create_conversation()
+            task = MagicMock()
+            task.refresh_phase.return_value = "completed"
+            task.poll_result.return_value = ChatTaskResult(
+                status="completed",
+                content="context analysis",
+            )
+            registry = ChatRunRegistry(repository, debug_directory=root / "debug")
+
+            with patch("qwopus_agent.api.runs.start_chat_task", return_value=task):
+                run_id = registry.start(
+                    conversation.id,
+                    "分析当前上下文方案",
+                    SmolagentsModelSettings(
+                        model_id="test",
+                        base_url="http://local/v1",
+                    ),
+                    enable_web_search=False,
+                    enable_local_knowledge=False,
+                    response_detail="detailed",
+                )
+            registry.poll(run_id)
+            memory = repository.get_memory(conversation.id)
+
+        self.assertIsNotNone(memory)
+        assert memory is not None
+        self.assertEqual(memory.task_state.last_task_type, "analyze")
+        self.assertEqual(
+            memory.task_state.last_successful_objective,
+            "分析当前上下文方案",
+        )
+        self.assertEqual(
+            memory.task_state.last_answer_contract.response_detail,
+            "detailed",
+        )
+
+    def test_completed_chat_tool_trace_creates_a_manual_skill_candidate(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            repository = MagicMock()
+            repository.list_messages.return_value = []
+            task = MagicMock()
+            task.refresh_phase.return_value = "completed"
+            task.poll_result.return_value = ChatTaskResult(
+                status="completed",
+                content="A complete current web research answer.",
+                trace=(
+                    {
+                        "phase": "tool_call",
+                        "status": "completed",
+                        "tool": "tavily_search",
+                    },
+                ),
+            )
+            skill_registry = SkillRegistry.discover(
+                catalog=SkillCatalog(root / "catalog.json"),
+                workflow_root=root / "workflows",
+            )
+            catalog = SkillCatalog(root / "catalog.json")
+            growth = SkillGrowthService(
+                registry=skill_registry,
+                catalog=catalog,
+                workflow_root=root / "workflows",
+                history_path=root / "history.json",
+                policy=SkillGrowthPolicy(
+                    min_successes=1,
+                    min_output_chars=1,
+                    auto_promote=False,
+                ),
+            )
+            registry = ChatRunRegistry(
+                repository,
+                debug_directory=root / "debug",
+                skill_catalog=catalog,
+                skill_growth=growth,
+            )
+
+            with patch("qwopus_agent.api.runs.start_chat_task", return_value=task):
+                run_id = registry.start(
+                    "conversation-1",
+                    "research the current topic",
+                    SmolagentsModelSettings(
+                        model_id="test",
+                        base_url="http://local/v1",
+                    ),
+                    enable_web_search=True,
+                    enable_local_knowledge=False,
+                )
+            view = registry.poll(run_id)
+            candidate = catalog.latest("learned_web_search")
+            skill_names = skill_registry.list_names()
+
+        self.assertIsNotNone(candidate)
+        assert candidate is not None
+        self.assertEqual(candidate.status, "candidate")
+        self.assertNotIn("learned_web_search", skill_names)
+        assert view is not None
+        self.assertEqual(view.trace[-1]["phase"], "skill_growth")
 
     def test_debug_count_reaps_abandoned_terminal_run(self) -> None:
         repository = MagicMock()

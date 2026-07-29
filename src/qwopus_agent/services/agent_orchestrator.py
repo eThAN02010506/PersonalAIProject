@@ -30,6 +30,7 @@ from qwopus_agent.services.orchestration_models import (
     ProcessEvent,
     SourceCitation,
 )
+from qwopus_agent.skills import WorkflowSpec
 from qwopus_agent.utils.token_budget import TokenBudgetManager, truncate_to_tokens
 
 if TYPE_CHECKING:
@@ -88,6 +89,7 @@ class AgentOrchestrator:
     chat_runner: ChatRunner = run_agent_chat_turn_with_debug
     analysis_runner: AnalysisRunner | None = None
     report_generator: ReportGenerator | None = None
+    workflow_specs: tuple[WorkflowSpec, ...] = ()
     planner: Planner = dataclass_field(default_factory=Planner)
     executor: Executor = dataclass_field(default_factory=Executor)
 
@@ -103,9 +105,16 @@ class AgentOrchestrator:
                 raise ValueError(
                     "Global knowledge requires local knowledge permission."
                 )
+            # 原因：Planner 若只看到“继续”“再详细一点”，无法知道本轮真正要完成的任务。
+            # 作用：规划和能力委派使用已解析目标，原始 objective 继续负责语言与用户审计。
+            planning_objective = (
+                request.resolved_intent.operational_objective
+                if request.resolved_intent is not None
+                else request.objective
+            )
             plan = await self.planner.plan(
                 AgentPlanningRequest(
-                    objective=request.objective,
+                    objective=planning_objective,
                     has_documents=bool(request.uploaded_files),
                     enable_web_search=request.enable_web_search,
                     enable_local_knowledge=request.enable_local_knowledge,
@@ -168,6 +177,7 @@ class AgentOrchestrator:
                 analysis_result=analysis_result,
                 report=report,
                 multi_agent_run=run if plan.route == "multi_agent" else None,
+                resolved_intent=request.resolved_intent,
                 debug_runs=debug_runs,
             )
         except Exception as exc:  # noqa: BLE001 - return one stable application error envelope.
@@ -195,6 +205,7 @@ class AgentOrchestrator:
                     else "single_agent"
                 ),
                 trace=tuple(trace),
+                resolved_intent=request.resolved_intent,
             )
 
     def run_sync(
@@ -301,6 +312,19 @@ class AgentOrchestrator:
                 knowledge_scope=request.conversation_id,
                 knowledge_root=self.knowledge_root,
                 document_evidence_available=bool(request.uploaded_files),
+                response_language_source=(
+                    request.resolved_intent.original_request
+                    if request.resolved_intent is not None
+                    else request.objective
+                ),
+                answer_contract=(
+                    request.resolved_intent.answer_contract
+                    if request.resolved_intent is not None
+                    else None
+                ),
+                # 原因：worker 不应在执行中重读可变 Catalog，否则一次请求可能混用两个版本。
+                # 作用：把父进程已校验的 active WorkflowSpec 快照交给 smolagents 装配。
+                promoted_workflows=self.workflow_specs,
                 progress_callback=progress_callback,
             )
         except Exception as exc:

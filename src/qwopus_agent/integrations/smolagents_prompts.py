@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from typing import Literal
 
+from qwopus_agent.services.orchestration_models import AnswerContract
 from qwopus_agent.utils.token_budget import estimate_tokens, truncate_to_tokens
 
 ChatMessage = dict[str, str]
@@ -130,8 +131,11 @@ def format_agent_chat_prompt(
     knowledge_primary_scope: Literal["private", "global", "none"] | None = None,
     history_max_tokens: int = 1024,
     response_detail: Literal["concise", "balanced", "detailed"] = "detailed",
+    response_language_source: str | None = None,
+    answer_contract: AnswerContract | None = None,
 ) -> str:
     """Build one bounded, capability-aware task prompt for Agent chat."""
+    language_source = response_language_source or user_message
     resolved_knowledge_scope = knowledge_primary_scope or (
         "private" if enable_local_knowledge else "none"
     )
@@ -148,6 +152,8 @@ def format_agent_chat_prompt(
         ),
         _response_detail_instruction(response_detail),
     ]
+    if answer_contract is not None:
+        lines.append(_answer_contract_instruction(answer_contract))
     if enable_web_search:
         lines.append(
             "Use tavily_search when current or external information is needed, then synthesize "
@@ -180,7 +186,21 @@ def format_agent_chat_prompt(
         [
             "",
             "CURRENT USER QUESTION (the only source for response language):",
-            user_message,
+            language_source,
+        ]
+    )
+    if user_message != language_source:
+        lines.extend(
+            [
+                "",
+                # 原因：续写请求的原文可能只有“继续”，不足以让 Agent 完成正确任务。
+                # 作用：把上下文解析后的目标单独交给 Agent，同时不污染语言判断来源。
+                "RESOLVED TASK TO EXECUTE:",
+                user_message,
+            ]
+        )
+    lines.extend(
+        [
             "",
             "Now produce the complete final answer in that same language.",
         ]
@@ -211,6 +231,17 @@ def _response_detail_instruction(
         "when relevant. Use meaningful sections for complex questions and connected prose where "
         "it reads better. Do not reduce the answer to a short bullet list, repeat points, "
         "or pad it to a fixed length."
+    )
+
+
+def _answer_contract_instruction(contract: AnswerContract) -> str:
+    """Render typed answer requirements without prescribing a rigid template."""
+    facets = ", ".join(contract.required_facets) or "the direct answer"
+    return (
+        f"Answer contract: task type={contract.task_type}; "
+        f"complexity={contract.complexity}; cover these relevant dimensions: "
+        f"{facets}. Integrate them naturally, omit only dimensions that truly do not apply, "
+        "and do not mention this internal contract."
     )
 
 
