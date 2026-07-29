@@ -167,6 +167,8 @@ Useful optional variables:
 | `QWOPUS_MLX_SERVER_EXECUTABLE` | Explicit `mlx_lm.server` executable for local-path mode |
 | `QWOPUS_EMBEDDING_MODEL` | Locally cached sentence-transformer used by MiniRAG |
 | `QWOPUS_DEBUG_ALLOW_LAN` | Explicitly allow Debug routes on a trusted private LAN |
+| `QWOPUS_LAN_USERNAME` | Shared LAN login name; defaults to `qwopus` |
+| `QWOPUS_LAN_PASSWORD` | Required password for every non-loopback HTTP request |
 
 For web search, keep the credential in the ignored `.env.local` file or in the
 process environment:
@@ -248,13 +250,18 @@ workbook
   -> schema, dtypes, and bounded sample rows
   -> model-generated pandas expression
   -> AST validation
-  -> isolated subprocess with timeout
+  -> child-process validation and resource limits
+  -> macOS Seatbelt: no network, writes, fork, or sensitive-path reads
+  -> inert JSON response
   -> bounded computed result only
 ```
 
 The pandas runner blocks imports, file access, network modules, unsafe builtins,
-unknown method calls, oversized syntax trees, and unbounded results. It is a
-restricted application sandbox, not an OS-level container or VM boundary.
+unknown method calls, oversized syntax trees, and unbounded results. On macOS,
+the worker also runs under `/usr/bin/sandbox-exec`; other Unix platforms retain
+AST validation, process isolation, CPU/address-space limits, and a wall-clock
+timeout. This is defense in depth for local analysis, not a VM boundary for
+executing arbitrary user Python.
 
 ## Knowledge Scope
 
@@ -277,12 +284,15 @@ NanoVectorDB component. It is not a wrapper around the complete upstream
 - conversation and global scope enforcement
 - multilingual local embeddings
 - stale-vector detection and index rebuilding
-- evidence-bound entity and relation extraction
+- evidence-bound entity and relation extraction from ordinary document text
 - persistent directed graph storage
 - bounded graph paths and vector-result fusion
 
-The chat model and embedding model are independent. Changing Gemma, Qwen, or
-another generation model does not require changing the knowledge interface.
+Natural-language graph extraction resolves the currently selected model through
+`BaseLLM` at insertion time; the deterministic `[[A]] -[relation]-> [[B]]`
+extractor remains available when the model server is offline. The chat model
+and embedding model are independent. Changing Gemma, Qwen, or another
+generation model does not require changing the knowledge interface.
 
 If an expected file is missing from an answer, check in this order:
 
@@ -350,14 +360,19 @@ LAN:
 
 ```bash
 QWOPUS_DEBUG_ALLOW_LAN=1 \
+QWOPUS_LAN_PASSWORD='choose-a-long-random-password' \
 PYTHONPATH=src .venv/bin/python -m uvicorn \
   qwopus_agent.api.app:app \
   --host 0.0.0.0 \
   --port 8010
 ```
 
-Do not expose this mode to an untrusted network. The application currently has
-no authentication or user isolation layer.
+Every non-loopback page and API request is denied unless
+`QWOPUS_LAN_PASSWORD` is set, then protected by browser-compatible HTTP Basic
+authentication. Basic authentication does not encrypt traffic, so use this only
+on a trusted private LAN or place FastAPI behind HTTPS. Debug access additionally
+requires `QWOPUS_DEBUG_ALLOW_LAN=1`. This shared credential is not a multi-user
+authorization or tenancy system.
 
 ## Project Layout
 
@@ -474,7 +489,8 @@ modules, not in React components or FastAPI route handlers.
 - PDF reports preserve the complete Unicode body and paginate automatically,
   but intentionally provide basic report typography rather than a publication
   layout editor.
-- The web application is intended for a trusted local machine or private LAN. It
-  does not yet provide authentication, authorization, or multi-user tenancy.
+- Non-loopback access has one shared HTTP Basic credential and fails closed when
+  no password is configured. Per-user authorization and tenant isolation are not
+  implemented.
 
 Package metadata declares the project under the MIT license.

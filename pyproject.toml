@@ -92,6 +92,9 @@ pythonpath = ["src"]
 line-length = 100
 target-version = "py311"
 src = ["src", "tests"]
+# 原因：vendor 包含固定版本的上游 MinerU/MiniRAG 源码，不受本项目代码规范控制。
+# 作用：`ruff check .` 只审查 Qwopus 自有代码，避免误改第三方或子模块内容。
+extend-exclude = ["vendor"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "SIM"]

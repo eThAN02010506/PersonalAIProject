@@ -37,12 +37,30 @@ semantic embeddings in a separate derived index. Search results include file and
 when the normalized Markdown contains that metadata. The embedding model is local and independent
 from the currently selected chat model.
 
-The same insert operation also feeds an evidence-constrained graph pipeline. `BaseLLM` extraction
-accepts any OpenAI-compatible model, rejects facts whose quote or chunk id cannot be verified, and
-passes valid mentions through entity normalization before persistence in a directed `MultiDiGraph`.
-Search combines bounded graph paths with complementary vector chunks while deduplicating source
-evidence. Document updates, deletion, and rebuilds are owned by `KnowledgeMaintenanceService`, so the
-Agent-facing MiniRAG contract remains limited to `insert` and `search`.
+The same insert operation also feeds an evidence-constrained graph pipeline. A deterministic
+extractor handles explicit relations, while `LLMGraphExtractor` resolves the currently selected
+`BaseLLM` at insertion time for ordinary document prose. Invalid chunk ids, unsupported quotes, and
+relations whose evidence omits an endpoint are rejected before persistence in a directed
+`MultiDiGraph`. Search combines bounded graph paths with complementary vector chunks while
+deduplicating source evidence. Document updates, deletion, and rebuilds are owned by
+`KnowledgeMaintenanceService`, so the Agent-facing MiniRAG contract remains limited to `insert` and
+`search`.
+
+### Analysis Safety
+
+LLM-generated pandas is parsed through an allowlisted AST in both the parent and worker process. The
+worker receives no application secrets, has CPU/file/descriptor limits, and returns inert JSON. On
+macOS it additionally runs under Seatbelt with network, file-write, process-fork, and sensitive-path
+reads denied. This boundary is intended for generated dataframe analysis expressions, not arbitrary
+user Python.
+
+### Web Boundary
+
+Loopback requests remain frictionless for local development. Every direct non-loopback HTTP request
+fails closed unless `QWOPUS_LAN_PASSWORD` is configured, then requires one shared HTTP Basic
+credential across React, API, OpenAPI, and Debug surfaces. Debug routes also require the independent
+`QWOPUS_DEBUG_ALLOW_LAN` gate. This is private-LAN protection, not per-user authorization or tenant
+isolation; HTTPS is still required when transport confidentiality matters.
 
 ### Skills
 
@@ -80,8 +98,8 @@ requiring another LLM call.
 
 - Browser automation has a tested Skill and provider contract, but no production browser provider
   is wired into the application.
-- The FastAPI and React application is designed for one trusted local operator. Authentication,
-  authorization, and multi-user tenancy are outside the current runtime.
+- The FastAPI and React application supports one shared LAN credential. Per-user authorization and
+  multi-user tenancy are outside the current runtime.
 - The MiniRAG adapter uses upstream persistent vector storage inside Qwopus-owned chunking,
   conversation scoping, graph extraction, and evidence rendering. It does not expose the complete
   upstream `MiniRAG.query` pipeline.

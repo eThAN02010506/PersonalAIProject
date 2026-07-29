@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import ast
-import multiprocessing
-import time
+import json
+import os
+import pickle
+import subprocess
+import sys
 from dataclasses import dataclass
-from multiprocessing.connection import Connection
+from pathlib import Path
 from typing import Any
 
 import pandas as pd
@@ -163,6 +166,8 @@ _MAX_AST_NODES = 200
 _MAX_NUMERIC_LITERAL = 1_000_000
 _MAX_RESULT_MARKDOWN_TOKENS = 3000
 _SANDBOX_TIMEOUT_SECONDS = 8.0
+_MAX_SERIALIZED_INPUT_BYTES = 256 * 1024 * 1024
+_MACOS_SANDBOX_EXECUTABLE = Path("/usr/bin/sandbox-exec")
 
 
 def execute_pandas_code(code: str, dataframes: dict[str, pd.DataFrame]) -> SandboxExecutionResult:
@@ -203,59 +208,130 @@ def _execute_in_subprocess(
     code: str,
     dataframes: dict[str, pd.DataFrame],
 ) -> SandboxExecutionResult:
-    """Contain pandas execution crashes and enforce a wall-clock timeout."""
-    context = multiprocessing.get_context("spawn")
-    reader, writer = context.Pipe(duplex=False)
-    process = context.Process(
-        target=_sandbox_worker,
-        args=(writer, code, dataframes),
-        daemon=True,
+    """Execute validated code in a bounded worker and normalize its response."""
+    serialized_request = pickle.dumps((code, dataframes), protocol=pickle.HIGHEST_PROTOCOL)
+    if len(serialized_request) > _MAX_SERIALIZED_INPUT_BYTES:
+        raise ValueError("Pandas sandbox input is too large.")
+
+    command = _sandbox_command()
+    try:
+        # 原因：墙钟超时必须由父进程掌握，CPU 限制无法终止阻塞的本地库调用。
+        # 作用：subprocess.run 在超时后杀死整个 worker，不遗留后台分析进程。
+        completed = subprocess.run(
+            command,
+            input=serialized_request,
+            capture_output=True,
+            check=False,
+            cwd=_sandbox_working_directory(),
+            env=_sandbox_environment(),
+            timeout=_SANDBOX_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise TimeoutError("Pandas sandbox execution timed out.") from exc
+
+    if completed.returncode != 0:
+        error = completed.stderr.decode("utf-8", errors="replace").strip()
+        detail = error[-1000:] if error else f"exit code {completed.returncode}"
+        raise RuntimeError(f"Pandas sandbox process exited unexpectedly ({detail}).")
+    try:
+        response = json.loads(completed.stdout.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError("Pandas sandbox returned an invalid response.") from exc
+    if not isinstance(response, dict):
+        raise RuntimeError("Pandas sandbox returned an invalid response.")
+    if response.get("status") == "ok" and isinstance(response.get("markdown"), str):
+        # 原因：受限 worker 的输出属于不可信边界，父进程不能对它执行 pickle 反序列化。
+        # 作用：只接收 JSON 数据并重建公开结果对象，避免 worker 构造可执行对象图。
+        return SandboxExecutionResult(
+            value=response.get("value"),
+            markdown=response["markdown"],
+        )
+    raise ValueError(str(response.get("error", "Pandas sandbox execution failed.")))
+
+
+def _sandbox_command() -> list[str]:
+    """Build the platform-specific worker command."""
+    worker = [sys.executable, "-m", "qwopus_agent.analysis._pandas_worker"]
+    if sys.platform != "darwin":
+        return worker
+    if not _MACOS_SANDBOX_EXECUTABLE.is_file():
+        raise RuntimeError("macOS pandas sandbox requires /usr/bin/sandbox-exec.")
+    # 原因：AST 校验限制 Python 表达能力，但本身不是操作系统安全边界。
+    # 作用：Apple Silicon 主路径用 Seatbelt 拒绝网络、写文件和 fork；即使验证器
+    # 将来出现缺口，生成代码仍不能产生这些系统副作用。
+    return [
+        str(_MACOS_SANDBOX_EXECUTABLE),
+        "-p",
+        _macos_sandbox_profile(),
+        *worker,
+    ]
+
+
+def _macos_sandbox_profile() -> str:
+    """Return the restrictive Seatbelt policy applied to the pandas worker."""
+    project_root = Path(__file__).resolve().parents[3]
+    home = Path.home()
+    protected_paths = (
+        home / ".aws",
+        home / ".codex",
+        home / ".config",
+        home / ".ssh",
+        home / "Documents",
+        home / "Downloads",
+        home / "Library",
+        project_root / ".env",
+        project_root / ".git",
+        project_root / "storage",
     )
-    try:
-        process.start()
-    except Exception:
-        reader.close()
-        writer.close()
-        process.close()
-        raise
-    writer.close()
-    deadline = time.monotonic() + _SANDBOX_TIMEOUT_SECONDS
-    try:
-        while time.monotonic() < deadline:
-            if reader.poll(0.05):
-                status, payload = reader.recv()
-                process.join(timeout=1)
-                if status == "ok" and isinstance(payload, SandboxExecutionResult):
-                    return payload
-                raise ValueError(str(payload))
-            if not process.is_alive():
-                process.join(timeout=0.1)
-                raise RuntimeError(
-                    f"Pandas sandbox process exited unexpectedly ({process.exitcode})."
-                )
-        process.terminate()
-        process.join(timeout=1)
-        raise TimeoutError("Pandas sandbox execution timed out.")
-    finally:
-        reader.close()
-        if process.is_alive():
-            process.terminate()
-            process.join(timeout=1)
-        process.close()
+    read_denials = "".join(
+        f'(deny file-read* (subpath "{_seatbelt_path(path)}"))'
+        for path in protected_paths
+    )
+    return (
+        "(version 1)"
+        "(allow default)"
+        "(deny network*)"
+        "(deny process-fork)"
+        "(deny file-write*)"
+        f"{read_denials}"
+    )
 
 
-def _sandbox_worker(
-    connection: Connection,
-    code: str,
-    dataframes: dict[str, pd.DataFrame],
-) -> None:
-    """Return one serializable result without exposing worker internals."""
-    try:
-        connection.send(("ok", _execute_validated_code(code, dataframes)))
-    except Exception as exc:  # noqa: BLE001 - normalize all worker failures at the boundary.
-        connection.send(("error", f"{type(exc).__name__}: {exc}"))
-    finally:
-        connection.close()
+def _seatbelt_path(path: Path) -> str:
+    """Escape one absolute path for a generated Seatbelt string literal."""
+    return str(path.expanduser().resolve()).replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _sandbox_environment() -> dict[str, str]:
+    """Pass only deterministic runtime settings needed by pandas and the worker."""
+    source_path = str(Path(__file__).resolve().parents[2])
+    inherited_python_path = [
+        str((Path.cwd() / item).resolve()) if not Path(item).is_absolute() else item
+        for item in os.getenv("PYTHONPATH", "").split(os.pathsep)
+        if item
+    ]
+    python_path = os.pathsep.join(dict.fromkeys((source_path, *inherited_python_path)))
+    # 原因：继承模型密钥、代理和用户 HOME 会扩大生成代码意外接触的环境范围。
+    # 作用：worker 只收到模块路径、语言和单线程数值库配置，不包含应用凭据。
+    return {
+        "HOME": "/private/var/empty" if sys.platform == "darwin" else "/tmp",
+        "LANG": os.getenv("LANG", "C.UTF-8"),
+        "LC_ALL": os.getenv("LC_ALL", ""),
+        "OPENBLAS_NUM_THREADS": "1",
+        "OMP_NUM_THREADS": "1",
+        "PATH": os.getenv("PATH", ""),
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "PYTHONHASHSEED": "0",
+        "PYTHONNOUSERSITE": "1",
+        "PYTHONPATH": python_path,
+        "VECLIB_MAXIMUM_THREADS": "1",
+    }
+
+
+def _sandbox_working_directory() -> Path:
+    """Keep generated code outside the project and uploaded-file directories."""
+    empty_directory = Path("/private/var/empty")
+    return empty_directory if empty_directory.is_dir() else Path("/")
 
 
 def _strip_code_fence(code: str) -> str:

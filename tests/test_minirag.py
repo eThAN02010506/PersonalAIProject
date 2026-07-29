@@ -1,7 +1,14 @@
+import json
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+from qwopus_agent.llm import BaseLLM, ChatMessage, LLMResponse
+from qwopus_agent.memory.graph_extraction import (
+    CompositeGraphExtractor,
+    LLMGraphExtractor,
+    RuleBasedGraphExtractor,
+)
 from qwopus_agent.memory.minirag import (
     MiniRAG,
     _diverse_chunks,
@@ -9,6 +16,57 @@ from qwopus_agent.memory.minirag import (
 )
 from qwopus_agent.services.knowledge_maintenance_service import KnowledgeMaintenanceService
 from tests.minirag_fakes import TestEmbeddingBackend, make_test_minirag
+
+
+class _NaturalRelationLLM(BaseLLM):
+    """Return one evidence-backed relationship for the integration test."""
+
+    def generate(
+        self,
+        messages: list[ChatMessage],
+        *,
+        temperature: float = 0.2,
+        max_tokens: int | None = None,
+    ) -> LLMResponse:
+        del temperature, max_tokens
+        chunks = json.loads(messages[-1].content)
+        chunk = chunks[0]
+        evidence = "Aurora Holdings owns Blue Harbor Ltd."
+        return LLMResponse(
+            content=json.dumps(
+                {
+                    "entities": [
+                        {
+                            "name": "Aurora Holdings",
+                            "entity_type": "Organization",
+                            "aliases": [],
+                            "description": "",
+                            "chunk_id": chunk["chunk_id"],
+                            "evidence": evidence,
+                        },
+                        {
+                            "name": "Blue Harbor Ltd",
+                            "entity_type": "Organization",
+                            "aliases": [],
+                            "description": "",
+                            "chunk_id": chunk["chunk_id"],
+                            "evidence": evidence,
+                        },
+                    ],
+                    "relations": [
+                        {
+                            "source": "Aurora Holdings",
+                            "relation": "owns",
+                            "target": "Blue Harbor Ltd",
+                            "confidence": 0.98,
+                            "chunk_id": chunk["chunk_id"],
+                            "evidence": evidence,
+                        }
+                    ],
+                }
+            ),
+            model="graph-test-model",
+        )
 
 
 class MiniRAGTests(unittest.TestCase):
@@ -54,6 +112,36 @@ class MiniRAGTests(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "document must not be empty"):
                 memory.insert(" ")
+
+    def test_natural_document_builds_evidence_bound_graph_with_llm_extractor(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as tmpdir:
+            memory = MiniRAG(
+                storage_path=Path(tmpdir) / "documents.jsonl",
+                embedding_backend=TestEmbeddingBackend(),
+                graph_extractor=CompositeGraphExtractor(
+                    extractors=(
+                        RuleBasedGraphExtractor(),
+                        LLMGraphExtractor(lambda: _NaturalRelationLLM()),
+                    )
+                ),
+            )
+            memory.insert(
+                "# File: ownership.pdf\n\n"
+                "Aurora Holdings owns Blue Harbor Ltd."
+            )
+
+            paths = memory.graph_index.paths_between(
+                "Aurora Holdings",
+                "Blue Harbor Ltd",
+            )
+
+            # 原因：独立 extractor 单测不能证明自然文本真正进入持久 MiniRAG 图谱。
+            # 作用：锁定普通文档 → LLM 证据校验 → 实体/关系持久化 → 图路径查询全链路。
+            self.assertEqual(len(paths), 1)
+            self.assertEqual(paths[0].relations[0].relation, "owns")
+            self.assertEqual(paths[0].evidence[0].source, "ownership.pdf")
 
     def test_search_supports_chinese_queries_without_spaces(self) -> None:
         with TemporaryDirectory() as tmpdir:

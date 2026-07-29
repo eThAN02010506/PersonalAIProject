@@ -15,6 +15,11 @@ from qwopus_agent.documents import DocumentStore, build_document_structure, chun
 from qwopus_agent.integrations.smolagents_runtime import AgentDebugRun, SmolagentsModelSettings
 from qwopus_agent.llm import BaseLLM, ChatMessage, LLMResponse, ModelCapabilities
 from qwopus_agent.memory import ConversationKnowledgeManager
+from qwopus_agent.memory.graph_extraction import (
+    CompositeGraphExtractor,
+    LLMGraphExtractor,
+    RuleBasedGraphExtractor,
+)
 from qwopus_agent.services.orchestration_models import OrchestrationResult
 from qwopus_agent.services.skill_growth_service import SkillRunTrace, SkillTraceStep
 from qwopus_agent.utils.debug_store import load_debug_records
@@ -89,6 +94,31 @@ class ApiTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.client_context.__exit__(None, None, None)
         self.temp_directory.cleanup()
+
+    def test_default_knowledge_composition_uses_current_model_for_graph_extraction(
+        self,
+    ) -> None:
+        with patch("qwopus_agent.memory.minirag.MiniRAG") as minirag_class:
+            app = create_app(
+                self.repository,
+                model_runtime=self.model_runtime,
+                debug_directory=self.debug_directory,
+                runtime_log_path=self.runtime_log_path,
+                document_store=DocumentStore(self.document_directory),
+            )
+            factory = app.state.knowledge_manager.factory
+            self.assertIsNotNone(factory)
+            factory(self.knowledge_root / "documents.jsonl")
+
+        extractor = minirag_class.call_args.kwargs["graph_extractor"]
+        self.assertIsInstance(extractor, CompositeGraphExtractor)
+        self.assertIsInstance(extractor.extractors[0], RuleBasedGraphExtractor)
+        self.assertIsInstance(extractor.extractors[1], LLMGraphExtractor)
+
+        # 原因：应用启动后用户仍可切换模型地址和模型 ID，图抽取不能捕获启动时快照。
+        # 作用：调用 extractor 的工厂时才读取 RuntimeModelController 当前在线设置。
+        extractor.extractors[1].llm_factory()
+        self.model_runtime.require_online_settings.assert_called()
 
     def test_conversation_crud_and_message_isolation(self) -> None:
         first = self.client.post("/api/conversations", json={"title": "First"})

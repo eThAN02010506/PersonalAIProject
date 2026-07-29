@@ -7,6 +7,7 @@ import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path, PurePosixPath
+from typing import TYPE_CHECKING
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -27,7 +28,7 @@ from qwopus_agent.api.routes import (
     build_skill_router,
 )
 from qwopus_agent.documents import DocumentStore
-from qwopus_agent.llm import create_default_llm_registry
+from qwopus_agent.llm import LLMRegistry, create_default_llm_registry
 from qwopus_agent.memory import ConversationKnowledgeManager
 from qwopus_agent.services.skill_authoring_service import SkillAuthoringService
 from qwopus_agent.services.skill_growth_service import SkillGrowthService
@@ -38,9 +39,13 @@ from qwopus_agent.utils.logging_config import (
     configure_runtime_logging,
 )
 
+from .lan_auth import LanAuthConfig, LanAuthMiddleware
 from .model_runtime import RuntimeModelController
 from .repository import ConversationRepository
 from .runs import ChatRunRegistry
+
+if TYPE_CHECKING:
+    from qwopus_agent.memory.minirag import MiniRAG
 
 REPORT_DIRECTORY = Path("storage/reports")
 FRONTEND_DIRECTORY = Path("frontend/dist")
@@ -76,11 +81,17 @@ def create_app(
     runtime_log_path: Path = DEFAULT_RUNTIME_LOG_PATH,
     document_store: DocumentStore | None = None,
     debug_allow_lan: bool | None = None,
+    lan_auth: LanAuthConfig | None = None,
 ) -> FastAPI:
     """Build an independently testable API application."""
     repo = repository or ConversationRepository()
     debug_path = debug_directory if debug_directory is not None else DEFAULT_DEBUG_DIRECTORY
-    knowledge = knowledge_manager or ConversationKnowledgeManager()
+    runtime = model_runtime or RuntimeModelController()
+    llm_registry = create_default_llm_registry()
+    knowledge = knowledge_manager or _build_default_knowledge_manager(
+        runtime,
+        llm_registry,
+    )
     skill_root = repo.database_path.parent / "skills"
     skill_catalog = SkillCatalog(storage_path=skill_root / "catalog.json")
     skill_registry = SkillRegistry.discover(
@@ -93,8 +104,6 @@ def create_app(
         workflow_root=skill_root / "workflows",
         history_path=skill_root / "growth_history.json",
     )
-    runtime = model_runtime or RuntimeModelController()
-    llm_registry = create_default_llm_registry()
     skill_authoring = SkillAuthoringService(
         growth=skill_growth,
         # 原因：用户可在运行时切换模型地址和模型 ID，作者服务不能缓存旧适配器。
@@ -147,6 +156,12 @@ def create_app(
         allow_methods=["*"],
         allow_headers=["*"],
     )
+    # 原因：认证若只挂在 /api，React、OpenAPI 和 Debug 静态入口仍能从 LAN 直接读取。
+    # 作用：统一保护完整 ASGI 应用；环回客户端由中间件自动免认证。
+    api.add_middleware(
+        LanAuthMiddleware,
+        config=lan_auth or LanAuthConfig.from_environment(),
+    )
     # 原因：入口工厂只负责依赖装配，路由业务边界不应共同累积在一个函数中。
     # 作用：每组 Router 可独立测试，create_app 的复杂度不随功能数量线性增长。
     api.include_router(build_model_router(runtime))
@@ -195,6 +210,42 @@ def create_app(
         )
 
     return api
+
+
+def _build_default_knowledge_manager(
+    runtime: RuntimeModelController,
+    llm_registry: LLMRegistry,
+) -> ConversationKnowledgeManager:
+    """Compose evidence-bound LLM graph extraction at the application boundary."""
+
+    def create_memory(storage_path: Path) -> MiniRAG:
+        from qwopus_agent.memory.graph_extraction import (
+            CompositeGraphExtractor,
+            LLMGraphExtractor,
+            RuleBasedGraphExtractor,
+        )
+        from qwopus_agent.memory.minirag import MiniRAG
+
+        # 原因：仅使用规则语法时，普通 PDF/DOCX 文本不会产生实体关系，图谱只在
+        # 人工写入 [[A]] -[relation]-> [[B]] 时有效。
+        # 作用：规则抽取提供确定性保底，LLM 抽取补充自然语言关系；每次调用都读取
+        # RuntimeModelController 当前设置，因此切换 Gemma/Qwen/Qwopus 后无需重建适配器。
+        graph_extractor = CompositeGraphExtractor(
+            extractors=(
+                RuleBasedGraphExtractor(),
+                LLMGraphExtractor(
+                    llm_factory=lambda: llm_registry.create_from_settings(
+                        runtime.require_online_settings()
+                    )
+                ),
+            )
+        )
+        return MiniRAG(
+            storage_path=storage_path,
+            graph_extractor=graph_extractor,
+        )
+
+    return ConversationKnowledgeManager(factory=create_memory)
 
 
 async def _reap_chat_runs(runs: ChatRunRegistry) -> None:
