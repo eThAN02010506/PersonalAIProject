@@ -64,6 +64,7 @@ def build_local_knowledge_tools(
     progress_callback: Callable[[str], None] | None = None,
     min_source_relevance: float = 0.55,
     knowledge_root: Path = DEFAULT_CONVERSATION_KNOWLEDGE_ROOT,
+    global_knowledge_path: Path | None = None,
     include_global_knowledge: bool = False,
     budget_manager: TokenBudgetManager | None = None,
 ) -> LocalKnowledgeTools:
@@ -109,8 +110,12 @@ def build_local_knowledge_tools(
         )
 
     if include_global_knowledge:
+        if global_knowledge_path is None:
+            # 原因：账号模式不能再退回进程级 documents.jsonl，否则会跨账号检索。
+            # 作用：只有旧的无账号调用保留原路径；正式 API 总是显式传入账号聚合库。
+            global_knowledge_path = Path(knowledge_root).parent / "documents.jsonl"
         global_minirag = MiniRAG(
-            storage_path=Path(knowledge_root).parent / "documents.jsonl"
+            storage_path=global_knowledge_path
         )
         global_sources = _knowledge_sources(global_minirag)
         global_source_hints = _mentioned_sources(user_message, global_sources)

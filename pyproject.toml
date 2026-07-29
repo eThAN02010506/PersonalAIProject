@@ -13,6 +13,9 @@ authors = [
   { name = "Qwopus-Agent Contributors" }
 ]
 dependencies = [
+  # 原因：账号密码不能使用快速摘要或可逆加密保存，Apple Silicon 本地部署也需要抗 GPU 的密码哈希。
+  # 作用：按 OWASP 建议使用 Argon2id，并由库自动生成每个密码的独立 salt。
+  "argon2-cffi>=23.1,<26",
   # 原因：统一报告模块必须输出可查看的真实 PNG/SVG，而不是图表描述文件。
   # 作用：使用无窗口 Agg 后端生成跨平台图表，并保持 UI 只负责下载。
   "matplotlib>=3.8,<4",

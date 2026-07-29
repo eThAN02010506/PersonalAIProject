@@ -38,14 +38,14 @@ class _TraceEvent(BaseModel):
 
 
 class DebugStoreTests(unittest.TestCase):
-    def test_debug_network_scope_requires_explicit_private_lan_permission(self) -> None:
-        # 原因：Debug 内容包含原始 Prompt 和 Observation，监听 0.0.0.0 不能等于允许公网读取。
-        # 作用：锁定回环始终可用、私网仅按开关放行、公网始终拒绝。
-        self.assertTrue(debug_host_is_allowed("127.0.0.1", allow_lan=False))
-        self.assertFalse(debug_host_is_allowed("192.168.1.42", allow_lan=False))
-        self.assertTrue(debug_host_is_allowed("192.168.1.42", allow_lan=True))
-        self.assertTrue(debug_host_is_allowed("fd00::42", allow_lan=True))
-        self.assertFalse(debug_host_is_allowed("8.8.8.8", allow_lan=True))
+    def test_debug_network_scope_is_always_host_only(self) -> None:
+        # 原因：Debug 内容包含所有账号的 Prompt 和 Observation，管理员身份仍不足以允许远程读取。
+        # 作用：锁定 IPv4/IPv6 回环可用，局域网与公网地址始终拒绝。
+        self.assertTrue(debug_host_is_allowed("127.0.0.1"))
+        self.assertTrue(debug_host_is_allowed("::1"))
+        self.assertFalse(debug_host_is_allowed("192.168.1.42"))
+        self.assertFalse(debug_host_is_allowed("fd00::42"))
+        self.assertFalse(debug_host_is_allowed("8.8.8.8"))
 
     def test_round_trip_preserves_nested_raw_agent_fields(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

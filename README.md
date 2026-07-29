@@ -6,8 +6,9 @@ Multi-Agent workflows. It is optimized for Apple Silicon and MLX, while the
 Agent core remains independent from any model family.
 
 The repository contains a React application, a FastAPI backend, a local Debug
-Console, and independently testable Python modules. It is an active local
-application framework, not a hosted multi-user service.
+Console, and independently testable Python modules. It is a local-first
+multi-account application: each account owns its chats and documents, while a
+chat owner can explicitly share that chat and its attached files.
 
 ## What Works
 
@@ -21,7 +22,7 @@ application framework, not a hosted multi-user service.
 | Web research | Optional Tavily search plus separately authorized, isolated Playwright page rendering |
 | Reports | Unified Markdown, Excel, PNG/SVG chart, and complete paginated Unicode PDF artifacts |
 | Skills | Automatic discovery, declarative Workflow Skills, semantic versions, promotion, rollback, and model-assisted candidate authoring |
-| Interfaces | React 19 with assistant-ui, FastAPI, SQLite conversation history, CLI entry points, and a React Debug Console |
+| Interfaces | React 19 with assistant-ui, FastAPI, account-scoped SQLite history, CLI entry points, and a host-only React Debug Console |
 
 ## Architecture
 
@@ -47,7 +48,7 @@ flowchart TD
     MEM --> GRAPH["Persistent knowledge graph"]
 
     CORE --> REPORT["ReportGenerator"]
-    API --> SQLITE["SQLite conversations"]
+    API --> SQLITE["SQLite accounts, ACLs, and conversations"]
     API --> STORAGE["Local storage and logs"]
 ```
 
@@ -166,7 +167,6 @@ Useful optional variables:
 | `QWOPUS_SMOLAGENTS_MAX_TOKENS` | Maximum generated output tokens |
 | `QWOPUS_MLX_SERVER_EXECUTABLE` | Explicit `mlx_lm.server` executable for local-path mode |
 | `QWOPUS_EMBEDDING_MODEL` | Locally cached sentence-transformer used by MiniRAG |
-| `QWOPUS_DEBUG_ALLOW_LAN` | Explicitly allow Debug routes on a trusted private LAN |
 | `QWOPUS_LAN_USERNAME` | Shared LAN login name; defaults to `qwopus` |
 | `QWOPUS_LAN_PASSWORD` | Required password for every non-loopback HTTP request |
 
@@ -213,6 +213,49 @@ pnpm run dev
 
 Vite serves the frontend on `http://127.0.0.1:5173` and proxies `/api` to
 FastAPI.
+
+## Accounts And Sharing
+
+Qwopus-Agent does not create a default username or password. When the database
+contains no accounts, the first browser visit displays **Create the first
+administrator**:
+
+1. Enter a display name, a 3-32 character username, and an 8-256 character
+   password.
+2. Select **Initialize** to create the administrator and start its browser
+   session.
+3. Open the account menu in the sidebar to change the password or use **Add
+   account** to create a `Member` or another `Administrator`.
+
+Administrators can also disable and reactivate local accounts from that dialog.
+Disabling an account revokes its sessions and cancels its active runs. The first
+administrator claims unowned conversations, documents, reports, and global
+knowledge created before account support was enabled.
+
+Passwords are stored as Argon2id hashes. Browser sessions use random opaque
+tokens in `HttpOnly`, `SameSite=Strict` cookies; only token hashes are persisted
+in SQLite.
+
+Authorization is checked on every private API request:
+
+- an account sees only conversations it owns or conversations shared with it
+- a chat member can read and continue that chat and use its attached documents
+  and reports
+- only the owner can rename, delete, share, or revoke access to the chat
+- revoking a member also cancels that member's active runs for the chat
+- saved documents and reports are unavailable outside their owning or shared
+  conversation
+- the **Global** knowledge option searches only the current account's
+  cross-conversation MiniRAG store
+
+To share a chat, its owner selects the chat, opens **Share**, and enters another
+account's exact username. Removing that member immediately removes access to the
+chat and its attached documents and reports.
+
+The administrator does not receive implicit access to another account's normal
+chat APIs. The separate host-only Debug Console is the intentional audit
+surface and can display diagnostic records from all accounts, including the
+recorded actor.
 
 ## Document And Spreadsheet Flow
 
@@ -271,10 +314,15 @@ Each conversation owns a persistent knowledge store:
 storage/minirag/conversations/<conversation_id>/
 ```
 
-Uploads are also written to a conversation-namespaced global aggregate under
-`storage/minirag/`. Chat searches only the active conversation by default.
-Global retrieval becomes available for a turn only when the user enables
-**Knowledge** and then explicitly enables **Global**.
+Uploads are also written to an account-owned aggregate:
+
+```text
+storage/minirag/users/<user_id>/
+```
+
+Chat searches only the active conversation by default. Global retrieval becomes
+available for a turn only when the user enables **Knowledge** and then
+explicitly enables **Global**; it never searches another account's aggregate.
 
 The Qwopus `MiniRAG` facade uses the upstream MiniRAG package's persistent
 NanoVectorDB component. It is not a wrapper around the complete upstream
@@ -345,6 +393,7 @@ main application:
 
 - current model, endpoint, process, platform, uptime, and active task counts
 - orchestration events and final status
+- the account responsible for every recorded run
 - complete recorded prompts and raw model outputs
 - Tool names, arguments, Observations, parsing errors, and max-step state
 - downloadable JSON traces and a bounded runtime-log tail
@@ -354,25 +403,17 @@ main application:
 It can display only reasoning text returned by the configured provider. Hidden
 provider reasoning is not available.
 
-Debug routes accept loopback clients by default because traces can contain
-document excerpts and prompts. To expose them to trusted devices on a private
-LAN:
-
-```bash
-QWOPUS_DEBUG_ALLOW_LAN=1 \
-QWOPUS_LAN_PASSWORD='choose-a-long-random-password' \
-PYTHONPATH=src .venv/bin/python -m uvicorn \
-  qwopus_agent.api.app:app \
-  --host 0.0.0.0 \
-  --port 8010
-```
+Debug routes require both a local loopback connection and an administrator
+session because traces can contain every account's document excerpts, prompts,
+and raw model output. This restriction cannot be enabled for LAN clients by an
+environment variable. The main application may still listen on `0.0.0.0`.
 
 Every non-loopback page and API request is denied unless
 `QWOPUS_LAN_PASSWORD` is set, then protected by browser-compatible HTTP Basic
-authentication. Basic authentication does not encrypt traffic, so use this only
-on a trusted private LAN or place FastAPI behind HTTPS. Debug access additionally
-requires `QWOPUS_DEBUG_ALLOW_LAN=1`. This shared credential is not a multi-user
-authorization or tenancy system.
+authentication before application account login. Basic authentication does not
+encrypt traffic, so use this only on a trusted private LAN or place FastAPI
+behind HTTPS. The shared LAN credential is only an outer network gate; account
+sessions and per-resource authorization provide user isolation.
 
 ## Project Layout
 
@@ -405,10 +446,11 @@ AGENTS.md         Repository development and verification rules
 
 | Path | Contents |
 | --- | --- |
-| `storage/qwopus.db` | Conversations, messages, and run metadata |
+| `storage/qwopus.db` | Accounts, session hashes, conversations, messages, shares, and document/report access rules |
 | `storage/documents/` | Saved originals, normalized Markdown, section indexes, and summaries |
 | `storage/uploads/` | Uploaded working files |
-| `storage/minirag/` | Global and conversation-specific facts, vectors, and graphs |
+| `storage/minirag/conversations/` | Private conversation facts, vectors, and graphs |
+| `storage/minirag/users/` | Account-scoped cross-conversation knowledge stores |
 | `storage/skills/` | Workflow specs, catalog, and growth history |
 | `storage/reports/` | Generated report artifacts |
 | `storage/cache/mineru/` | Per-run MinerU output |
@@ -489,8 +531,9 @@ modules, not in React components or FastAPI route handlers.
 - PDF reports preserve the complete Unicode body and paginate automatically,
   but intentionally provide basic report typography rather than a publication
   layout editor.
-- Non-loopback access has one shared HTTP Basic credential and fails closed when
-  no password is configured. Per-user authorization and tenant isolation are not
-  implemented.
+- Non-loopback access has one shared HTTP Basic outer credential and fails
+  closed when no password is configured. Local application accounts then
+  isolate chats and files, but this is not an external identity or
+  enterprise-tenant system.
 
 Package metadata declares the project under the MIT license.

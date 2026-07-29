@@ -8,6 +8,7 @@ import {
   Network,
   Search,
   ScanText,
+  Share2,
   SlidersHorizontal,
   TextSelect,
   Wrench,
@@ -16,6 +17,7 @@ import {
 import { lazy, Suspense, useCallback, useEffect, useState } from "react";
 
 import { AgentRuntimeProvider } from "./components/AgentRuntimeProvider";
+import { AuthScreen } from "./components/AuthScreen";
 import { ChatThread } from "./components/ChatThread";
 import { Sidebar } from "./components/Sidebar";
 import { api, waitForRun } from "./lib/api";
@@ -25,6 +27,7 @@ import type {
   Health,
   InterpretationMode,
   RunView,
+  UserAccount,
 } from "./lib/types";
 
 // 原因：文档、过程和模型设置不是默认聊天首屏的必需代码。
@@ -49,11 +52,24 @@ const SkillWorkspace = lazy(() =>
     default: module.SkillWorkspace,
   })),
 );
+const AccountDialog = lazy(() =>
+  import("./components/AccountDialog").then((module) => ({
+    default: module.AccountDialog,
+  })),
+);
+const ShareDialog = lazy(() =>
+  import("./components/ShareDialog").then((module) => ({
+    default: module.ShareDialog,
+  })),
+);
 
 type ViewMode = "chat" | "documents" | "skills";
 type ResponseDetail = "concise" | "balanced" | "detailed";
 
 export default function App() {
+  const [authLoading, setAuthLoading] = useState(true);
+  const [bootstrapRequired, setBootstrapRequired] = useState(false);
+  const [user, setUser] = useState<UserAccount | null>(null);
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -75,6 +91,8 @@ export default function App() {
   const [phase, setPhase] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [modelSettingsOpen, setModelSettingsOpen] = useState(false);
+  const [accountOpen, setAccountOpen] = useState(false);
+  const [shareOpen, setShareOpen] = useState(false);
 
   const refreshConversations = useCallback(async () => {
     const items = await api.listConversations();
@@ -87,6 +105,34 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    let active = true;
+    const requireAuthentication = () => {
+      setUser(null);
+      setConversations([]);
+      setActiveId(null);
+      setMessages([]);
+    };
+    window.addEventListener("qwopus:auth-required", requireAuthentication);
+    void api.authStatus()
+      .then((status) => {
+        if (!active) return;
+        setBootstrapRequired(status.bootstrap_required);
+        setUser(status.user ?? null);
+      })
+      .catch((reason) => {
+        if (active) setError(toMessage(reason));
+      })
+      .finally(() => {
+        if (active) setAuthLoading(false);
+      });
+    return () => {
+      active = false;
+      window.removeEventListener("qwopus:auth-required", requireAuthentication);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!user) return;
     let active = true;
     void (async () => {
       try {
@@ -105,7 +151,7 @@ export default function App() {
     return () => {
       active = false;
     };
-  }, [refreshConversations]);
+  }, [refreshConversations, user]);
 
   useEffect(() => {
     if (!activeId) return;
@@ -229,12 +275,52 @@ export default function App() {
     setRunId(null);
   }, [runId]);
 
+  const logout = useCallback(async () => {
+    try {
+      await api.logout();
+    } finally {
+      setUser(null);
+      setConversations([]);
+      setActiveId(null);
+      setMessages([]);
+      setMode("chat");
+      setAccountOpen(false);
+      setShareOpen(false);
+      setGlobalKnowledge(false);
+    }
+  }, []);
+
+  const activeConversation =
+    conversations.find((conversation) => conversation.id === activeId) ?? null;
+
+  if (authLoading) {
+    return (
+      <div className="workspace-loading app-loading">
+        Loading Qwopus Agent
+      </div>
+    );
+  }
+
+  if (!user) {
+    return (
+      <AuthScreen
+        bootstrapRequired={bootstrapRequired}
+        onAuthenticated={(authenticated) => {
+          setUser(authenticated);
+          setBootstrapRequired(false);
+          setError(null);
+        }}
+      />
+    );
+  }
+
   return (
     <div className="app-shell">
       <Sidebar
         conversations={conversations}
         activeId={activeId}
         health={health}
+        user={user}
         open={sidebarOpen}
         onClose={() => setSidebarOpen(false)}
         onCreate={() => void createConversation()}
@@ -247,6 +333,8 @@ export default function App() {
         }}
         onDelete={(id) => void deleteConversation(id)}
         onConfigureModel={() => setModelSettingsOpen(true)}
+        onOpenAccount={() => setAccountOpen(true)}
+        onLogout={() => void logout()}
       />
       {sidebarOpen && <button className="sidebar-backdrop" onClick={() => setSidebarOpen(false)} />}
 
@@ -265,13 +353,36 @@ export default function App() {
             >
               <FileSearch size={16} /> Documents
             </button>
-            <button
-              className={mode === "skills" ? "active" : ""}
-              onClick={() => setMode("skills")}
-            >
-              <Layers3 size={16} /> Skills
-            </button>
+            {user.role === "admin" && (
+              <button
+                className={mode === "skills" ? "active" : ""}
+                onClick={() => setMode("skills")}
+              >
+                <Layers3 size={16} /> Skills
+              </button>
+            )}
           </div>
+
+          {activeConversation?.is_owner && (
+            <button
+              className="secondary-button share-chat-button"
+              onClick={() => setShareOpen(true)}
+              title="Manage chat access"
+              type="button"
+            >
+              <Share2 size={15} />
+              Share
+              {activeConversation.shared_count > 0 && (
+                <span>{activeConversation.shared_count}</span>
+              )}
+            </button>
+          )}
+          {activeConversation && !activeConversation.is_owner && (
+            <span className="shared-chat-label">
+              <Share2 size={14} />
+              Shared by {activeConversation.owner_username}
+            </span>
+          )}
 
           {mode === "chat" && (
             <div className="capability-toggles">
@@ -327,7 +438,7 @@ export default function App() {
                 />
                 <Network size={15} /> Knowledge
               </label>
-              <label title="Allow knowledge uploaded outside this conversation">
+              <label title="Allow knowledge from your account outside this conversation">
                 <input
                   type="checkbox"
                   checked={globalKnowledge}
@@ -399,6 +510,7 @@ export default function App() {
               key={activeId ?? "empty"}
               conversationId={activeId}
               minSourceRelevance={minSourceRelevance}
+              canUseLocalFolder={user.role === "admin"}
             />
           </Suspense>
         ) : (
@@ -414,6 +526,26 @@ export default function App() {
             health={health}
             onClose={() => setModelSettingsOpen(false)}
             onSaved={setHealth}
+          />
+        </Suspense>
+      )}
+      {accountOpen && (
+        <Suspense fallback={null}>
+          <AccountDialog
+            user={user}
+            onClose={() => setAccountOpen(false)}
+            onUserChanged={setUser}
+          />
+        </Suspense>
+      )}
+      {shareOpen && activeConversation?.is_owner && (
+        <Suspense fallback={null}>
+          <ShareDialog
+            conversation={activeConversation}
+            onClose={() => setShareOpen(false)}
+            onChanged={async () => {
+              await refreshConversations();
+            }}
           />
         </Suspense>
       )}

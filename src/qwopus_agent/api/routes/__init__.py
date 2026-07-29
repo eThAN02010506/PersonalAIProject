@@ -1,6 +1,7 @@
 """Focused HTTP route factories for the FastAPI application."""
 
 from qwopus_agent.api.routes.analysis import build_analysis_router
+from qwopus_agent.api.routes.auth import build_auth_router
 from qwopus_agent.api.routes.conversations import build_conversation_router
 from qwopus_agent.api.routes.debug import build_debug_router
 from qwopus_agent.api.routes.documents import build_document_router
@@ -12,6 +13,7 @@ from qwopus_agent.api.routes.skills import build_skill_router
 
 __all__ = [
     "build_analysis_router",
+    "build_auth_router",
     "build_conversation_router",
     "build_debug_router",
     "build_document_router",

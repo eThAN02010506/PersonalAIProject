@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import asyncio
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 
+from qwopus_agent.api.auth import require_admin
 from qwopus_agent.api.model_runtime import (
     ModelRuntimeError,
     RuntimeModelController,
@@ -28,7 +29,11 @@ def build_model_router(runtime: RuntimeModelController) -> APIRouter:
         return _model_settings_view(await asyncio.to_thread(runtime.status))
 
     @router.put("/api/model-settings", response_model=ModelSettingsView)
-    async def update_model_settings(payload: ModelSettingsUpdate) -> ModelSettingsView:
+    async def update_model_settings(
+        payload: ModelSettingsUpdate,
+        request: Request,
+    ) -> ModelSettingsView:
+        require_admin(request)
         capabilities = ModelCapabilities(
             context_window_tokens=payload.context_window_tokens,
             agent_mode=payload.agent_mode,

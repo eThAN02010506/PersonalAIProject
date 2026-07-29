@@ -16,8 +16,10 @@ from starlette.exceptions import HTTPException
 from starlette.responses import Response
 from starlette.types import Scope
 
+from qwopus_agent.api.auth import AccountAuthMiddleware, AuthService
 from qwopus_agent.api.routes import (
     build_analysis_router,
+    build_auth_router,
     build_conversation_router,
     build_debug_router,
     build_document_router,
@@ -80,7 +82,7 @@ def create_app(
     debug_directory: Path | None = None,
     runtime_log_path: Path = DEFAULT_RUNTIME_LOG_PATH,
     document_store: DocumentStore | None = None,
-    debug_allow_lan: bool | None = None,
+    report_directory: Path | None = None,
     lan_auth: LanAuthConfig | None = None,
 ) -> FastAPI:
     """Build an independently testable API application."""
@@ -121,6 +123,8 @@ def create_app(
         skill_growth=skill_growth,
     )
     documents = document_store or DocumentStore()
+    reports = report_directory or REPORT_DIRECTORY
+    auth = AuthService(repo)
     started_at = time.monotonic()
 
     @asynccontextmanager
@@ -149,6 +153,7 @@ def create_app(
     api.state.skill_registry = skill_registry
     api.state.skill_growth = skill_growth
     api.state.skill_authoring = skill_authoring
+    api.state.auth = auth
     api.add_middleware(
         CORSMiddleware,
         allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
@@ -156,6 +161,9 @@ def create_app(
         allow_methods=["*"],
         allow_headers=["*"],
     )
+    # 原因：LAN Basic Auth 只保护网络入口，无法区分同一局域网中的实际使用者。
+    # 作用：账号中间件为每个 API 请求解析服务端会话，并默认拒绝未登录的私有资源。
+    api.add_middleware(AccountAuthMiddleware, auth=auth)
     # 原因：认证若只挂在 /api，React、OpenAPI 和 Debug 静态入口仍能从 LAN 直接读取。
     # 作用：统一保护完整 ASGI 应用；环回客户端由中间件自动免认证。
     api.add_middleware(
@@ -164,9 +172,27 @@ def create_app(
     )
     # 原因：入口工厂只负责依赖装配，路由业务边界不应共同累积在一个函数中。
     # 作用：每组 Router 可独立测试，create_app 的复杂度不随功能数量线性增长。
+    api.include_router(
+        build_auth_router(
+            auth,
+            repo,
+            documents,
+            knowledge,
+            reports,
+            runs,
+        )
+    )
     api.include_router(build_model_router(runtime))
     api.include_router(build_conversation_router(repo, runs, runtime, knowledge))
-    api.include_router(build_analysis_router(runtime, repo, knowledge, debug_path))
+    api.include_router(
+        build_analysis_router(
+            runtime,
+            repo,
+            knowledge,
+            debug_path,
+            documents,
+        )
+    )
     api.include_router(
         build_document_router(
             documents,
@@ -177,13 +203,10 @@ def create_app(
         )
     )
     api.include_router(build_local_folder_router(runtime, repo, debug_path))
-    api.include_router(build_report_router(REPORT_DIRECTORY))
+    api.include_router(build_report_router(reports, repo))
     api.include_router(build_skill_router(skill_growth))
     api.include_router(
-        build_skill_authoring_router(
-            skill_authoring,
-            allow_lan=debug_allow_lan,
-        )
+        build_skill_authoring_router(skill_authoring)
     )
     api.include_router(
         build_debug_router(
@@ -192,7 +215,6 @@ def create_app(
             debug_path,
             runtime_log_path,
             started_at=started_at,
-            allow_lan=debug_allow_lan,
         )
     )
 

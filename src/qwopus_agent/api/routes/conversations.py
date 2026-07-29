@@ -2,19 +2,22 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 
+from qwopus_agent.api.auth import current_user
 from qwopus_agent.api.model_runtime import ModelRuntimeError, RuntimeModelController
 from qwopus_agent.api.models import (
     ChatStartRequest,
     ConversationCreate,
+    ConversationMemberView,
+    ConversationShareCreate,
     ConversationUpdate,
     ConversationView,
     MessageView,
     RunStarted,
     RunView,
 )
-from qwopus_agent.api.repository import ConversationRepository
+from qwopus_agent.api.repository import ConversationRecord, ConversationRepository
 from qwopus_agent.api.runs import ChatRunRegistry
 from qwopus_agent.memory import ConversationKnowledgeManager
 
@@ -60,6 +63,25 @@ def build_conversation_router(
         response_model=list[MessageView],
     )
     router.add_api_route(
+        "/api/conversations/{conversation_id}/members",
+        endpoints.members,
+        methods=["GET"],
+        response_model=list[ConversationMemberView],
+    )
+    router.add_api_route(
+        "/api/conversations/{conversation_id}/members",
+        endpoints.share_conversation,
+        methods=["POST"],
+        response_model=ConversationMemberView,
+        status_code=201,
+    )
+    router.add_api_route(
+        "/api/conversations/{conversation_id}/members/{user_id}",
+        endpoints.unshare_conversation,
+        methods=["DELETE"],
+        status_code=204,
+    )
+    router.add_api_route(
         "/api/conversations/{conversation_id}/runs",
         endpoints.start_run,
         methods=["POST"],
@@ -95,53 +117,119 @@ class _ConversationEndpoints:
         self.runtime = runtime
         self.knowledge = knowledge
 
-    def conversations(self) -> list[ConversationView]:
+    def conversations(self, request: Request) -> list[ConversationView]:
+        user = current_user(request)
         return [
             ConversationView.model_validate(item)
-            for item in self.repository.list_conversations()
+            for item in self.repository.list_conversations_for_user(user.id)
         ]
 
-    def create_conversation(self, payload: ConversationCreate) -> ConversationView:
-        return ConversationView.model_validate(
-            self.repository.create_conversation(payload.title)
+    def create_conversation(
+        self,
+        payload: ConversationCreate,
+        request: Request,
+    ) -> ConversationView:
+        user = current_user(request)
+        created = self.repository.create_conversation(
+            payload.title,
+            owner_user_id=user.id,
         )
+        scoped = self.repository.get_conversation_for_user(created.id, user.id)
+        if scoped is None:
+            raise RuntimeError("Created conversation is not accessible to its owner.")
+        return ConversationView.model_validate(scoped)
 
     def rename_conversation(
         self,
         conversation_id: str,
         payload: ConversationUpdate,
+        request: Request,
     ) -> ConversationView:
+        user = current_user(request)
+        self._owned_conversation(conversation_id, user.id)
         record = self.repository.rename_conversation(conversation_id, payload.title)
         if record is None:
             raise HTTPException(status_code=404, detail="Conversation not found.")
-        return ConversationView.model_validate(record)
+        scoped = self.repository.get_conversation_for_user(conversation_id, user.id)
+        if scoped is None:
+            raise RuntimeError("Renamed conversation is not accessible to its owner.")
+        return ConversationView.model_validate(scoped)
 
-    def delete_conversation(self, conversation_id: str) -> None:
-        if self.repository.get_conversation(conversation_id) is None:
-            raise HTTPException(status_code=404, detail="Conversation not found.")
+    def delete_conversation(self, conversation_id: str, request: Request) -> None:
+        user = current_user(request)
+        self._owned_conversation(conversation_id, user.id)
         self.runs.cancel_conversation(conversation_id)
         # 原因：会话记录删除后，其私有向量与图谱目录不应变成不可见的孤立数据。
         # 作用：显式删除聊天时同步清理该 conversation_id 的知识库，不影响其他聊天。
-        self.knowledge.delete(conversation_id)
+        self.knowledge.delete(conversation_id, global_scope=user.id)
         self.repository.delete_conversation(conversation_id)
 
-    def messages(self, conversation_id: str) -> list[MessageView]:
-        if self.repository.get_conversation(conversation_id) is None:
-            raise HTTPException(status_code=404, detail="Conversation not found.")
+    def messages(
+        self,
+        conversation_id: str,
+        request: Request,
+    ) -> list[MessageView]:
+        user = current_user(request)
+        self._accessible_conversation(conversation_id, user.id)
         return [
             MessageView.model_validate(item)
             for item in self.repository.list_messages(conversation_id)
         ]
 
+    def members(
+        self,
+        conversation_id: str,
+        request: Request,
+    ) -> list[ConversationMemberView]:
+        user = current_user(request)
+        self._accessible_conversation(conversation_id, user.id)
+        return [
+            ConversationMemberView.model_validate(member)
+            for member in self.repository.list_conversation_members(conversation_id)
+        ]
+
+    def share_conversation(
+        self,
+        conversation_id: str,
+        payload: ConversationShareCreate,
+        request: Request,
+    ) -> ConversationMemberView:
+        user = current_user(request)
+        self._owned_conversation(conversation_id, user.id)
+        member = self.repository.add_conversation_member(
+            conversation_id,
+            payload.username.strip(),
+        )
+        if member is None:
+            raise HTTPException(
+                status_code=404,
+                detail="Active account not found or already owns this conversation.",
+            )
+        return ConversationMemberView.model_validate(member)
+
+    def unshare_conversation(
+        self,
+        conversation_id: str,
+        user_id: str,
+        request: Request,
+    ) -> None:
+        user = current_user(request)
+        self._owned_conversation(conversation_id, user.id)
+        if not self.repository.is_conversation_member(conversation_id, user_id):
+            raise HTTPException(status_code=404, detail="Shared member not found.")
+        self.runs.cancel_user_conversation(conversation_id, user_id)
+        if not self.repository.remove_conversation_member(conversation_id, user_id):
+            raise HTTPException(status_code=404, detail="Shared member not found.")
+
     def start_run(
         self,
         conversation_id: str,
         payload: ChatStartRequest,
+        request: Request,
     ) -> RunStarted:
-        conversation = self.repository.get_conversation(conversation_id)
-        if conversation is None:
-            raise HTTPException(status_code=404, detail="Conversation not found.")
-        if conversation.title in {"New chat", "新对话"}:
+        user = current_user(request)
+        conversation = self._accessible_conversation(conversation_id, user.id)
+        if conversation.is_owner and conversation.title in {"New chat", "新对话"}:
             self.repository.rename_conversation(
                 conversation_id,
                 _conversation_title(payload.content),
@@ -159,6 +247,8 @@ class _ConversationEndpoints:
                 run_id=self.runs.complete_clarification(
                     conversation_id,
                     prepared,
+                    user_id=user.id,
+                    username=user.username,
                 )
             )
         try:
@@ -182,20 +272,60 @@ class _ConversationEndpoints:
             response_detail=payload.response_detail,
             interpretation_mode=payload.interpretation_mode,
             prepared=prepared,
+            user_id=user.id,
+            username=user.username,
+            global_knowledge_path=self.knowledge.global_storage_path_for(user.id),
         )
         return RunStarted(run_id=run_id)
 
-    def poll_run(self, run_id: str) -> RunView:
+    def poll_run(self, run_id: str, request: Request) -> RunView:
+        user = current_user(request)
+        conversation_id = self.runs.conversation_id_for(run_id)
+        if (
+            conversation_id is None
+            or self.repository.get_conversation_for_user(conversation_id, user.id) is None
+        ):
+            raise HTTPException(status_code=404, detail="Run not found.")
         result = self.runs.poll(run_id)
         if result is None:
             raise HTTPException(status_code=404, detail="Run not found.")
         return result
 
-    def cancel_run(self, run_id: str) -> RunView:
+    def cancel_run(self, run_id: str, request: Request) -> RunView:
+        user = current_user(request)
+        conversation_id = self.runs.conversation_id_for(run_id)
+        if (
+            conversation_id is None
+            or self.repository.get_conversation_for_user(conversation_id, user.id) is None
+        ):
+            raise HTTPException(status_code=404, detail="Run not found.")
         result = self.runs.cancel(run_id)
         if result is None:
             raise HTTPException(status_code=404, detail="Run not found.")
         return result
+
+    def _accessible_conversation(
+        self,
+        conversation_id: str,
+        user_id: str,
+    ) -> ConversationRecord:
+        conversation = self.repository.get_conversation_for_user(
+            conversation_id,
+            user_id,
+        )
+        if conversation is None:
+            # 原因：403 会确认其他账号的会话 ID 确实存在，便于枚举私有资源。
+            # 作用：不存在和无权访问统一返回 404，授权事实不泄漏给请求者。
+            raise HTTPException(status_code=404, detail="Conversation not found.")
+        return conversation
+
+    def _owned_conversation(
+        self,
+        conversation_id: str,
+        user_id: str,
+    ) -> None:
+        if not self.repository.is_conversation_owner(conversation_id, user_id):
+            raise HTTPException(status_code=404, detail="Conversation not found.")
 
 
 def _conversation_title(content: str) -> str:

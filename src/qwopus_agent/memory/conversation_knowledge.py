@@ -97,7 +97,11 @@ class ConversationKnowledgeManager:
     global_storage_path: Path | None = None
     factory: Callable[[Path], MiniRAG] | None = field(default=None, repr=False)
     _entries: dict[str, _KnowledgeEntry] = field(default_factory=dict, init=False, repr=False)
-    _global_entry: _KnowledgeEntry | None = field(default=None, init=False, repr=False)
+    _global_entries: dict[str, _KnowledgeEntry] = field(
+        default_factory=dict,
+        init=False,
+        repr=False,
+    )
     _deleted: set[str] = field(default_factory=set, init=False, repr=False)
     _entries_lock: LockType = field(default_factory=Lock, init=False, repr=False)
 
@@ -112,6 +116,13 @@ class ConversationKnowledgeManager:
     def storage_path(self, conversation_id: str) -> Path:
         """Expose the validated path rule to API and worker-process adapters."""
         return conversation_knowledge_path(conversation_id, root=self.root)
+
+    def global_storage_path_for(self, account_id: str) -> Path:
+        """Return one account's aggregate MiniRAG path."""
+        normalized_id = account_id.strip()
+        if not _CONVERSATION_ID_PATTERN.fullmatch(normalized_id):
+            raise ValueError("account_id contains unsupported characters")
+        return self.root.parent / "users" / normalized_id / "documents.jsonl"
 
     def get(self, conversation_id: str) -> MiniRAG:
         """Return the process-local MiniRAG instance for one conversation."""
@@ -151,12 +162,17 @@ class ConversationKnowledgeManager:
             return entry
 
     @contextmanager
-    def lease(self, conversation_id: str) -> Iterator[MiniRAG]:
+    def lease(
+        self,
+        conversation_id: str,
+        *,
+        global_scope: str | None = None,
+    ) -> Iterator[MiniRAG]:
         """Serialize mutations for one conversation while other conversations remain parallel."""
         # 原因：分两次读取缓存时，删除可能夹在 get() 与字典访问之间并泄漏 KeyError。
         # 作用：一次取得稳定 entry；删除会等待其锁，迟到 lease 则收到受控 RuntimeError。
         entry = self._entry_for(conversation_id)
-        global_entry = self._global_entry_for()
+        global_entry = self._global_entry_for(global_scope)
         with entry.lock:
             if not entry.active:
                 raise RuntimeError("conversation knowledge was deleted")
@@ -171,37 +187,76 @@ class ConversationKnowledgeManager:
                 ),
             )
 
-    def delete(self, conversation_id: str) -> None:
+    def delete(
+        self,
+        conversation_id: str,
+        *,
+        global_scope: str | None = None,
+    ) -> None:
         """Remove cached and persisted knowledge after explicit conversation deletion."""
-        global_entry = self._global_entry_for()
+        global_entry = self._global_entry_for(global_scope) if global_scope is None else None
         directory = self.storage_path(conversation_id).parent
         with self._entries_lock:
             self._deleted.add(conversation_id)
             entry = self._entries.pop(conversation_id, None)
             if entry is None:
-                with global_entry.lock:
-                    _delete_global_scope(global_entry.memory, conversation_id)
+                if global_entry is not None:
+                    with global_entry.lock:
+                        _delete_global_scope(global_entry.memory, conversation_id)
                 shutil.rmtree(directory, ignore_errors=True)
                 return
             entry.active = False
             with entry.lock:
-                with global_entry.lock:
-                    _delete_global_scope(global_entry.memory, conversation_id)
+                if global_entry is not None:
+                    with global_entry.lock:
+                        _delete_global_scope(global_entry.memory, conversation_id)
                 # 原因：删除聊天后保留其向量和图谱会形成无法管理的孤立本地数据。
                 # 作用：显式删除对话时一并删除仅属于该会话的派生知识库目录。
                 shutil.rmtree(directory, ignore_errors=True)
 
-    def _global_entry_for(self) -> _KnowledgeEntry:
-        """Return the process-local aggregate used only by explicit Global tools."""
+    def claim_legacy_global(self, account_id: str) -> None:
+        """Move the pre-account aggregate into the first administrator namespace."""
+        destination = self.global_storage_path_for(account_id)
+        source = self.global_storage_path
+        if source is None or not source.exists() or destination.exists():
+            return
         with self._entries_lock:
-            if self._global_entry is None:
+            if "legacy" in self._global_entries:
+                raise RuntimeError("Legacy global knowledge is currently in use.")
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            # 原因：MiniRAG 的 JSONL、向量目录和知识图谱是一个一致的派生集合。
+            # 作用：首次初始化时整体迁移到管理员命名空间，其他账号不会读取旧全局证据。
+            for legacy_path in (
+                source,
+                Path(f"{source}.lock"),
+                source.parent / f"{source.stem}_index",
+                source.parent / "knowledge_graph.json",
+            ):
+                if legacy_path.exists():
+                    shutil.move(
+                        str(legacy_path),
+                        str(destination.parent / legacy_path.name),
+                    )
+
+    def _global_entry_for(self, scope: str | None = None) -> _KnowledgeEntry:
+        """Return the process-local aggregate used only by explicit Global tools."""
+        key = scope or "legacy"
+        with self._entries_lock:
+            entry = self._global_entries.get(key)
+            if entry is None:
                 factory = self.factory or _create_minirag
-                if self.global_storage_path is None:
-                    raise RuntimeError("global knowledge path was not initialized")
-                self._global_entry = _KnowledgeEntry(
-                    memory=factory(self.global_storage_path)
+                storage_path = (
+                    self.global_storage_path_for(scope)
+                    if scope is not None
+                    else self.global_storage_path
                 )
-            return self._global_entry
+                if storage_path is None:
+                    raise RuntimeError("global knowledge path was not initialized")
+                entry = _KnowledgeEntry(
+                    memory=factory(storage_path)
+                )
+                self._global_entries[key] = entry
+            return entry
 
 
 def _create_minirag(storage_path: Path) -> MiniRAG:

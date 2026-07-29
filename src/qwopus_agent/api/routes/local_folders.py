@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from uuid import uuid4
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 
+from qwopus_agent.api.auth import require_admin
+from qwopus_agent.api.debug_access import require_debug_client
 from qwopus_agent.api.model_runtime import RuntimeModelController
 from qwopus_agent.api.models import (
     AnalysisView,
@@ -16,7 +19,7 @@ from qwopus_agent.api.models import (
     LocalFolderTreeView,
 )
 from qwopus_agent.api.repository import ConversationRepository
-from qwopus_agent.api.routes.analysis import analysis_view
+from qwopus_agent.api.routes.analysis import analysis_view, register_analysis_access
 from qwopus_agent.documents.local_folder import (
     MAX_LOCAL_FOLDER_SELECTION,
     LocalFolderError,
@@ -42,9 +45,14 @@ def build_local_folder_router(
     router = APIRouter()
 
     @router.post("/api/local-folders/scan", response_model=LocalFolderTreeView)
-    def scan_folder(request: LocalFolderScanRequest) -> LocalFolderTreeView:
+    def scan_folder(
+        payload: LocalFolderScanRequest,
+        request: Request,
+    ) -> LocalFolderTreeView:
+        require_admin(request)
+        require_debug_client(request)
         try:
-            folder = scan_local_folder(request.path)
+            folder = scan_local_folder(payload.path)
         except LocalFolderError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -60,20 +68,25 @@ def build_local_folder_router(
         )
 
     @router.post("/api/local-folders/analyze", response_model=AnalysisView)
-    async def analyze_folder(request: LocalFolderAnalysisRequest) -> AnalysisView:
-        if repository.get_conversation(request.conversation_id) is None:
+    async def analyze_folder(
+        payload: LocalFolderAnalysisRequest,
+        request: Request,
+    ) -> AnalysisView:
+        user = require_admin(request)
+        require_debug_client(request)
+        if repository.get_conversation_for_user(payload.conversation_id, user.id) is None:
             raise HTTPException(status_code=404, detail="Conversation not found.")
         try:
-            files = resolve_selected_files(request.root, request.selected_files)
+            files = resolve_selected_files(payload.root, payload.selected_files)
         except LocalFolderError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
-        root = Path(request.root).expanduser().resolve(strict=True)
+        root = Path(payload.root).expanduser().resolve(strict=True)
 
         # 原因：目录模式必须读取用户勾选的原文件，不能复制上传或隐式扩大到未勾选文件。
         # 作用：Orchestrator 只收到根目录内已验证的路径，并使用相对路径区分同名文件。
         orchestration_request = OrchestrationRequest(
-            objective=request.question,
-            conversation_id=request.conversation_id,
+            objective=payload.question,
+            conversation_id=payload.conversation_id,
             uploaded_files=tuple(
                 OrchestrationFile(
                     name=file_path.relative_to(root).as_posix(),
@@ -81,11 +94,11 @@ def build_local_folder_router(
                 )
                 for file_path in files
             ),
-            generate_report=request.generate_report,
-            analysis_mode=request.analysis_mode,
-            selected_sections=request.selected_sections,
+            generate_report=payload.generate_report,
+            analysis_mode=payload.analysis_mode,
+            selected_sections=payload.selected_sections,
             report_title="Qwopus Local Folder Analysis",
-            report_basename="qwopus_folder_analysis",
+            report_basename=f"qwopus_folder_analysis_{uuid4().hex[:12]}",
         )
         orchestrator = AgentOrchestrator(runtime.current_settings(), minirag=None)
         result: OrchestrationResult = await asyncio.to_thread(
@@ -98,7 +111,15 @@ def build_local_folder_router(
             result=result.final_answer,
             trace=result.trace,
             debug_runs=result.debug_runs,
+            user_id=user.id,
+            username=user.username,
             directory=debug_directory,
+        )
+        register_analysis_access(
+            result,
+            repository=repository,
+            conversation_id=payload.conversation_id,
+            user_id=user.id,
         )
         if not result.success:
             raise HTTPException(status_code=500, detail=result.final_answer)

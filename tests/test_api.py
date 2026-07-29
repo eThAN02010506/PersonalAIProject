@@ -90,6 +90,16 @@ class ApiTests(unittest.TestCase):
             )
         )
         self.client = self.client_context.__enter__()
+        initialized = self.client.post(
+            "/api/auth/bootstrap",
+            json={
+                "username": "test-admin",
+                "display_name": "Test Admin",
+                "password": "test-password-123",
+            },
+        )
+        self.assertEqual(initialized.status_code, 201)
+        self.user_id = initialized.json()["user"]["id"]
 
     def tearDown(self) -> None:
         self.client_context.__exit__(None, None, None)
@@ -368,6 +378,10 @@ class ApiTests(unittest.TestCase):
         incomplete = self.document_directory / "document-incomplete"
         incomplete.mkdir()
         (incomplete / "metadata.json").write_text("{}", encoding="utf-8")
+        self.repository.register_document(
+            structure.document_id,
+            owner_user_id=self.user_id,
+        )
 
         response = self.client.get("/api/documents")
 

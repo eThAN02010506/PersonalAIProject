@@ -103,6 +103,7 @@ export function DebugConsole() {
       const matchesStatus = statusFilter === "all" || record.status === statusFilter;
       const searchable = [
         record.run_id,
+        record.username ?? "",
         record.source,
         record.status,
         record.result_preview,
@@ -206,6 +207,7 @@ export function DebugConsole() {
                   <span className={`debug-status ${record.status ?? "unknown"}`} />
                   <span>
                     <strong>{record.source ?? "agent"}</strong>
+                    <small>{record.username ? `@${record.username}` : "legacy / system"}</small>
                     <small>{record.run_id ?? record.id}</small>
                     <small>{record.trace_events} events · {record.agent_runs} Agent runs</small>
                     <time>{formatDate(record.timestamp)}</time>

@@ -35,6 +35,7 @@ from qwopus_agent.utils.token_budget import TokenBudgetManager, truncate_to_toke
 
 if TYPE_CHECKING:
     from qwopus_agent.analysis import AnalysisResult
+    from qwopus_agent.documents import DocumentStore
     from qwopus_agent.memory import MiniRAG
     from qwopus_agent.reports import GeneratedReport, ReportGenerator
     from qwopus_agent.services.analysis_service import UploadAnalysisOutcome
@@ -86,6 +87,8 @@ class AgentOrchestrator:
     settings: SmolagentsModelSettings
     minirag: MiniRAG | None = None
     knowledge_root: Path = DEFAULT_CONVERSATION_KNOWLEDGE_ROOT
+    global_knowledge_path: Path | None = None
+    document_store: DocumentStore | None = None
     chat_runner: ChatRunner = run_agent_chat_turn_with_debug
     analysis_runner: AnalysisRunner | None = None
     report_generator: ReportGenerator | None = None
@@ -328,6 +331,7 @@ class AgentOrchestrator:
                 response_detail=request.response_detail,
                 knowledge_scope=request.conversation_id,
                 knowledge_root=self.knowledge_root,
+                global_knowledge_path=self.global_knowledge_path,
                 document_evidence_available=bool(request.uploaded_files),
                 response_language_source=(
                     request.resolved_intent.original_request
@@ -418,9 +422,8 @@ class AgentOrchestrator:
             analysis_runner = self.analysis_runner
         from qwopus_agent.services.analysis_service import UploadedFileInput
 
-        outcome: UploadAnalysisOutcome = await asyncio.to_thread(
-            analysis_runner,
-            uploaded_files=[
+        analysis_options: dict[str, Any] = {
+            "uploaded_files": [
                 UploadedFileInput(
                     name=item.name,
                     content=item.content,
@@ -428,12 +431,18 @@ class AgentOrchestrator:
                 )
                 for item in request.uploaded_files
             ],
-            user_question=request.objective,
-            settings=self.settings,
-            minirag=self.minirag,
-            min_source_relevance=request.min_source_relevance,
-            selected_sections=request.selected_sections,
-            analysis_mode=request.analysis_mode,
+            "user_question": request.objective,
+            "settings": self.settings,
+            "minirag": self.minirag,
+            "min_source_relevance": request.min_source_relevance,
+            "selected_sections": request.selected_sections,
+            "analysis_mode": request.analysis_mode,
+        }
+        if self.document_store is not None:
+            analysis_options["document_store"] = self.document_store
+        outcome: UploadAnalysisOutcome = await asyncio.to_thread(
+            analysis_runner,
+            **analysis_options,
         )
         answer = outcome.result.llm_analysis or outcome.result.markdown_summary
         if request.objective.strip() and not outcome.result.llm_analysis:

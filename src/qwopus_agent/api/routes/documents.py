@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from uuid import uuid4
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 
+from qwopus_agent.api.auth import current_user
 from qwopus_agent.api.model_runtime import RuntimeModelController
 from qwopus_agent.api.models import (
     AnalysisView,
@@ -16,7 +18,7 @@ from qwopus_agent.api.models import (
     SavedDocumentView,
 )
 from qwopus_agent.api.repository import ConversationRepository
-from qwopus_agent.api.routes.analysis import analysis_view
+from qwopus_agent.api.routes.analysis import analysis_view, register_analysis_access
 from qwopus_agent.documents import (
     CorruptStoredDocumentError,
     DocumentStore,
@@ -45,10 +47,13 @@ def build_document_router(
     router = APIRouter()
 
     @router.get("/api/documents", response_model=list[SavedDocumentView])
-    def list_documents() -> list[SavedDocumentView]:
+    def list_documents(request: Request) -> list[SavedDocumentView]:
+        user = current_user(request)
+        allowed_ids = repository.accessible_document_ids(user.id)
         return [
             SavedDocumentView.model_validate(document, from_attributes=True)
             for document in document_store.list_documents()
+            if document.document_id in allowed_ids
         ]
 
     @router.post(
@@ -57,14 +62,20 @@ def build_document_router(
     )
     def attach_documents(
         conversation_id: str,
-        request: SavedDocumentsAttachRequest,
+        payload: SavedDocumentsAttachRequest,
+        request: Request,
     ) -> SavedDocumentsAttachView:
-        if repository.get_conversation(conversation_id) is None:
+        user = current_user(request)
+        if repository.get_conversation_for_user(conversation_id, user.id) is None:
             raise HTTPException(status_code=404, detail="Conversation not found.")
-        selected = _load_selected_documents(document_store, request.document_ids)
+        selected = _load_selected_documents(
+            document_store,
+            payload.document_ids,
+            allowed_ids=repository.accessible_document_ids(user.id),
+        )
 
         try:
-            with knowledge.lease(conversation_id) as minirag:
+            with knowledge.lease(conversation_id, global_scope=user.id) as minirag:
                 for saved in selected:
                     # 原因：Saved documents 过去只是全局清单，当前聊天并没有这些证据。
                     # 作用：用户明确勾选后，把规范化全文按稳定 document_id 写入该会话私库。
@@ -74,6 +85,11 @@ def build_document_router(
                             f"{saved.normalized_markdown}"
                         ),
                         document_id=saved.document.document_id,
+                    )
+                    repository.link_document_to_conversation(
+                        saved.document.document_id,
+                        conversation_id=conversation_id,
+                        attached_by_user_id=user.id,
                     )
         except RuntimeError as exc:
             raise HTTPException(
@@ -95,33 +111,45 @@ def build_document_router(
 
     @router.post("/api/documents/analyze", response_model=AnalysisView)
     async def analyze_documents(
-        request: SavedDocumentsAnalysisRequest,
+        payload: SavedDocumentsAnalysisRequest,
+        request: Request,
     ) -> AnalysisView:
-        if repository.get_conversation(request.conversation_id) is None:
+        user = current_user(request)
+        if repository.get_conversation_for_user(payload.conversation_id, user.id) is None:
             raise HTTPException(status_code=404, detail="Conversation not found.")
-        selected = _load_selected_documents(document_store, request.document_ids)
+        selected = _load_selected_documents(
+            document_store,
+            payload.document_ids,
+            allowed_ids=repository.accessible_document_ids(user.id),
+        )
         orchestration_request = OrchestrationRequest(
-            objective=request.question,
-            conversation_id=request.conversation_id,
+            objective=payload.question,
+            conversation_id=payload.conversation_id,
             uploaded_files=tuple(
                 OrchestrationFile(
                     name=saved.document.source,
-                    # 原因：已保存记录已经持有经过验证的规范化全文，重复解析原 PDF/DOCX
-                    # 会再次启动 MinerU，既慢又可能产生与首次持久化不同的结果。
-                    # 作用：复用 confined normalized.md；name 仍保留原始 source，
-                    # 因此文档结构、覆盖统计和引用继续显示用户看到的文件名。
-                    local_path=saved.normalized_path,
+                    # 原因：PDF/DOCX 的规范化全文可直接复用，但表格分析仍需要原工作簿。
+                    # 作用：普通文档避免重复启动 MinerU，Excel/CSV 则保留真实表结构。
+                    local_path=(
+                        saved.original_path
+                        if saved.document.file_type in {"csv", "xlsx", "xls"}
+                        else saved.normalized_path
+                    ),
                 )
                 for saved in selected
             ),
-            generate_report=request.generate_report,
-            min_source_relevance=request.min_source_relevance,
-            analysis_mode=request.analysis_mode,
-            selected_sections=request.selected_sections,
+            generate_report=payload.generate_report,
+            min_source_relevance=payload.min_source_relevance,
+            analysis_mode=payload.analysis_mode,
+            selected_sections=payload.selected_sections,
             report_title="Qwopus Saved Documents Analysis",
-            report_basename="qwopus_saved_documents_analysis",
+            report_basename=f"qwopus_saved_documents_analysis_{uuid4().hex[:12]}",
         )
-        orchestrator = AgentOrchestrator(runtime.current_settings(), minirag=None)
+        orchestrator = AgentOrchestrator(
+            runtime.current_settings(),
+            minirag=None,
+            document_store=document_store,
+        )
         result: OrchestrationResult = await asyncio.to_thread(
             orchestrator.run_sync,
             orchestration_request,
@@ -132,7 +160,15 @@ def build_document_router(
             result=result.final_answer,
             trace=result.trace,
             debug_runs=result.debug_runs,
+            user_id=user.id,
+            username=user.username,
             directory=debug_directory,
+        )
+        register_analysis_access(
+            result,
+            repository=repository,
+            conversation_id=payload.conversation_id,
+            user_id=user.id,
         )
         if not result.success:
             raise HTTPException(status_code=500, detail=result.final_answer)
@@ -144,14 +180,25 @@ def build_document_router(
 def _load_selected_documents(
     document_store: DocumentStore,
     document_ids: list[str],
+    *,
+    allowed_ids: set[str] | None = None,
 ) -> list[StoredDocumentContent]:
     """Preflight every selected record before attachment or model execution."""
     selected: list[StoredDocumentContent] = []
     for document_id in document_ids:
         try:
-            selected.append(document_store.load_document(document_id))
+            document_store.validate_document_id(document_id)
         except InvalidDocumentIdError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
+        if allowed_ids is not None and document_id not in allowed_ids:
+            # 原因：物理文件可能存在，但确认它会向另一个账号泄漏 document_id。
+            # 作用：无权访问与不存在使用同一 404 语义，并在读磁盘前拒绝。
+            raise HTTPException(
+                status_code=404,
+                detail=f"Saved document not found: {document_id}",
+            )
+        try:
+            selected.append(document_store.load_document(document_id))
         except StoredDocumentNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except CorruptStoredDocumentError as exc:

@@ -10,6 +10,75 @@ from qwopus_agent.documents.local_folder import MAX_LOCAL_FOLDER_SELECTION
 from qwopus_agent.services.orchestration_models import InterpretationMode
 
 
+class UserView(BaseModel):
+    """Safe account data returned without password or session material."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    username: str
+    display_name: str
+    role: Literal["admin", "member"]
+    active: bool
+    created_at: str
+
+
+class AuthStatusView(BaseModel):
+    """Current browser authentication state used before loading private data."""
+
+    bootstrap_required: bool
+    user: UserView | None = None
+
+
+class LoginRequest(BaseModel):
+    """Username and password submitted only to the login endpoint."""
+
+    username: str = Field(min_length=1, max_length=64)
+    password: str = Field(min_length=1, max_length=256)
+
+
+class InitialAdminCreate(LoginRequest):
+    """One-time local initialization of the first administrator."""
+
+    display_name: str = Field(min_length=1, max_length=80)
+
+
+class UserCreate(InitialAdminCreate):
+    """Administrator request for another isolated account."""
+
+    role: Literal["admin", "member"] = "member"
+
+
+class UserActiveUpdate(BaseModel):
+    """Administrator activation state change."""
+
+    active: bool
+
+
+class PasswordChange(BaseModel):
+    """Authenticated password rotation request."""
+
+    current_password: str = Field(min_length=1, max_length=256)
+    new_password: str = Field(min_length=8, max_length=256)
+
+
+class ConversationShareCreate(BaseModel):
+    """Exact account username selected by the conversation owner."""
+
+    username: str = Field(min_length=1, max_length=64)
+
+
+class ConversationMemberView(BaseModel):
+    """Owner or shared member shown in the access dialog."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    user_id: str
+    username: str
+    display_name: str
+    access: Literal["owner", "member"]
+
+
 class ConversationCreate(BaseModel):
     """Request for a blank conversation."""
 
@@ -31,6 +100,10 @@ class ConversationView(BaseModel):
     title: str
     created_at: str
     updated_at: str
+    owner_user_id: str | None = None
+    owner_username: str | None = None
+    is_owner: bool = False
+    shared_count: int = 0
 
 
 class MessageView(BaseModel):
@@ -403,6 +476,8 @@ class DebugRecordSummaryView(BaseModel):
     source: str = "unknown"
     status: str = "unknown"
     run_id: str
+    user_id: str | None = None
+    username: str | None = None
     result_preview: str = ""
     trace_events: int = 0
     agent_runs: int = 0

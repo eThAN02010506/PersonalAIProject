@@ -46,6 +46,13 @@ deduplicating source evidence. Document updates, deletion, and rebuilds are owne
 `KnowledgeMaintenanceService`, so the Agent-facing MiniRAG contract remains limited to `insert` and
 `search`.
 
+`ConversationKnowledgeManager` supplies two authorization-aware persistence
+scopes. Each chat writes to `storage/minirag/conversations/<conversation_id>`,
+while its owner's optional cross-chat aggregate is stored at
+`storage/minirag/users/<user_id>`. The API resolves both paths from the
+authenticated account and conversation ACL; callers cannot submit an arbitrary
+knowledge directory.
+
 ### Analysis Safety
 
 LLM-generated pandas is parsed through an allowlisted AST in both the parent and worker process. The
@@ -56,11 +63,15 @@ user Python.
 
 ### Web Boundary
 
-Loopback requests remain frictionless for local development. Every direct non-loopback HTTP request
-fails closed unless `QWOPUS_LAN_PASSWORD` is configured, then requires one shared HTTP Basic
-credential across React, API, OpenAPI, and Debug surfaces. Debug routes also require the independent
-`QWOPUS_DEBUG_ALLOW_LAN` gate. This is private-LAN protection, not per-user authorization or tenant
-isolation; HTTPS is still required when transport confidentiality matters.
+Every direct non-loopback HTTP request fails closed unless `QWOPUS_LAN_PASSWORD` is configured,
+then requires one shared HTTP Basic credential before React or API access. Application accounts form
+the second boundary: Argon2id password hashes, opaque server-side sessions, deny-by-default private
+API middleware, and per-conversation/document/report ACL checks isolate users.
+
+The Debug Console is deliberately different from normal account access. It is restricted to
+loopback clients with an administrator session and can read diagnostic records for every account,
+including prompts, document excerpts, model outputs, and the recorded actor. No LAN override exists.
+HTTPS is still required when transport confidentiality matters for the main LAN application.
 
 ### Skills
 
@@ -98,8 +109,11 @@ requiring another LLM call.
 
 - Browser automation has a tested Skill and provider contract, but no production browser provider
   is wired into the application.
-- The FastAPI and React application supports one shared LAN credential. Per-user authorization and
-  multi-user tenancy are outside the current runtime.
+- Accounts are local to one Qwopus-Agent installation. Sharing grants editor access to one complete
+  chat and its attached documents/reports; field-level permissions and external identity providers
+  are outside the current runtime.
+- Authorization isolates data through the application and SQLite ACLs. Runtime files are not
+  encrypted per account on disk, so operating-system access to the host remains trusted.
 - The MiniRAG adapter uses upstream persistent vector storage inside Qwopus-owned chunking,
   conversation scoping, graph extraction, and evidence rendering. It does not expose the complete
   upstream `MiniRAG.query` pipeline.

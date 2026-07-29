@@ -25,6 +25,8 @@ def append_debug_record(
     debug_runs: Any,
     result: str = "",
     run_id: str | None = None,
+    user_id: str | None = None,
+    username: str | None = None,
     directory: Path = DEFAULT_DEBUG_DIRECTORY,
 ) -> Path | None:
     """Persist one internal run without exposing it through the public HTTP response."""
@@ -36,6 +38,8 @@ def append_debug_record(
         "source": source,
         "status": status,
         "run_id": run_id or record_id,
+        "user_id": user_id,
+        "username": username,
         "result": result,
         "trace": _json_value(trace),
         "debug_runs": _json_value(debug_runs),

@@ -12,7 +12,8 @@ from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
-from qwopus_agent.api.debug_access import debug_lan_enabled, require_debug_client
+from qwopus_agent.api.auth import require_admin
+from qwopus_agent.api.debug_access import require_debug_client
 from qwopus_agent.api.model_runtime import RuntimeModelController
 from qwopus_agent.api.models import (
     DebugOverviewView,
@@ -31,19 +32,17 @@ def build_debug_router(
     runtime_log_path: Path,
     *,
     started_at: float,
-    allow_lan: bool | None = None,
 ) -> APIRouter:
     """Build read-only diagnostics routes for approved clients."""
     router = APIRouter()
-    lan_enabled = debug_lan_enabled(allow_lan)
-
     @router.get("/api/debug", response_model=DebugOverviewView)
     async def debug_overview(
         request: Request,
         limit: int = Query(default=50, ge=1, le=200),
         log_lines: int = Query(default=500, ge=0, le=2_000),
     ) -> DebugOverviewView:
-        require_debug_client(request, allow_lan=lan_enabled)
+        require_admin(request)
+        require_debug_client(request)
         records = await asyncio.to_thread(
             load_debug_records,
             limit=limit,
@@ -87,7 +86,8 @@ def build_debug_router(
 
     @router.get("/api/debug/records/{record_id}", response_model=dict[str, object])
     async def debug_record(request: Request, record_id: str) -> dict[str, object]:
-        require_debug_client(request, allow_lan=lan_enabled)
+        require_admin(request)
+        require_debug_client(request)
         record = await asyncio.to_thread(
             load_debug_record,
             record_id,
@@ -119,6 +119,8 @@ def _record_summary(record: dict[str, object]) -> DebugRecordSummaryView:
         source=str(record.get("source") or "unknown"),
         status=str(record.get("status") or "unknown"),
         run_id=str(record.get("run_id") or record.get("id") or "unknown"),
+        user_id=str(record["user_id"]) if record.get("user_id") else None,
+        username=str(record["username"]) if record.get("username") else None,
         result_preview=result[:240],
         trace_events=len(trace) if isinstance(trace, list) else 0,
         agent_runs=len(debug_runs) if isinstance(debug_runs, list) else 0,

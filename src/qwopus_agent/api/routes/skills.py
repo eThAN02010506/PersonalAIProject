@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 
+from qwopus_agent.api.auth import require_admin
 from qwopus_agent.api.models import SkillStepView, SkillVersionView
 from qwopus_agent.services.skill_growth_service import SkillGrowthService
 from qwopus_agent.skills import SkillManifest
@@ -23,21 +24,24 @@ def build_skill_router(growth: SkillGrowthService) -> APIRouter:
         "/api/skills/{name}/{version}/promote",
         response_model=SkillVersionView,
     )
-    def promote_skill(name: str, version: str) -> SkillVersionView:
+    def promote_skill(name: str, version: str, request: Request) -> SkillVersionView:
+        require_admin(request)
         return _run_action(growth, growth.promote, name, version)
 
     @router.post(
         "/api/skills/{name}/{version}/reject",
         response_model=SkillVersionView,
     )
-    def reject_skill(name: str, version: str) -> SkillVersionView:
+    def reject_skill(name: str, version: str, request: Request) -> SkillVersionView:
+        require_admin(request)
         return _run_action(growth, growth.reject, name, version)
 
     @router.post(
         "/api/skills/{name}/{version}/rollback",
         response_model=SkillVersionView,
     )
-    def rollback_skill(name: str, version: str) -> SkillVersionView:
+    def rollback_skill(name: str, version: str, request: Request) -> SkillVersionView:
+        require_admin(request)
         return _run_action(growth, growth.rollback, name, version)
 
     return router

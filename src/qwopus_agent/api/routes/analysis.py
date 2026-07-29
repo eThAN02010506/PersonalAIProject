@@ -6,9 +6,11 @@ import asyncio
 import json
 from pathlib import Path
 from typing import Annotated, Literal
+from uuid import uuid4
 
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 
+from qwopus_agent.api.auth import current_user
 from qwopus_agent.api.model_runtime import RuntimeModelController
 from qwopus_agent.api.models import (
     AnalysisView,
@@ -20,6 +22,7 @@ from qwopus_agent.api.models import (
     SpreadsheetWorkbookView,
 )
 from qwopus_agent.api.repository import ConversationRepository
+from qwopus_agent.documents import DocumentStore
 from qwopus_agent.documents.parser import SUPPORTED_DOCUMENT_EXTENSIONS
 from qwopus_agent.memory import ConversationKnowledgeManager
 from qwopus_agent.services.agent_orchestrator import AgentOrchestrator
@@ -42,12 +45,14 @@ def build_analysis_router(
     repository: ConversationRepository,
     knowledge: ConversationKnowledgeManager,
     debug_directory: Path,
+    document_store: DocumentStore,
 ) -> APIRouter:
     """Build the upload boundary around the unified Agent orchestrator."""
     router = APIRouter()
 
     @router.post("/api/analysis", response_model=AnalysisView)
     async def analyze(
+        request: Request,
         files: Annotated[list[UploadFile], File()],
         conversation_id: Annotated[str, Form(min_length=1)],
         question: Annotated[str, Form()] = "",
@@ -59,7 +64,8 @@ def build_analysis_router(
         ] = "question",
         selected_sections: Annotated[str, Form()] = "{}",
     ) -> AnalysisView:
-        if repository.get_conversation(conversation_id) is None:
+        user = current_user(request)
+        if repository.get_conversation_for_user(conversation_id, user.id) is None:
             raise HTTPException(status_code=404, detail="Conversation not found.")
         try:
             scoped_sections = _parse_selected_sections(selected_sections)
@@ -68,7 +74,7 @@ def build_analysis_router(
 
         uploads = await _read_uploads(files)
 
-        request = OrchestrationRequest(
+        orchestration_request = OrchestrationRequest(
             objective=question,
             conversation_id=conversation_id,
             uploaded_files=uploads,
@@ -77,18 +83,19 @@ def build_analysis_router(
             analysis_mode=analysis_mode,
             selected_sections=scoped_sections,
             report_title="Qwopus Analysis Report",
-            report_basename="qwopus_web_analysis",
+            report_basename=f"qwopus_web_analysis_{uuid4().hex[:12]}",
         )
 
         def run_analysis() -> OrchestrationResult:
             # 原因：同一聊天的两个并发上传会同时改写 documents、向量和图谱派生文件。
             # 作用：只串行化当前 conversation_id；其他聊天仍可独立并行分析。
-            with knowledge.lease(conversation_id) as minirag:
+            with knowledge.lease(conversation_id, global_scope=user.id) as minirag:
                 orchestrator = AgentOrchestrator(
                     runtime.current_settings(),
                     minirag=minirag,
+                    document_store=document_store,
                 )
-                return orchestrator.run_sync(request)
+                return orchestrator.run_sync(orchestration_request)
 
         result = await asyncio.to_thread(run_analysis)
         # 原因：文档分析不经过 ChatRunRegistry 的完成回调。
@@ -99,13 +106,51 @@ def build_analysis_router(
             result=result.final_answer,
             trace=result.trace,
             debug_runs=result.debug_runs,
+            user_id=user.id,
+            username=user.username,
             directory=debug_directory,
+        )
+        register_analysis_access(
+            result,
+            repository=repository,
+            conversation_id=conversation_id,
+            user_id=user.id,
         )
         if not result.success:
             raise HTTPException(status_code=500, detail=result.final_answer)
         return analysis_view(result)
 
     return router
+
+
+def register_analysis_access(
+    result: OrchestrationResult,
+    *,
+    repository: ConversationRepository,
+    conversation_id: str,
+    user_id: str,
+) -> None:
+    """Bind newly persisted files and generated reports to one authenticated request."""
+    metadata = result.analysis_result.metadata if result.analysis_result is not None else {}
+    saved_documents = metadata.get("saved_documents")
+    if isinstance(saved_documents, list):
+        for item in saved_documents:
+            if not isinstance(item, dict):
+                continue
+            document_id = item.get("document_id")
+            if isinstance(document_id, str) and document_id:
+                repository.register_document(
+                    document_id,
+                    owner_user_id=user_id,
+                    conversation_id=conversation_id,
+                )
+    if result.report is not None:
+        for artifact in result.report.artifacts:
+            repository.register_report(
+                artifact.path.name,
+                created_by_user_id=user_id,
+                conversation_id=conversation_id,
+            )
 
 
 async def _read_uploads(files: list[UploadFile]) -> tuple[OrchestrationFile, ...]:

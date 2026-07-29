@@ -7,6 +7,7 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Literal
 from uuid import uuid4
 
 from qwopus_agent.services.orchestration_models import ConversationTaskState
@@ -24,6 +25,32 @@ class ConversationRecord:
     title: str
     created_at: str
     updated_at: str
+    owner_user_id: str | None = None
+    owner_username: str | None = None
+    is_owner: bool = False
+    shared_count: int = 0
+
+
+@dataclass(frozen=True)
+class UserRecord:
+    """Safe account fields; password hashes never leave the repository boundary."""
+
+    id: str
+    username: str
+    display_name: str
+    role: Literal["admin", "member"]
+    active: bool
+    created_at: str
+
+
+@dataclass(frozen=True)
+class ConversationMemberRecord:
+    """One account with explicit access to a conversation."""
+
+    user_id: str
+    username: str
+    display_name: str
+    access: Literal["owner", "member"]
 
 
 @dataclass(frozen=True)
@@ -68,11 +95,21 @@ class ConversationRepository:
         with self._connect() as connection:
             connection.executescript(
                 """
+                CREATE TABLE IF NOT EXISTS users (
+                    id TEXT PRIMARY KEY,
+                    username TEXT NOT NULL COLLATE NOCASE UNIQUE,
+                    display_name TEXT NOT NULL,
+                    password_hash TEXT NOT NULL,
+                    role TEXT NOT NULL CHECK(role IN ('admin', 'member')),
+                    active INTEGER NOT NULL DEFAULT 1 CHECK(active IN (0, 1)),
+                    created_at TEXT NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS conversations (
                     id TEXT PRIMARY KEY,
                     title TEXT NOT NULL,
                     created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
+                    updated_at TEXT NOT NULL,
+                    owner_user_id TEXT REFERENCES users(id) ON DELETE RESTRICT
                 );
                 CREATE TABLE IF NOT EXISTS messages (
                     id TEXT PRIMARY KEY,
@@ -93,11 +130,63 @@ class ConversationRepository:
                     task_state TEXT NOT NULL DEFAULT '{}',
                     updated_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS sessions (
+                    token_hash TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    created_at TEXT NOT NULL,
+                    expires_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_sessions_user
+                    ON sessions(user_id);
+                CREATE TABLE IF NOT EXISTS conversation_members (
+                    conversation_id TEXT NOT NULL
+                        REFERENCES conversations(id) ON DELETE CASCADE,
+                    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY(conversation_id, user_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_conversation_members_user
+                    ON conversation_members(user_id, conversation_id);
+                CREATE TABLE IF NOT EXISTS document_owners (
+                    document_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY(document_id, user_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_document_owners_user
+                    ON document_owners(user_id, document_id);
+                CREATE TABLE IF NOT EXISTS conversation_documents (
+                    conversation_id TEXT NOT NULL
+                        REFERENCES conversations(id) ON DELETE CASCADE,
+                    document_id TEXT NOT NULL,
+                    attached_by_user_id TEXT NOT NULL
+                        REFERENCES users(id) ON DELETE RESTRICT,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY(conversation_id, document_id)
+                );
+                CREATE TABLE IF NOT EXISTS report_access (
+                    filename TEXT PRIMARY KEY,
+                    conversation_id TEXT REFERENCES conversations(id) ON DELETE CASCADE,
+                    created_by_user_id TEXT NOT NULL
+                        REFERENCES users(id) ON DELETE CASCADE,
+                    created_at TEXT NOT NULL
+                );
                 """
             )
             # 原因：已有用户数据库早于结构化任务状态，CREATE TABLE IF NOT EXISTS 不会补列。
             # 作用：只追加带默认值的兼容字段，不删除或重写任何历史会话和消息。
             _ensure_task_state_column(connection)
+            # 原因：旧版 conversations 表没有账号所有者，重建表会冒险改写完整聊天历史。
+            # 作用：使用 SQLite 支持的增量列迁移；首次管理员创建时再原子认领空所有者数据。
+            _ensure_conversation_owner_column(connection)
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_conversations_owner "
+                "ON conversations(owner_user_id, updated_at)"
+            )
+            connection.execute(
+                "DELETE FROM sessions WHERE expires_at <= ?",
+                (_now(),),
+            )
             count = connection.execute("SELECT COUNT(*) FROM conversations").fetchone()[0]
         # 原因：正式前端首次启动要继承 Streamlit 历史，但隔离测试不能读取用户真实日志。
         # 作用：生产环境默认迁移一次，测试或全新部署可显式关闭旧日志导入。
@@ -107,19 +196,51 @@ class ConversationRepository:
     def list_conversations(self) -> list[ConversationRecord]:
         with self._connect() as connection:
             rows = connection.execute(
-                "SELECT id, title, created_at, updated_at "
+                _conversation_select()
+                + " "
                 "FROM conversations ORDER BY updated_at DESC"
             ).fetchall()
-        return [ConversationRecord(**dict(row)) for row in rows]
+        return [_conversation_record(row) for row in rows]
 
-    def create_conversation(self, title: str = "New chat") -> ConversationRecord:
+    def list_conversations_for_user(self, user_id: str) -> list[ConversationRecord]:
+        """List only conversations owned by or explicitly shared with one account."""
+        with self._connect() as connection:
+            rows = connection.execute(
+                _conversation_select(viewer=True)
+                + " FROM conversations c "
+                "LEFT JOIN users owner ON owner.id = c.owner_user_id "
+                "WHERE c.owner_user_id = ? OR EXISTS ("
+                "SELECT 1 FROM conversation_members member "
+                "WHERE member.conversation_id = c.id AND member.user_id = ?"
+                ") ORDER BY c.updated_at DESC",
+                (user_id, user_id, user_id),
+            ).fetchall()
+        return [_conversation_record(row) for row in rows]
+
+    def create_conversation(
+        self,
+        title: str = "New chat",
+        *,
+        owner_user_id: str | None = None,
+    ) -> ConversationRecord:
         now = _now()
-        record = ConversationRecord(uuid4().hex, title.strip() or "New chat", now, now)
+        conversation_id = uuid4().hex
         with self._connect() as connection:
             connection.execute(
-                "INSERT INTO conversations(id, title, created_at, updated_at) VALUES (?, ?, ?, ?)",
-                (record.id, record.title, record.created_at, record.updated_at),
+                "INSERT INTO conversations("
+                "id, title, created_at, updated_at, owner_user_id"
+                ") VALUES (?, ?, ?, ?, ?)",
+                (
+                    conversation_id,
+                    title.strip() or "New chat",
+                    now,
+                    now,
+                    owner_user_id,
+                ),
             )
+        record = self.get_conversation(conversation_id)
+        if record is None:
+            raise RuntimeError("Created conversation could not be read.")
         return record
 
     def rename_conversation(self, conversation_id: str, title: str) -> ConversationRecord | None:
@@ -142,10 +263,400 @@ class ConversationRepository:
     def get_conversation(self, conversation_id: str) -> ConversationRecord | None:
         with self._connect() as connection:
             row = connection.execute(
-                "SELECT id, title, created_at, updated_at FROM conversations WHERE id = ?",
+                _conversation_select()
+                + " FROM conversations WHERE id = ?",
                 (conversation_id,),
             ).fetchone()
-        return ConversationRecord(**dict(row)) if row else None
+        return _conversation_record(row) if row else None
+
+    def get_conversation_for_user(
+        self,
+        conversation_id: str,
+        user_id: str,
+    ) -> ConversationRecord | None:
+        """Return a conversation only when the account has a relationship to it."""
+        with self._connect() as connection:
+            row = connection.execute(
+                _conversation_select(viewer=True)
+                + " FROM conversations c "
+                "LEFT JOIN users owner ON owner.id = c.owner_user_id "
+                "WHERE c.id = ? AND (c.owner_user_id = ? OR EXISTS ("
+                "SELECT 1 FROM conversation_members member "
+                "WHERE member.conversation_id = c.id AND member.user_id = ?"
+                "))",
+                (user_id, conversation_id, user_id, user_id),
+            ).fetchone()
+        return _conversation_record(row) if row else None
+
+    def is_conversation_owner(self, conversation_id: str, user_id: str) -> bool:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT 1 FROM conversations WHERE id = ? AND owner_user_id = ?",
+                (conversation_id, user_id),
+            ).fetchone()
+        return row is not None
+
+    def list_conversation_members(
+        self,
+        conversation_id: str,
+    ) -> list[ConversationMemberRecord]:
+        """Return the owner followed by explicitly shared active members."""
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT owner.id AS user_id, owner.username, owner.display_name,
+                       'owner' AS access, 0 AS ordering
+                FROM conversations c
+                JOIN users owner ON owner.id = c.owner_user_id
+                WHERE c.id = ?
+                UNION ALL
+                SELECT member_user.id AS user_id, member_user.username,
+                       member_user.display_name, 'member' AS access, 1 AS ordering
+                FROM conversation_members member
+                JOIN users member_user ON member_user.id = member.user_id
+                WHERE member.conversation_id = ? AND member_user.active = 1
+                ORDER BY ordering, username COLLATE NOCASE
+                """,
+                (conversation_id, conversation_id),
+            ).fetchall()
+        return [
+            ConversationMemberRecord(
+                user_id=str(row["user_id"]),
+                username=str(row["username"]),
+                display_name=str(row["display_name"]),
+                access=row["access"],
+            )
+            for row in rows
+        ]
+
+    def add_conversation_member(
+        self,
+        conversation_id: str,
+        username: str,
+    ) -> ConversationMemberRecord | None:
+        """Share a conversation with one existing active account."""
+        now = _now()
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT id, username, display_name FROM users "
+                "WHERE username = ? COLLATE NOCASE AND active = 1",
+                (username,),
+            ).fetchone()
+            if row is None:
+                return None
+            owner = connection.execute(
+                "SELECT owner_user_id FROM conversations WHERE id = ?",
+                (conversation_id,),
+            ).fetchone()
+            if owner is None or owner["owner_user_id"] == row["id"]:
+                return None
+            connection.execute(
+                "INSERT OR IGNORE INTO conversation_members("
+                "conversation_id, user_id, created_at"
+                ") VALUES (?, ?, ?)",
+                (conversation_id, row["id"], now),
+            )
+        return ConversationMemberRecord(
+            user_id=str(row["id"]),
+            username=str(row["username"]),
+            display_name=str(row["display_name"]),
+            access="member",
+        )
+
+    def remove_conversation_member(
+        self,
+        conversation_id: str,
+        user_id: str,
+    ) -> bool:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "DELETE FROM conversation_members "
+                "WHERE conversation_id = ? AND user_id = ?",
+                (conversation_id, user_id),
+            )
+        return bool(cursor.rowcount)
+
+    def is_conversation_member(self, conversation_id: str, user_id: str) -> bool:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT 1 FROM conversation_members "
+                "WHERE conversation_id = ? AND user_id = ?",
+                (conversation_id, user_id),
+            ).fetchone()
+        return row is not None
+
+    def has_users(self) -> bool:
+        with self._connect() as connection:
+            return bool(connection.execute("SELECT 1 FROM users LIMIT 1").fetchone())
+
+    def create_initial_admin(
+        self,
+        *,
+        username: str,
+        display_name: str,
+        password_hash: str,
+    ) -> UserRecord | None:
+        """Create exactly one first administrator and claim legacy conversations."""
+        now = _now()
+        user_id = uuid4().hex
+        with self._connect() as connection:
+            # 原因：两个首次打开的浏览器可能同时提交初始化表单。
+            # 作用：IMMEDIATE 事务让“没有用户”检查和管理员插入成为一个不可分割操作。
+            connection.execute("BEGIN IMMEDIATE")
+            if connection.execute("SELECT 1 FROM users LIMIT 1").fetchone():
+                connection.rollback()
+                return None
+            connection.execute(
+                "INSERT INTO users("
+                "id, username, display_name, password_hash, role, active, created_at"
+                ") VALUES (?, ?, ?, ?, 'admin', 1, ?)",
+                (user_id, username, display_name, password_hash, now),
+            )
+            connection.execute(
+                "UPDATE conversations SET owner_user_id = ? WHERE owner_user_id IS NULL",
+                (user_id,),
+            )
+            connection.commit()
+        return self.get_user(user_id)
+
+    def create_user(
+        self,
+        *,
+        username: str,
+        display_name: str,
+        password_hash: str,
+        role: Literal["admin", "member"] = "member",
+    ) -> UserRecord:
+        now = _now()
+        user_id = uuid4().hex
+        with self._connect() as connection:
+            connection.execute(
+                "INSERT INTO users("
+                "id, username, display_name, password_hash, role, active, created_at"
+                ") VALUES (?, ?, ?, ?, ?, 1, ?)",
+                (user_id, username, display_name, password_hash, role, now),
+            )
+        user = self.get_user(user_id)
+        if user is None:
+            raise RuntimeError("Created user could not be read.")
+        return user
+
+    def list_users(self) -> list[UserRecord]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT id, username, display_name, role, active, created_at "
+                "FROM users ORDER BY created_at, username COLLATE NOCASE"
+            ).fetchall()
+        return [_user_record(row) for row in rows]
+
+    def get_user(self, user_id: str) -> UserRecord | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT id, username, display_name, role, active, created_at "
+                "FROM users WHERE id = ?",
+                (user_id,),
+            ).fetchone()
+        return _user_record(row) if row else None
+
+    def get_user_with_password(self, username: str) -> tuple[UserRecord, str] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT id, username, display_name, role, active, created_at, password_hash "
+                "FROM users WHERE username = ? COLLATE NOCASE",
+                (username,),
+            ).fetchone()
+        if row is None:
+            return None
+        return _user_record(row), str(row["password_hash"])
+
+    def set_user_active(self, user_id: str, active: bool) -> UserRecord | None:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "UPDATE users SET active = ? WHERE id = ?",
+                (int(active), user_id),
+            )
+            if cursor.rowcount and not active:
+                connection.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
+        return self.get_user(user_id) if cursor.rowcount else None
+
+    def set_user_password(self, user_id: str, password_hash: str) -> bool:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "UPDATE users SET password_hash = ? WHERE id = ? AND active = 1",
+                (password_hash, user_id),
+            )
+            if cursor.rowcount:
+                # 原因：密码变更后旧浏览器会话继续有效会削弱账号恢复能力。
+                # 作用：撤销所有旧令牌；调用方随后为当前浏览器签发一个新会话。
+                connection.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
+        return bool(cursor.rowcount)
+
+    def active_admin_count(self) -> int:
+        with self._connect() as connection:
+            return int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM users WHERE role = 'admin' AND active = 1"
+                ).fetchone()[0]
+            )
+
+    def create_session(
+        self,
+        *,
+        token_hash: str,
+        user_id: str,
+        expires_at: str,
+    ) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                "INSERT INTO sessions(token_hash, user_id, created_at, expires_at) "
+                "VALUES (?, ?, ?, ?)",
+                (token_hash, user_id, _now(), expires_at),
+            )
+
+    def user_for_session(self, token_hash: str) -> UserRecord | None:
+        now = _now()
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT user.id, user.username, user.display_name, user.role, "
+                "user.active, user.created_at "
+                "FROM sessions session "
+                "JOIN users user ON user.id = session.user_id "
+                "WHERE session.token_hash = ? AND session.expires_at > ? "
+                "AND user.active = 1",
+                (token_hash, now),
+            ).fetchone()
+        return _user_record(row) if row else None
+
+    def delete_session(self, token_hash: str) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                "DELETE FROM sessions WHERE token_hash = ?",
+                (token_hash,),
+            )
+
+    def register_document(
+        self,
+        document_id: str,
+        *,
+        owner_user_id: str,
+        conversation_id: str | None = None,
+    ) -> None:
+        """Record who uploaded a saved document and which chat can use it."""
+        now = _now()
+        with self._connect() as connection:
+            connection.execute(
+                "INSERT OR IGNORE INTO document_owners("
+                "document_id, user_id, created_at"
+                ") VALUES (?, ?, ?)",
+                (document_id, owner_user_id, now),
+            )
+            if conversation_id is not None:
+                connection.execute(
+                    "INSERT OR IGNORE INTO conversation_documents("
+                    "conversation_id, document_id, attached_by_user_id, created_at"
+                    ") VALUES (?, ?, ?, ?)",
+                    (conversation_id, document_id, owner_user_id, now),
+                )
+
+    def link_document_to_conversation(
+        self,
+        document_id: str,
+        *,
+        conversation_id: str,
+        attached_by_user_id: str,
+    ) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                "INSERT OR IGNORE INTO conversation_documents("
+                "conversation_id, document_id, attached_by_user_id, created_at"
+                ") VALUES (?, ?, ?, ?)",
+                (conversation_id, document_id, attached_by_user_id, _now()),
+            )
+
+    def accessible_document_ids(self, user_id: str) -> set[str]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT document_id FROM document_owners WHERE user_id = ?
+                UNION
+                SELECT attached.document_id
+                FROM conversation_documents attached
+                JOIN conversations conversation
+                    ON conversation.id = attached.conversation_id
+                WHERE conversation.owner_user_id = ?
+                   OR EXISTS (
+                       SELECT 1 FROM conversation_members member
+                       WHERE member.conversation_id = conversation.id
+                         AND member.user_id = ?
+                   )
+                """,
+                (user_id, user_id, user_id),
+            ).fetchall()
+        return {str(row["document_id"]) for row in rows}
+
+    def can_access_document(self, document_id: str, user_id: str) -> bool:
+        return document_id in self.accessible_document_ids(user_id)
+
+    def register_report(
+        self,
+        filename: str,
+        *,
+        created_by_user_id: str,
+        conversation_id: str | None,
+    ) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                "INSERT OR REPLACE INTO report_access("
+                "filename, conversation_id, created_by_user_id, created_at"
+                ") VALUES (?, ?, ?, ?)",
+                (filename, conversation_id, created_by_user_id, _now()),
+            )
+
+    def can_access_report(self, filename: str, user_id: str) -> bool:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT 1
+                FROM report_access report
+                LEFT JOIN conversations conversation
+                    ON conversation.id = report.conversation_id
+                WHERE report.filename = ?
+                  AND (
+                      report.created_by_user_id = ?
+                      OR conversation.owner_user_id = ?
+                      OR EXISTS (
+                          SELECT 1 FROM conversation_members member
+                          WHERE member.conversation_id = report.conversation_id
+                            AND member.user_id = ?
+                      )
+                  )
+                """,
+                (filename, user_id, user_id, user_id),
+            ).fetchone()
+        return row is not None
+
+    def claim_legacy_files(
+        self,
+        user_id: str,
+        *,
+        document_ids: list[str],
+        report_filenames: list[str],
+    ) -> None:
+        """Assign pre-account local artifacts to the first administrator."""
+        now = _now()
+        with self._connect() as connection:
+            connection.executemany(
+                "INSERT OR IGNORE INTO document_owners("
+                "document_id, user_id, created_at"
+                ") VALUES (?, ?, ?)",
+                [(document_id, user_id, now) for document_id in document_ids],
+            )
+            connection.executemany(
+                "INSERT OR IGNORE INTO report_access("
+                "filename, conversation_id, created_by_user_id, created_at"
+                ") VALUES (?, NULL, ?, ?)",
+                [(filename, user_id, now) for filename in report_filenames],
+            )
 
     def list_messages(self, conversation_id: str) -> list[MessageRecord]:
         with self._connect() as connection:
@@ -342,6 +853,71 @@ def _ensure_task_state_column(connection: sqlite3.Connection) -> None:
             "ALTER TABLE conversation_memory "
             "ADD COLUMN task_state TEXT NOT NULL DEFAULT '{}'"
         )
+
+
+def _ensure_conversation_owner_column(connection: sqlite3.Connection) -> None:
+    columns = {
+        str(row["name"])
+        for row in connection.execute("PRAGMA table_info(conversations)").fetchall()
+    }
+    if "owner_user_id" not in columns:
+        connection.execute(
+            "ALTER TABLE conversations ADD COLUMN owner_user_id TEXT "
+            "REFERENCES users(id) ON DELETE RESTRICT"
+        )
+
+
+def _conversation_select(*, viewer: bool = False) -> str:
+    """Return one consistent projection for raw and access-scoped conversation reads."""
+    if viewer:
+        return (
+            "SELECT c.id, c.title, c.created_at, c.updated_at, c.owner_user_id, "
+            "owner.username AS owner_username, "
+            "CASE WHEN c.owner_user_id = ? THEN 1 ELSE 0 END AS is_owner, "
+            "(SELECT COUNT(*) FROM conversation_members sharing "
+            "WHERE sharing.conversation_id = c.id) AS shared_count"
+        )
+    return (
+        "SELECT conversations.id, conversations.title, conversations.created_at, "
+        "conversations.updated_at, conversations.owner_user_id, "
+        "(SELECT username FROM users "
+        "WHERE users.id = conversations.owner_user_id) AS owner_username, "
+        "0 AS is_owner, "
+        "(SELECT COUNT(*) FROM conversation_members sharing "
+        "WHERE sharing.conversation_id = conversations.id) AS shared_count"
+    )
+
+
+def _conversation_record(row: sqlite3.Row) -> ConversationRecord:
+    return ConversationRecord(
+        id=str(row["id"]),
+        title=str(row["title"]),
+        created_at=str(row["created_at"]),
+        updated_at=str(row["updated_at"]),
+        owner_user_id=(
+            str(row["owner_user_id"])
+            if row["owner_user_id"] is not None
+            else None
+        ),
+        owner_username=(
+            str(row["owner_username"])
+            if row["owner_username"] is not None
+            else None
+        ),
+        is_owner=bool(row["is_owner"]),
+        shared_count=int(row["shared_count"]),
+    )
+
+
+def _user_record(row: sqlite3.Row) -> UserRecord:
+    return UserRecord(
+        id=str(row["id"]),
+        username=str(row["username"]),
+        display_name=str(row["display_name"]),
+        role=row["role"],
+        active=bool(row["active"]),
+        created_at=str(row["created_at"]),
+    )
 
 
 def _message_index(messages: list[MessageRecord], message_id: str | None) -> int:

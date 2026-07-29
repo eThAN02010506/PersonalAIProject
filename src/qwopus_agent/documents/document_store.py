@@ -64,6 +64,10 @@ class DocumentStore:
 
     root: Path = DEFAULT_DOCUMENT_STORE
 
+    def validate_document_id(self, document_id: str) -> None:
+        """Validate identifier syntax without reading or confirming a stored record."""
+        self._document_directory(document_id)
+
     def persist(
         self,
         *,

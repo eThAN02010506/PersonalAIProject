@@ -6,7 +6,8 @@ import asyncio
 
 from fastapi import APIRouter, HTTPException, Request
 
-from qwopus_agent.api.debug_access import debug_lan_enabled, require_debug_client
+from qwopus_agent.api.auth import require_admin
+from qwopus_agent.api.debug_access import require_debug_client
 from qwopus_agent.api.models import (
     SkillAuthoringRequest,
     SkillCandidateCheckView,
@@ -25,19 +26,16 @@ from qwopus_agent.services.skill_authoring_service import (
 
 def build_skill_authoring_router(
     authoring: SkillAuthoringService,
-    *,
-    allow_lan: bool | None = None,
 ) -> APIRouter:
     """Build candidate-only authoring routes behind the Debug network boundary."""
     router = APIRouter()
-    lan_enabled = debug_lan_enabled(allow_lan)
-
     @router.get(
         "/api/debug/skills/capabilities",
         response_model=list[SkillCapabilityView],
     )
     async def skill_capabilities(request: Request) -> list[SkillCapabilityView]:
-        require_debug_client(request, allow_lan=lan_enabled)
+        require_admin(request)
+        require_debug_client(request)
         return [
             SkillCapabilityView(
                 name=capability.name,
@@ -54,7 +52,8 @@ def build_skill_authoring_router(
         request: Request,
         payload: SkillAuthoringRequest,
     ) -> SkillCandidateReviewView:
-        require_debug_client(request, allow_lan=lan_enabled)
+        require_admin(request)
+        require_debug_client(request)
         try:
             # 原因：BaseLLM 使用同步 HTTP，直接调用会阻塞 FastAPI 事件循环和 Debug 轮询。
             # 作用：模型生成在工作线程中完成，候选仍由同进程 Catalog 原子持久化。
@@ -80,7 +79,8 @@ def build_skill_authoring_router(
         name: str,
         version: str,
     ) -> SkillCandidateReviewView:
-        require_debug_client(request, allow_lan=lan_enabled)
+        require_admin(request)
+        require_debug_client(request)
         try:
             review = await asyncio.to_thread(
                 authoring.review_candidate,
@@ -103,7 +103,8 @@ def build_skill_authoring_router(
         version: str,
         payload: SkillCandidateTestRequest,
     ) -> SkillCandidateTestView:
-        require_debug_client(request, allow_lan=lan_enabled)
+        require_admin(request)
+        require_debug_client(request)
         try:
             result = await authoring.test_candidate(
                 name,

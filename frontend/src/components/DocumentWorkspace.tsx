@@ -27,11 +27,13 @@ import type {
 type DocumentWorkspaceProps = {
   conversationId: string | null;
   minSourceRelevance: number;
+  canUseLocalFolder: boolean;
 };
 
 export function DocumentWorkspace({
   conversationId,
   minSourceRelevance,
+  canUseLocalFolder,
 }: DocumentWorkspaceProps) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [sourceMode, setSourceMode] = useState<"upload" | "folder">("upload");
@@ -387,14 +389,16 @@ export function DocumentWorkspace({
             <Upload size={14} />
             Uploads
           </button>
-          <button
-            className={sourceMode === "folder" ? "active" : ""}
-            onClick={() => changeSourceMode("folder")}
-            type="button"
-          >
-            <Folder size={14} />
-            Local folder
-          </button>
+          {canUseLocalFolder && (
+            <button
+              className={sourceMode === "folder" ? "active" : ""}
+              onClick={() => changeSourceMode("folder")}
+              type="button"
+            >
+              <Folder size={14} />
+              Local folder
+            </button>
+          )}
         </div>
 
         {sourceMode === "upload" ? (

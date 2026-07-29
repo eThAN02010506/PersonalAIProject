@@ -132,6 +132,36 @@ class ConversationKnowledgeTests(unittest.TestCase):
                 },
             )
 
+    def test_account_global_aggregates_do_not_share_sources(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / "knowledge"
+            manager = ConversationKnowledgeManager(root=root, factory=make_test_minirag)
+
+            with manager.lease("owner-chat", global_scope="owner-account") as owner:
+                owner.insert("# File: owner.md\n\nowner-global-exclusive-31")
+            with manager.lease("member-chat", global_scope="member-account") as member:
+                member.insert("# File: member.md\n\nmember-global-exclusive-42")
+
+            owner_global = make_test_minirag(
+                manager.global_storage_path_for("owner-account")
+            )
+            member_global = make_test_minirag(
+                manager.global_storage_path_for("member-account")
+            )
+            owner_results = "\n".join(
+                owner_global.search("global exclusive", min_relevance=0.25)
+            )
+            member_results = "\n".join(
+                member_global.search("global exclusive", min_relevance=0.25)
+            )
+
+            # 原因：会话私库隔离后若仍共用一个 Global 文件，开关会绕过账号 ACL。
+            # 作用：证明每个账号的跨聊天聚合拥有独立 JSONL、向量索引与图谱目录。
+            self.assertIn("owner-global-exclusive-31", owner_results)
+            self.assertNotIn("member-global-exclusive-42", owner_results)
+            self.assertIn("member-global-exclusive-42", member_results)
+            self.assertNotIn("owner-global-exclusive-31", member_results)
+
     def test_scope_path_rejects_directory_traversal(self) -> None:
         with self.assertRaisesRegex(ValueError, "unsupported characters"):
             conversation_knowledge_path("../another-conversation")

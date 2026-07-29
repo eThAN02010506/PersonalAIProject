@@ -1,7 +1,9 @@
 import type {
   AnalysisResult,
+  AuthStatus,
   ChatMessage,
   Conversation,
+  ConversationMember,
   DebugOverview,
   DebugRecord,
   Health,
@@ -13,15 +15,24 @@ import type {
   SkillCandidateTest,
   SkillCapability,
   SkillVersion,
+  UserAccount,
 } from "./types";
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(path, init);
+  const response = await fetch(path, { ...init, credentials: "include" });
   const contentType = response.headers.get("content-type") ?? "";
   if (!response.ok) {
     const payload = contentType.includes("application/json")
       ? ((await response.json().catch(() => null)) as { detail?: string } | null)
       : null;
+    if (
+      response.status === 401
+      && !path.startsWith("/api/auth/login")
+      && !path.startsWith("/api/auth/bootstrap")
+      && !path.startsWith("/api/auth/status")
+    ) {
+      window.dispatchEvent(new Event("qwopus:auth-required"));
+    }
     throw new Error(payload?.detail ?? `Request failed (${response.status})`);
   }
   if (!contentType.includes("application/json")) {
@@ -32,7 +43,76 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return (await response.json()) as T;
 }
 
+async function requestVoid(path: string, init?: RequestInit): Promise<void> {
+  const response = await fetch(path, { ...init, credentials: "include" });
+  if (!response.ok) {
+    const payload = (await response.json().catch(() => null)) as { detail?: string } | null;
+    if (response.status === 401) {
+      window.dispatchEvent(new Event("qwopus:auth-required"));
+    }
+    throw new Error(payload?.detail ?? `Request failed (${response.status})`);
+  }
+}
+
 export const api = {
+  authStatus: () => request<AuthStatus>("/api/auth/status"),
+
+  bootstrap: (payload: { username: string; displayName: string; password: string }) =>
+    request<AuthStatus>("/api/auth/bootstrap", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        username: payload.username,
+        display_name: payload.displayName,
+        password: payload.password,
+      }),
+    }),
+
+  login: (username: string, password: string) =>
+    request<AuthStatus>("/api/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username, password }),
+    }),
+
+  logout: () => requestVoid("/api/auth/logout", { method: "POST" }),
+
+  changePassword: (currentPassword: string, newPassword: string) =>
+    request<AuthStatus>("/api/auth/password", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        current_password: currentPassword,
+        new_password: newPassword,
+      }),
+    }),
+
+  listUsers: () => request<UserAccount[]>("/api/users"),
+
+  createUser: (payload: {
+    username: string;
+    displayName: string;
+    password: string;
+    role: "admin" | "member";
+  }) =>
+    request<UserAccount>("/api/users", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        username: payload.username,
+        display_name: payload.displayName,
+        password: payload.password,
+        role: payload.role,
+      }),
+    }),
+
+  setUserActive: (userId: string, active: boolean) =>
+    request<UserAccount>(`/api/users/${encodeURIComponent(userId)}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ active }),
+    }),
+
   health: () => request<Health>("/api/health"),
 
   debugOverview: (limit = 100, logLines = 500) =>
@@ -66,9 +146,29 @@ export const api = {
     }),
 
   deleteConversation: async (conversationId: string): Promise<void> => {
-    const response = await fetch(`/api/conversations/${conversationId}`, { method: "DELETE" });
-    if (!response.ok) throw new Error(`Delete failed (${response.status})`);
+    await requestVoid(`/api/conversations/${conversationId}`, { method: "DELETE" });
   },
+
+  listConversationMembers: (conversationId: string) =>
+    request<ConversationMember[]>(
+      `/api/conversations/${encodeURIComponent(conversationId)}/members`,
+    ),
+
+  shareConversation: (conversationId: string, username: string) =>
+    request<ConversationMember>(
+      `/api/conversations/${encodeURIComponent(conversationId)}/members`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username }),
+      },
+    ),
+
+  unshareConversation: (conversationId: string, userId: string) =>
+    requestVoid(
+      `/api/conversations/${encodeURIComponent(conversationId)}/members/${encodeURIComponent(userId)}`,
+      { method: "DELETE" },
+    ),
 
   listMessages: (conversationId: string) =>
     request<ChatMessage[]>(`/api/conversations/${conversationId}/messages`),

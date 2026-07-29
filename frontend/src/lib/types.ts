@@ -1,8 +1,33 @@
+export type UserAccount = {
+  id: string;
+  username: string;
+  display_name: string;
+  role: "admin" | "member";
+  active: boolean;
+  created_at: string;
+};
+
+export type AuthStatus = {
+  bootstrap_required: boolean;
+  user?: UserAccount;
+};
+
 export type Conversation = {
   id: string;
   title: string;
   created_at: string;
   updated_at: string;
+  owner_user_id?: string;
+  owner_username?: string;
+  is_owner: boolean;
+  shared_count: number;
+};
+
+export type ConversationMember = {
+  user_id: string;
+  username: string;
+  display_name: string;
+  access: "owner" | "member";
 };
 
 export type ChatMessage = {
@@ -186,6 +211,8 @@ export type DebugRecord = {
   source?: string;
   status?: string;
   run_id?: string;
+  user_id?: string;
+  username?: string;
   result?: string;
   trace?: Record<string, unknown>[];
   debug_runs?: DebugAgentRun[];
@@ -197,6 +224,8 @@ export type DebugRecordSummary = {
   source: string;
   status: string;
   run_id: string;
+  user_id?: string;
+  username?: string;
   result_preview: string;
   trace_events: number;
   agent_runs: number;

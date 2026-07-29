@@ -21,7 +21,7 @@ from qwopus_agent.services.orchestration_models import (
 from qwopus_agent.skills import WorkflowSpec
 
 ChatTaskStatus = Literal["completed", "failed"]
-CHAT_WORKER_REQUEST_SCHEMA_VERSION = 4
+CHAT_WORKER_REQUEST_SCHEMA_VERSION = 5
 
 
 @dataclass(frozen=True)
@@ -40,6 +40,7 @@ class ChatWorkerRequest:
     min_source_relevance: float = 0.55
     response_detail: Literal["concise", "balanced", "detailed"] = "detailed"
     knowledge_root: Path = DEFAULT_CONVERSATION_KNOWLEDGE_ROOT
+    global_knowledge_path: Path | None = None
     workflow_specs: tuple[WorkflowSpec, ...] = ()
     schema_version: int = CHAT_WORKER_REQUEST_SCHEMA_VERSION
 
@@ -156,6 +157,7 @@ def start_chat_task(
     min_source_relevance: float = 0.55,
     response_detail: Literal["concise", "balanced", "detailed"] = "detailed",
     knowledge_root: Path = DEFAULT_CONVERSATION_KNOWLEDGE_ROOT,
+    global_knowledge_path: Path | None = None,
     resolved_intent: ResolvedIntent | None = None,
     workflow_specs: tuple[WorkflowSpec, ...] = (),
 ) -> BackgroundChatTask:
@@ -182,6 +184,11 @@ def start_chat_task(
         min_source_relevance=min_source_relevance,
         response_detail=response_detail,
         knowledge_root=Path(knowledge_root),
+        global_knowledge_path=(
+            Path(global_knowledge_path)
+            if global_knowledge_path is not None
+            else None
+        ),
         workflow_specs=workflow_specs,
     )
     process = context.Process(
@@ -219,6 +226,7 @@ def _run_chat_task(
         result = AgentOrchestrator(
             settings=request.settings,
             knowledge_root=request.knowledge_root,
+            global_knowledge_path=request.global_knowledge_path,
             workflow_specs=request.workflow_specs,
         ).run_sync(
             OrchestrationRequest(

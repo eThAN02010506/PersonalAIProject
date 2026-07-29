@@ -13,6 +13,54 @@ button, textarea, input { font: inherit; letter-spacing: 0; }
 button, a { -webkit-tap-highlight-color: transparent; }
 button { color: inherit; }
 
+.app-loading { min-height: 100vh; }
+.auth-screen {
+  display: grid;
+  min-height: 100vh;
+  place-items: center;
+  background: #f1f1ee;
+  padding: 20px;
+}
+.auth-panel {
+  width: min(390px, 100%);
+  border: 1px solid #d6d6d1;
+  border-radius: 8px;
+  background: #fbfbfa;
+  box-shadow: 0 14px 42px #25262117;
+}
+.auth-panel > header {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  border-bottom: 1px solid #e3e3de;
+  padding: 17px 18px;
+}
+.auth-panel h1 { margin: 0; font-size: 17px; letter-spacing: 0; }
+.auth-panel header p { margin: 3px 0 0; color: #777872; font-size: 12px; }
+.auth-panel form { display: grid; gap: 14px; padding: 18px; }
+.auth-panel label, .account-form label, .share-form label {
+  display: grid;
+  min-width: 0;
+  gap: 6px;
+}
+.auth-panel label span, .account-form label span, .share-form label span {
+  color: #5e5f5a;
+  font-size: 11px;
+  font-weight: 700;
+}
+.auth-panel input, .account-form input, .account-form select, .share-form input {
+  width: 100%;
+  min-width: 0;
+  height: 40px;
+  border: 1px solid #d0d0cb;
+  border-radius: 6px;
+  outline: 0;
+  background: #fff;
+  padding: 0 10px;
+}
+.auth-panel input:focus, .account-form input:focus, .account-form select:focus,
+.share-form input:focus { border-color: #898a84; }
+
 .app-shell {
   display: grid;
   grid-template-columns: 268px minmax(0, 1fr);
@@ -91,6 +139,29 @@ button { color: inherit; }
 .conversation-row:hover .conversation-delete, .conversation-row.active .conversation-delete { visibility: visible; }
 
 .sidebar-footer { border-top: 1px solid #d8d8d3; padding: 10px 4px 2px; }
+.account-summary { display: flex; min-width: 0; align-items: center; margin-bottom: 3px; }
+.account-summary > button:first-child {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  align-items: center;
+  gap: 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  padding: 7px 5px;
+  cursor: pointer;
+  text-align: left;
+}
+.account-summary > button:first-child:hover { background: #e1e1dd; }
+.account-summary > button:first-child > span { display: grid; min-width: 0; }
+.account-summary strong, .account-summary small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.account-summary strong { font-size: 12px; }
+.account-summary small { color: #777872; font-size: 10px; }
 .model-status-row { display: flex; min-width: 0; align-items: center; }
 .model-status, .debug-link {
   display: flex;
@@ -126,6 +197,32 @@ button { color: inherit; }
   border-bottom: 1px solid #e5e5e1;
   padding: 0 18px;
 }
+.share-chat-button {
+  display: inline-flex;
+  min-height: 32px;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 6px;
+  padding: 0 9px;
+  font-size: 12px;
+}
+.share-chat-button span {
+  display: inline-grid;
+  min-width: 18px;
+  height: 18px;
+  place-items: center;
+  border-radius: 9px;
+  background: #eeeeeb;
+  font-size: 10px;
+}
+.shared-chat-label {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 6px;
+  color: #6d6e69;
+  font-size: 11px;
+}
 .mode-switch { display: inline-flex; gap: 2px; border-radius: 7px; background: #eeeeeb; padding: 3px; }
 .mode-switch button {
   display: inline-flex;
@@ -142,7 +239,14 @@ button { color: inherit; }
 }
 .mode-switch button.active { background: #fff; color: #222321; box-shadow: 0 1px 3px #00000018; }
 
-.capability-toggles { display: flex; align-items: center; gap: 5px; margin-left: auto; }
+.capability-toggles {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 5px;
+  margin-left: auto;
+  overflow-x: auto;
+}
 .capability-toggles label, .toggle-label {
   display: inline-flex;
   height: 32px;
@@ -248,6 +352,62 @@ button { color: inherit; }
 .dialog-header { display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid #e3e3de; padding: 14px 16px; }
 .dialog-header h2 { margin: 0; font-size: 16px; letter-spacing: 0; }
 .model-dialog form { padding: 16px; }
+.account-dialog { width: min(760px, 100%); }
+.account-dialog .dialog-header > div, .share-dialog .dialog-header > div {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+.account-dialog .dialog-header span, .share-dialog .dialog-header span {
+  overflow: hidden;
+  color: #777872;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+}
+.account-dialog-body {
+  display: grid;
+  max-height: min(76vh, 760px);
+  overflow-y: auto;
+}
+.account-form { display: grid; gap: 12px; border-bottom: 1px solid #e3e3de; padding: 16px; }
+.account-form h3, .account-list h3 {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0;
+  font-size: 13px;
+  letter-spacing: 0;
+}
+.account-field-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.account-create-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.account-form > button { width: fit-content; min-height: 34px; }
+.account-list { padding: 16px; }
+.account-row, .share-member-row {
+  display: grid;
+  min-height: 50px;
+  align-items: center;
+  gap: 9px;
+  border-bottom: 1px solid #e8e8e3;
+}
+.account-row { grid-template-columns: 9px minmax(0, 1fr) auto; }
+.account-row > div, .share-member-row > div { display: grid; min-width: 0; gap: 2px; }
+.account-row strong, .share-member-row strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+}
+.account-row small, .share-member-row small { color: #777872; font-size: 10px; }
+.account-row button { min-height: 30px; padding: 0 9px; font-size: 11px; }
+.account-state { width: 8px; height: 8px; border-radius: 50%; background: #aaa; }
+.account-state.active { background: #2f9175; }
+.share-dialog { width: min(500px, 100%); }
+.share-dialog-body { display: grid; gap: 14px; padding: 16px; }
+.share-form { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: 8px; }
+.share-form button { min-height: 40px; }
+.share-member-list { display: grid; }
+.share-member-row { grid-template-columns: 18px minmax(0, 1fr) 32px; }
 .model-mode-switch { display: grid; grid-template-columns: 1fr 1fr; gap: 3px; border-radius: 7px; background: #eeeeeb; padding: 3px; }
 .model-mode-switch button {
   display: inline-flex;
@@ -708,6 +868,8 @@ button { color: inherit; }
   .mobile-only { display: inline-grid; }
   .brand-row .mobile-only { margin-left: auto; }
   .topbar { min-height: 56px; flex-wrap: wrap; padding: 8px 10px; }
+  .share-chat-button { margin-left: auto; }
+  .shared-chat-label { margin-left: auto; }
   .capability-toggles { gap: 2px; overflow-x: auto; }
   .capability-toggles label { width: 34px; padding: 0; justify-content: center; }
   .capability-toggles label input, .capability-toggles label:not(:has(svg)) { display: none; }
@@ -733,6 +895,8 @@ button { color: inherit; }
   .folder-path-row button { justify-content: center; }
   .dialog-backdrop { align-items: end; padding: 10px; }
   .model-dialog { width: 100%; }
+  .account-field-grid, .account-create-grid { grid-template-columns: 1fr; }
+  .share-form { grid-template-columns: 1fr; }
   .debug-header { align-items: flex-start; padding: 10px 12px; }
   .debug-title p, .debug-header-actions .toggle-label { display: none; }
   .debug-notice { padding: 9px 12px; }

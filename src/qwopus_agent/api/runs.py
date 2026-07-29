@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 from collections import OrderedDict
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -52,6 +53,8 @@ class PreparedChatRequest:
 @dataclass
 class _ActiveRun:
     conversation_id: str
+    user_id: str
+    username: str
     task: BackgroundChatTask
     prepared: PreparedChatRequest
 
@@ -60,6 +63,8 @@ class _ActiveRun:
 class _CompletedRun:
     view: RunView
     completed_at: float
+    conversation_id: str
+    user_id: str
 
 
 DEFAULT_COMPLETED_RUN_TTL_SECONDS = 60 * 60
@@ -114,6 +119,9 @@ class ChatRunRegistry:
         response_detail: Literal["concise", "balanced", "detailed"] = "detailed",
         interpretation_mode: InterpretationMode = "contextual",
         prepared: PreparedChatRequest | None = None,
+        user_id: str = "system",
+        username: str = "system",
+        global_knowledge_path: Path | None = None,
     ) -> str:
         self.reap()
         resolved_request = prepared or self.prepare(
@@ -138,6 +146,7 @@ class ChatRunRegistry:
             min_source_relevance=min_source_relevance,
             response_detail=response_detail,
             knowledge_root=self.knowledge_root,
+            global_knowledge_path=global_knowledge_path,
             resolved_intent=resolved_request.resolved_intent,
             workflow_specs=self._active_workflow_specs(),
         )
@@ -145,6 +154,8 @@ class ChatRunRegistry:
         with self._lock:
             self._runs[run_id] = _ActiveRun(
                 conversation_id,
+                user_id,
+                username,
                 task,
                 resolved_request,
             )
@@ -215,6 +226,9 @@ class ChatRunRegistry:
         self,
         conversation_id: str,
         prepared: PreparedChatRequest,
+        *,
+        user_id: str = "system",
+        username: str = "system",
     ) -> str:
         """Persist a clarification without starting or requiring a model."""
         question = prepared.resolved_intent.clarification_question
@@ -248,10 +262,26 @@ class ChatRunRegistry:
             trace=view.trace,
             debug_runs=(),
             run_id=run_id,
+            user_id=user_id,
+            username=username,
             directory=self.debug_directory,
         )
-        self._store_completed(run_id, view)
+        self._store_completed(
+            run_id,
+            view,
+            conversation_id=conversation_id,
+            user_id=user_id,
+        )
         return run_id
+
+    def conversation_id_for(self, run_id: str) -> str | None:
+        """Return only the owning conversation id needed for route authorization."""
+        with self._lock:
+            active = self._runs.get(run_id)
+            completed = self._completed.get(run_id)
+        if active is not None:
+            return active.conversation_id
+        return completed.conversation_id if completed is not None else None
 
     def poll(self, run_id: str) -> RunView | None:
         with self._poll_lock:
@@ -281,20 +311,49 @@ class ChatRunRegistry:
                 trace=(),
                 debug_runs=(),
                 run_id=run_id,
+                user_id=active.user_id,
+                username=active.username,
                 directory=self.debug_directory,
             )
-            self._store_completed(run_id, view)
+            self._store_completed(
+                run_id,
+                view,
+                conversation_id=active.conversation_id,
+                user_id=active.user_id,
+            )
             return view
 
     def cancel_conversation(self, conversation_id: str) -> int:
         """Cancel every active run owned by one conversation."""
+        return self._cancel_matching(
+            lambda active: active.conversation_id == conversation_id
+        )
+
+    def cancel_user(self, user_id: str) -> int:
+        """Cancel every active worker started by one disabled account."""
+        return self._cancel_matching(lambda active: active.user_id == user_id)
+
+    def cancel_user_conversation(self, conversation_id: str, user_id: str) -> int:
+        """Cancel one member's active workers before their share is revoked."""
+        return self._cancel_matching(
+            lambda active: (
+                active.conversation_id == conversation_id
+                and active.user_id == user_id
+            )
+        )
+
+    def _cancel_matching(
+        self,
+        matches: Callable[[_ActiveRun], bool],
+    ) -> int:
+        """Cancel a lock-consistent snapshot selected by an authorization event."""
         with self._poll_lock:
             self._prune_completed()
             with self._lock:
                 matched = [
                     (run_id, active)
                     for run_id, active in self._runs.items()
-                    if active.conversation_id == conversation_id
+                    if matches(active)
                 ]
                 for run_id, _active in matched:
                     self._runs.pop(run_id, None)
@@ -312,11 +371,18 @@ class ChatRunRegistry:
                     trace=(),
                     debug_runs=(),
                     run_id=run_id,
+                    user_id=active.user_id,
+                    username=active.username,
                     directory=self.debug_directory,
                 )
-                self._store_completed(run_id, view)
+                self._store_completed(
+                    run_id,
+                    view,
+                    conversation_id=active.conversation_id,
+                    user_id=active.user_id,
+                )
             # 原因：删除会话后 worker 不能再向其外键消息表写入最终答案。
-            # 作用：后端在删除数据前终止该会话全部任务，不依赖某一个前端标签页的状态。
+            # 作用：权限或数据删除前终止匹配任务，不依赖某一个前端标签页的状态。
             return len(matched)
 
     def reap(self) -> None:
@@ -406,11 +472,18 @@ class ChatRunRegistry:
                 trace=public_trace,
                 debug_runs=result.debug_runs,
                 run_id=run_id,
+                user_id=active.user_id,
+                username=active.username,
                 directory=self.debug_directory,
             )
         finally:
             active.task.close()
-        self._store_completed(run_id, view)
+        self._store_completed(
+            run_id,
+            view,
+            conversation_id=active.conversation_id,
+            user_id=active.user_id,
+        )
         return view
 
     def _observe_skill_growth(
@@ -447,9 +520,21 @@ class ChatRunRegistry:
             }
         ]
 
-    def _store_completed(self, run_id: str, view: RunView) -> None:
+    def _store_completed(
+        self,
+        run_id: str,
+        view: RunView,
+        *,
+        conversation_id: str,
+        user_id: str,
+    ) -> None:
         with self._lock:
-            self._completed[run_id] = _CompletedRun(view, time.monotonic())
+            self._completed[run_id] = _CompletedRun(
+                view,
+                time.monotonic(),
+                conversation_id,
+                user_id,
+            )
             self._completed.move_to_end(run_id)
         self._prune_completed()
 

@@ -90,6 +90,16 @@ class SavedDocumentApiTests(unittest.TestCase):
             )
         )
         self.client = self.client_context.__enter__()
+        initialized = self.client.post(
+            "/api/auth/bootstrap",
+            json={
+                "username": "saved-admin",
+                "display_name": "Saved Admin",
+                "password": "saved-password-123",
+            },
+        )
+        self.assertEqual(initialized.status_code, 201)
+        self.user_id = initialized.json()["user"]["id"]
 
     def tearDown(self) -> None:
         self.client_context.__exit__(None, None, None)
@@ -107,6 +117,10 @@ class SavedDocumentApiTests(unittest.TestCase):
             markdown=markdown,
             structure=structure,
             metadata={"parser": "markdown"},
+        )
+        self.repository.register_document(
+            structure.document_id,
+            owner_user_id=self.user_id,
         )
         return structure
 

@@ -118,6 +118,7 @@ def analyze_uploaded_files(
     document_summaries: dict[str, HierarchicalDocumentSummary] = {}
     spreadsheet_contexts: dict[str, str] = {}
     spreadsheet_paths: dict[str, Path] = {}
+    saved_documents: list[dict[str, str]] = []
     debug_runs: list[AgentDebugRun] = []
 
     for uploaded_file in uploaded_files:
@@ -163,6 +164,29 @@ def analyze_uploaded_files(
             if result.metadata.get("source_type") == "spreadsheet":
                 spreadsheet_contexts[file_name] = result.markdown_document
                 spreadsheet_paths[file_name] = source_path
+                persistence_structure = chunk_document_structure(
+                    build_document_structure(
+                        result.markdown_document,
+                        source=file_name,
+                        infer_plaintext_headings=False,
+                    )
+                )
+                persistence_summary = summarize_document(persistence_structure)
+                if not direct_mode and source_path.exists():
+                    resolved_store = document_store or DocumentStore()
+                    resolved_store.persist(
+                        original_path=source_path,
+                        markdown=result.markdown_document,
+                        structure=persistence_structure,
+                        metadata=result.metadata,
+                    )
+                    resolved_store.persist_summary(persistence_summary)
+                    saved_documents.append(
+                        {
+                            "document_id": persistence_structure.document_id,
+                            "source": file_name,
+                        }
+                    )
             else:
                 structure = (
                     result.document_structures[0]
@@ -186,6 +210,12 @@ def analyze_uploaded_files(
                         metadata=result.metadata,
                     )
                     resolved_store.persist_summary(summary)
+                    saved_documents.append(
+                        {
+                            "document_id": structure.document_id,
+                            "source": file_name,
+                        }
+                    )
         logger.info(
             "upload_analyzed filename=%s metadata=%s",
             file_name,
@@ -195,6 +225,9 @@ def analyze_uploaded_files(
         analyzed_results.append((file_name, result))
 
     result = combine_analysis_results(analyzed_results)
+    # 原因：文件持久化发生在服务层，而账号归属只能由已认证的 API 边界决定。
+    # 作用：只返回稳定 document_id/source 清单，路由据此写 ACL，不传递本地绝对路径。
+    result.metadata["saved_documents"] = saved_documents
     scoped_sections = _scope_sections_by_file(
         document_structures,
         selected_sections or {},
