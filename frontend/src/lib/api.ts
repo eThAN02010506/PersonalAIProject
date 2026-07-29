@@ -167,6 +167,7 @@ export const api = {
     content: string,
     options: {
       enableWebSearch: boolean;
+      enableBrowser: boolean;
       enableLocalKnowledge: boolean;
       includeGlobalKnowledge: boolean;
       minSourceRelevance: number;
@@ -182,6 +183,7 @@ export const api = {
         body: JSON.stringify({
           content,
           enable_web_search: options.enableWebSearch,
+          enable_browser: options.enableBrowser,
           enable_local_knowledge: options.enableLocalKnowledge,
           include_global_knowledge: options.includeGlobalKnowledge,
           min_source_relevance: options.minSourceRelevance,

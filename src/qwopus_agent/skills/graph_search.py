@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import ClassVar
 
 from qwopus_agent.memory.graph_models import GraphPath
 from qwopus_agent.memory.knowledge_graph import KnowledgeGraphIndex
@@ -12,6 +13,10 @@ from qwopus_agent.skills.base import BaseSkill, SkillRequest, SkillResponse
 @dataclass
 class GraphSearchSkill(BaseSkill):
     """Search explicit entity relations without exposing graph storage internals."""
+
+    # 原因：图谱与向量库共享同一会话/全局授权边界，不能由默认发现直接打开。
+    # 作用：运行时必须注入本轮获准的 KnowledgeGraphIndex 才能成为 Agent Tool。
+    agent_tool_permission: ClassVar[str | None] = "knowledge"
 
     name: str = "graph_search"
     description: str = (

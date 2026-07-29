@@ -18,8 +18,8 @@ application framework, not a hosted multi-user service.
 | Documents | Multi-file PDF, DOCX, Markdown, TXT, PNG, and JPEG analysis with Markdown normalization |
 | Spreadsheets | CSV, XLSX, and legacy XLS intake, workbook structure profiling, bounded samples, LLM-generated pandas, and local restricted execution |
 | Knowledge | Persistent conversation-scoped MiniRAG vectors plus an evidence-bound knowledge graph and bounded multi-hop search |
-| Web research | Optional Tavily search exposed to the Agent as one provider-independent Skill |
-| Reports | Unified Markdown, Excel, PNG/SVG chart, and PDF artifact generation |
+| Web research | Optional Tavily search plus separately authorized, isolated Playwright page rendering |
+| Reports | Unified Markdown, Excel, PNG/SVG chart, and complete paginated Unicode PDF artifacts |
 | Skills | Automatic discovery, declarative Workflow Skills, semantic versions, promotion, rollback, and model-assisted candidate authoring |
 | Interfaces | React 19 with assistant-ui, FastAPI, SQLite conversation history, CLI entry points, and a React Debug Console |
 
@@ -41,6 +41,7 @@ flowchart TD
     REG --> DOC["MinerU / document parser"]
     REG --> XLS["Excel profile / pandas sandbox"]
     REG --> WEB["Tavily web search"]
+    REG --> BROWSER["Restricted Playwright browser"]
     REG --> MEM["MiniRAG facade"]
     MEM --> VEC["Persistent NanoVectorDB"]
     MEM --> GRAPH["Persistent knowledge graph"]
@@ -94,7 +95,7 @@ python3.11 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
 python -m pip install -e vendor/minirag
-python -m pip install -e ".[dev,api,documents]"
+python -m pip install -e ".[dev,api,documents,browser]"
 ```
 
 Install and build the frontend:
@@ -109,7 +110,9 @@ cd ..
 `vendor/minirag` supplies the MiniRAG package used by the local adapter.
 `vendor/mineru` is the pinned MinerU submodule. The `documents` extra installs
 its pipeline dependencies; when the submodule is unavailable, the parser can
-fall back to an installed MinerU command.
+fall back to an installed MinerU command. The `browser` extra prefers an
+installed Chrome browser; install Playwright Chromium separately only when
+Chrome is unavailable.
 
 ## Model Configuration
 
@@ -460,15 +463,17 @@ modules, not in React components or FastAPI route handlers.
 
 - A new model backend needs an adapter unless it already exposes an
   OpenAI-compatible API.
-- Browser automation has a tested provider contract, but no production browser
-  provider is wired into the application.
+- Browser access is intentionally read-only and limited to isolated rendering
+  of public HTTP(S) pages. It does not reuse user sessions, download files, or
+  access private-network addresses.
 - The MiniRAG integration deliberately uses upstream persistent vector storage
   inside a Qwopus-owned retrieval and graph pipeline, not the complete upstream
   query engine.
 - Legacy `.xls` files require a compatible pandas Excel engine in the local
   environment.
-- The current PDF report writer is a compact compatibility artifact, not a
-  rich publication-layout engine.
+- PDF reports preserve the complete Unicode body and paginate automatically,
+  but intentionally provide basic report typography rather than a publication
+  layout editor.
 - The web application is intended for a trusted local machine or private LAN. It
   does not yet provide authentication, authorization, or multi-user tenancy.
 

@@ -3,6 +3,7 @@ import unittest
 from pathlib import Path
 
 import pandas as pd
+from pypdf import PdfReader
 
 from qwopus_agent.reports import ReportGenerator
 
@@ -72,6 +73,30 @@ class ReportGeneratorTests(unittest.TestCase):
             ]
             self.assertEqual(len(chart_paths), 4)
             self.assertEqual(len(set(chart_paths)), 4)
+
+    def test_pdf_preserves_unicode_and_complete_multi_page_body(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            first_marker = "中文报告开头：完整内容必须可搜索。"
+            final_marker = "中文报告结尾：旧的 3500 字符截断不得再次出现。"
+            paragraphs = ["这是用于分页验证的长段落。" * 30] * 30
+            body = "\n\n".join([first_marker, *paragraphs, final_marker])
+
+            report = ReportGenerator(output_dir=Path(tmpdir)).generate(
+                title="多语言分析报告",
+                markdown_body=body,
+                basename="unicode",
+            )
+            pdf_path = next(
+                artifact.path for artifact in report.artifacts if artifact.kind == "pdf"
+            )
+            reader = PdfReader(pdf_path)
+            extracted = "\n".join(page.extract_text() or "" for page in reader.pages)
+
+            # 原因：文件签名测试无法发现中文变成问号或正文被静默截断。
+            # 作用：同时锁定 Unicode 文本层、自动分页和末尾内容完整性。
+            self.assertGreater(len(reader.pages), 1)
+            self.assertIn(first_marker, extracted)
+            self.assertIn(final_marker, extracted)
 
 
 if __name__ == "__main__":

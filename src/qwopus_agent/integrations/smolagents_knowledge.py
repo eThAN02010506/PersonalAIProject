@@ -43,6 +43,21 @@ def build_tavily_search_tool(
     return create_tool(progress_callback=progress_callback)
 
 
+def build_browser_open_tool(
+    progress_callback: Callable[[str], None] | None = None,
+    max_output_tokens: int | None = None,
+) -> Any:
+    """Load the Playwright Tool only when browser access is enabled."""
+    from qwopus_agent.integrations.smolagents_tools import (
+        build_browser_open_tool as create_tool,
+    )
+
+    return create_tool(
+        progress_callback=progress_callback,
+        max_output_tokens=max_output_tokens,
+    )
+
+
 def build_local_knowledge_tools(
     knowledge_scope: str,
     user_message: str = "",

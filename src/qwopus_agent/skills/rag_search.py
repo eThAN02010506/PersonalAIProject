@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import ClassVar
 
 from qwopus_agent.memory.knowledge_store import KnowledgeStore
 from qwopus_agent.skills.base import BaseSkill, SkillRequest, SkillResponse
@@ -11,6 +12,10 @@ from qwopus_agent.skills.base import BaseSkill, SkillRequest, SkillResponse
 @dataclass
 class RagSearchSkill(BaseSkill):
     """Search the knowledge layer through the MiniRAG facade."""
+
+    # 原因：本地知识可能包含其他会话或全局文档，自动暴露会破坏作用域授权。
+    # 作用：只有运行时注入当前获准 KnowledgeStore 后才允许构建 Agent Tool。
+    agent_tool_permission: ClassVar[str | None] = "knowledge"
 
     # Reason: Planner should see retrieval as one capability, not the internals of memory storage.
     name: str = "rag_search"

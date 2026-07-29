@@ -175,6 +175,7 @@ class _ConversationEndpoints:
             payload.content,
             settings,
             enable_web_search=payload.enable_web_search,
+            enable_browser=payload.enable_browser,
             enable_local_knowledge=payload.enable_local_knowledge,
             include_global_knowledge=payload.include_global_knowledge,
             min_source_relevance=payload.min_source_relevance,

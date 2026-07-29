@@ -24,7 +24,13 @@ from qwopus_agent.integrations.smolagents_runtime import (
     run_smolagents_file_analysis_with_debug,
 )
 from qwopus_agent.services.orchestration_models import AnswerContract
-from qwopus_agent.skills import WorkflowSpec
+from qwopus_agent.skills import (
+    BaseSkill,
+    SkillRegistry,
+    SkillRequest,
+    SkillResponse,
+    WorkflowSpec,
+)
 
 
 class FakeOpenAIModel:
@@ -241,6 +247,61 @@ class SmolagentsRuntimeTests(unittest.TestCase):
         self.assertIn("agent reply:", result)
         self.assertEqual(FakeToolCallingAgent.last_instance.tools, [])
         self.assertIn("Internet search is disabled", FakeToolCallingAgent.last_instance.prompt)
+
+    def test_run_agent_chat_turn_receives_registry_discovered_skill(self) -> None:
+        class RuntimeEchoSkill(BaseSkill):
+            name = "runtime_echo"
+            description = "Echo the current objective."
+
+            async def run(self, request: SkillRequest) -> SkillResponse:
+                return SkillResponse(success=True, content=request.query)
+
+        registry = SkillRegistry()
+        registry.register(RuntimeEchoSkill())
+        settings = SmolagentsModelSettings(
+            model_id="any-model",
+            base_url="http://127.0.0.1:8080/v1",
+        )
+
+        # 原因：适配器单测不能证明正式聊天入口实际使用自动发现结果。
+        # 作用：锁定 Registry 是 smolagents 每轮普通扩展 Skill 的装配来源。
+        with patch(
+            "qwopus_agent.integrations.smolagents_runtime.SkillRegistry.discover",
+            return_value=registry,
+        ):
+            run_agent_chat_turn(user_message="hello", history=[], settings=settings)
+
+        self.assertEqual(
+            [tool.name for tool in FakeToolCallingAgent.last_instance.tools],
+            ["runtime_echo"],
+        )
+
+    def test_browser_tool_is_injected_only_with_explicit_permission(self) -> None:
+        class RuntimeBrowserTool:
+            name = "browser_open"
+
+        settings = SmolagentsModelSettings(
+            model_id="any-model",
+            base_url="http://127.0.0.1:8080/v1",
+        )
+        with patch(
+            "qwopus_agent.integrations.smolagents_runtime.build_browser_open_tool",
+            return_value=RuntimeBrowserTool(),
+        ):
+            run_agent_chat_turn(
+                user_message="Open https://example.com",
+                history=[],
+                settings=settings,
+                enable_browser=True,
+            )
+
+        # 原因：Browser 不得因启用 Tavily 或普通聊天而隐式进入 Agent 工具列表。
+        # 作用：锁定显式 enable_browser → browser_open 的单轮授权边界。
+        self.assertEqual(
+            [tool.name for tool in FakeToolCallingAgent.last_instance.tools],
+            ["browser_open"],
+        )
+        self.assertIn("Use browser_open", FakeToolCallingAgent.last_instance.prompt)
 
     def test_promoted_workflow_is_injected_only_with_its_authorized_tool(self) -> None:
         class RuntimeSearchTool:

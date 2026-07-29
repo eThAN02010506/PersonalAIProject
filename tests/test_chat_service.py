@@ -60,6 +60,7 @@ class ChatServiceTests(unittest.TestCase):
             progress_callback: Callable[[str], None] | None = None,
         ) -> OrchestrationResult:
             self.assertEqual(_self.workflow_specs, (workflow,))
+            self.assertTrue(request.enable_browser)
             self.assertTrue(request.enable_local_knowledge)
             self.assertEqual(request.conversation_id, "conversation-1")
             self.assertEqual(request.min_source_relevance, 0.8)
@@ -102,6 +103,7 @@ class ChatServiceTests(unittest.TestCase):
                 self._request(
                     settings,
                     enable_web_search=True,
+                    enable_browser=True,
                     enable_local_knowledge=True,
                     min_source_relevance=0.8,
                     response_detail="balanced",
@@ -165,6 +167,7 @@ class ChatServiceTests(unittest.TestCase):
                 history=history,
                 settings=settings,
                 enable_web_search=True,
+                enable_browser=True,
                 enable_local_knowledge=True,
                 include_global_knowledge=True,
                 min_source_relevance=0.72,
@@ -188,6 +191,7 @@ class ChatServiceTests(unittest.TestCase):
         self.assertIsNot(request.history[0], history[0])
         self.assertIs(request.settings, settings)
         self.assertTrue(request.enable_web_search)
+        self.assertTrue(request.enable_browser)
         self.assertTrue(request.enable_local_knowledge)
         self.assertTrue(request.include_global_knowledge)
         self.assertEqual(request.min_source_relevance, 0.72)

@@ -141,7 +141,16 @@ class AgentArchitectureTests(unittest.TestCase):
         self.assertEqual(plan.terminal_task_id, "synthesis")
         self.assertEqual(
             [task.agent_name for task in plan.delegation.tasks],
-            ["research_agent", "knowledge_agent", "synthesis_agent"],
+            [
+                "research_agent",
+                "knowledge_agent",
+                "review_agent",
+                "synthesis_agent",
+            ],
+        )
+        self.assertEqual(
+            plan.delegation.tasks[-1].dependencies,
+            ("research", "knowledge", "review"),
         )
 
     def test_production_executor_runs_supplied_plan(self) -> None:
@@ -166,6 +175,14 @@ class AgentArchitectureTests(unittest.TestCase):
         single = asyncio.run(
             Planner().plan(AgentPlanningRequest(objective="hello"))
         )
+        browser = asyncio.run(
+            Planner().plan(
+                AgentPlanningRequest(
+                    objective="open page",
+                    enable_browser=True,
+                )
+            )
+        )
         report = asyncio.run(
             Planner().plan(
                 AgentPlanningRequest(
@@ -177,4 +194,6 @@ class AgentArchitectureTests(unittest.TestCase):
         )
 
         self.assertEqual(single.terminal_task_id, "chat")
+        self.assertEqual(browser.terminal_task_id, "browser")
+        self.assertEqual(browser.delegation.tasks[0].agent_name, "browser_agent")
         self.assertEqual(report.terminal_task_id, "report")

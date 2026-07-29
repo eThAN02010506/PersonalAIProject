@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 from qwopus_agent.analysis.excel_processing import read_spreadsheet
 from qwopus_agent.skills.base import BaseSkill, SkillRequest, SkillResponse
@@ -13,6 +13,10 @@ from qwopus_agent.skills.base import BaseSkill, SkillRequest, SkillResponse
 @dataclass
 class ExcelSchemaSkill(BaseSkill):
     """Inspect workbook structure before any LLM analysis."""
+
+    # 原因：Excel Skill 接收本地路径，必须复用上传服务的文件授权边界。
+    # 作用：自动发现保留，但普通聊天不会获得任意工作簿读取能力。
+    agent_tool_permission: ClassVar[str | None] = "documents"
 
     # Reason: Planner needs a stable capability name for schema-only Excel inspection.
     name: str = "excel_schema"

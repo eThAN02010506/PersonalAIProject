@@ -16,7 +16,10 @@ from qwopus_agent.integrations.smolagents_knowledge_tools import (
     build_graph_search_tool,
     build_minirag_search_tool,
 )
-from qwopus_agent.integrations.smolagents_web_tools import build_tavily_search_tool
+from qwopus_agent.integrations.smolagents_web_tools import (
+    build_browser_open_tool,
+    build_tavily_search_tool,
+)
 from qwopus_agent.integrations.tavily import TavilySearchConfig
 from qwopus_agent.memory.knowledge_store import KnowledgeStore
 from qwopus_agent.utils.token_budget import (
@@ -33,6 +36,7 @@ __all__ = [
     "build_document_search_tool",
     "build_document_section_tool",
     "build_document_summary_tool",
+    "build_browser_open_tool",
     "build_excel_analysis_tool",
     "build_excel_schema_tool",
     "build_graph_search_tool",

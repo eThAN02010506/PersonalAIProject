@@ -21,7 +21,7 @@ from qwopus_agent.services.orchestration_models import (
 from qwopus_agent.skills import WorkflowSpec
 
 ChatTaskStatus = Literal["completed", "failed"]
-CHAT_WORKER_REQUEST_SCHEMA_VERSION = 3
+CHAT_WORKER_REQUEST_SCHEMA_VERSION = 4
 
 
 @dataclass(frozen=True)
@@ -33,6 +33,7 @@ class ChatWorkerRequest:
     history: tuple[ChatMessage, ...]
     settings: SmolagentsModelSettings
     enable_web_search: bool
+    enable_browser: bool = False
     resolved_intent: ResolvedIntent | None = None
     enable_local_knowledge: bool = False
     include_global_knowledge: bool = False
@@ -149,6 +150,7 @@ def start_chat_task(
     history: list[ChatMessage],
     settings: SmolagentsModelSettings,
     enable_web_search: bool,
+    enable_browser: bool = False,
     enable_local_knowledge: bool = False,
     include_global_knowledge: bool = False,
     min_source_relevance: float = 0.55,
@@ -173,6 +175,7 @@ def start_chat_task(
         history=tuple(dict(item) for item in history),
         settings=settings,
         enable_web_search=enable_web_search,
+        enable_browser=enable_browser,
         resolved_intent=resolved,
         enable_local_knowledge=enable_local_knowledge,
         include_global_knowledge=include_global_knowledge,
@@ -236,6 +239,7 @@ def _run_chat_task(
                     if item.get("role") in {"user", "assistant"} and item.get("content")
                 ),
                 enable_web_search=request.enable_web_search,
+                enable_browser=request.enable_browser,
                 enable_local_knowledge=request.enable_local_knowledge,
                 include_global_knowledge=request.include_global_knowledge,
                 min_source_relevance=request.min_source_relevance,

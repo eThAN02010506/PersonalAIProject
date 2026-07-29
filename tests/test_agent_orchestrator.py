@@ -141,6 +141,33 @@ class AgentOrchestratorTests(unittest.TestCase):
         self.assertEqual(calls[0]["answer_contract"], intent.answer_contract)
         self.assertEqual(result.resolved_intent, intent)
 
+    def test_browser_permission_routes_to_browser_only_agent(self) -> None:
+        calls: list[dict[str, object]] = []
+
+        def fake_chat(**kwargs):
+            calls.append(kwargs)
+            return ChatAgentRun(answer="Rendered page answer", state="success")
+
+        result = asyncio.run(
+            AgentOrchestrator(self.settings, chat_runner=fake_chat).run(
+                OrchestrationRequest(
+                    objective="Open https://example.com and summarize it.",
+                    enable_browser=True,
+                )
+            )
+        )
+
+        # 原因：浏览器授权若只到达 Runtime、不进入 Planner，会退回普通 chat_agent。
+        # 作用：证明单能力请求由 browser_agent 执行，且 Tavily 保持关闭。
+        self.assertTrue(result.success)
+        self.assertEqual(result.route, "single_agent")
+        self.assertEqual(
+            result.multi_agent_run,
+            None,
+        )
+        self.assertTrue(calls[0]["enable_browser"])
+        self.assertFalse(calls[0]["enable_web_search"])
+
     def test_web_and_local_knowledge_use_supervisor_and_merge_citations(self) -> None:
         calls: list[tuple[bool, bool, str]] = []
 
@@ -167,6 +194,12 @@ class AgentOrchestratorTests(unittest.TestCase):
                 )
             self.assertIn("current external fact", question)
             self.assertIn("stored relationship", question)
+            if "Audit this evidence" in question:
+                return ChatAgentRun(
+                    answer="The sources agree on ownership but differ in recency.",
+                    state="success",
+                )
+            self.assertIn("differ in recency", question)
             return ChatAgentRun(answer="combined final answer", state="success")
 
         result = asyncio.run(
@@ -189,11 +222,22 @@ class AgentOrchestratorTests(unittest.TestCase):
         self.assertIn("ownership.pdf, page 4", result.final_answer)
         self.assertEqual(
             [task.agent_name for task in result.multi_agent_run.delegation_plan.tasks],
-            ["research_agent", "knowledge_agent", "synthesis_agent"],
+            [
+                "research_agent",
+                "knowledge_agent",
+                "review_agent",
+                "synthesis_agent",
+            ],
         )
         self.assertTrue(any(event.tool == "tavily_search" for event in result.trace))
         self.assertTrue(any(event.tool == "graph_search" for event in result.trace))
-        self.assertEqual(len(calls), 3)
+        self.assertTrue(
+            any(
+                event.phase == "reflection" and event.status == "completed"
+                for event in result.trace
+            )
+        )
+        self.assertEqual(len(calls), 4)
 
     def test_final_answer_citations_exclude_unused_retrieval_candidates(self) -> None:
         run = ChatAgentRun(

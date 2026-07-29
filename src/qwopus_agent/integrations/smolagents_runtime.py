@@ -17,14 +17,17 @@ from qwopus_agent.integrations import (
     smolagents_knowledge,
     smolagents_model,
 )
-from qwopus_agent.integrations.skill_tools import build_promoted_workflow_tools
+from qwopus_agent.integrations.skill_tools import (
+    build_promoted_workflow_tools,
+    build_registered_skill_tools,
+)
 from qwopus_agent.memory import DEFAULT_CONVERSATION_KNOWLEDGE_ROOT
 from qwopus_agent.prompts import smolagents as smolagents_prompts
 from qwopus_agent.reports import contract as report_contract
 from qwopus_agent.reports import grounded
 from qwopus_agent.services.answer_quality import AnswerQualityEvaluator
 from qwopus_agent.services.orchestration_models import AnswerContract
-from qwopus_agent.skills import WorkflowSpec
+from qwopus_agent.skills import SkillRegistry, WorkflowSpec
 from qwopus_agent.utils.token_budget import (
     TokenBudgetManager,
     truncate_to_tokens,
@@ -40,6 +43,7 @@ format_agent_chat_prompt = smolagents_prompts.format_agent_chat_prompt
 format_chat_prompt = smolagents_prompts.format_chat_prompt
 LocalKnowledgeTools = smolagents_knowledge.LocalKnowledgeTools
 build_local_knowledge_tools = smolagents_knowledge.build_local_knowledge_tools
+build_browser_open_tool = smolagents_knowledge.build_browser_open_tool
 build_tavily_search_tool = smolagents_knowledge.build_tavily_search_tool
 
 _agent_debug_steps = smolagents_debug.agent_debug_steps
@@ -255,6 +259,7 @@ def run_agent_chat_turn(
     history: list[ChatMessage],
     settings: SmolagentsModelSettings | None = None,
     enable_web_search: bool = False,
+    enable_browser: bool = False,
     enable_local_knowledge: bool = False,
     include_global_knowledge: bool = False,
     min_source_relevance: float = 0.55,
@@ -273,6 +278,7 @@ def run_agent_chat_turn(
         history=history,
         settings=settings,
         enable_web_search=enable_web_search,
+        enable_browser=enable_browser,
         enable_local_knowledge=enable_local_knowledge,
         include_global_knowledge=include_global_knowledge,
         min_source_relevance=min_source_relevance,
@@ -292,6 +298,7 @@ def run_agent_chat_turn_with_debug(
     history: list[ChatMessage],
     settings: SmolagentsModelSettings | None = None,
     enable_web_search: bool = False,
+    enable_browser: bool = False,
     enable_local_knowledge: bool = False,
     include_global_knowledge: bool = False,
     min_source_relevance: float = 0.55,
@@ -310,11 +317,25 @@ def run_agent_chat_turn_with_debug(
         context_window=effective_settings.context_window_tokens,
         output_reserve=effective_settings.max_tokens,
     )
-    tools: list[Any] = []
+    # 原因：普通独立 Skill 已由 Registry 扫描，不应再要求维护一份 smolagents 工具清单。
+    # 作用：默认只自动装配无敏感权限的 Skill；Web、Knowledge、Browser 仍由本轮授权控制。
+    tools: list[Any] = build_registered_skill_tools(
+        SkillRegistry.discover(),
+        enabled_permissions={"always"},
+        max_output_tokens=budget.observation_budget,
+        progress_callback=progress_callback,
+    )
     if include_global_knowledge and not enable_local_knowledge:
         raise ValueError("Global knowledge requires local knowledge permission.")
     if enable_web_search:
         tools.append(build_tavily_search_tool(progress_callback=progress_callback))
+    if enable_browser:
+        tools.append(
+            build_browser_open_tool(
+                progress_callback=progress_callback,
+                max_output_tokens=budget.observation_budget,
+            )
+        )
     knowledge_tools: list[Any] = []
     private_sources: tuple[str, ...] | None = None
     knowledge_primary_scope: Literal["private", "global", "none"] = "none"
@@ -396,6 +417,7 @@ def run_agent_chat_turn_with_debug(
         history=history,
         user_message=user_message,
         enable_web_search=enable_web_search,
+        enable_browser=enable_browser,
         enable_local_knowledge=enable_local_knowledge,
         include_global_knowledge=include_global_knowledge,
         knowledge_primary_scope=knowledge_primary_scope,
@@ -407,10 +429,11 @@ def run_agent_chat_turn_with_debug(
     if progress_callback is not None:
         progress_callback("planning")
     # 原因：部分模型会忽略提示并重复调用已经成功的检索 Tool，直到耗尽较大的步数上限。
-    # 作用：单类检索只允许一次调用加一次收尾；两类检索最多各调用一次再收尾。
+    # 作用：每类获准能力最多预留一次调用，再留一步生成最终答案。
+    capability_count = sum((enable_web_search, enable_browser, enable_local_knowledge))
     max_steps = (
         2
-        + int(enable_web_search and enable_local_knowledge)
+        + max(0, capability_count - 1)
         + int(
             include_global_knowledge
             and knowledge_primary_scope == "private"

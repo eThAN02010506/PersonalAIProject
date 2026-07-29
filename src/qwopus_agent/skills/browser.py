@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Protocol
+from typing import ClassVar, Protocol
 
 from qwopus_agent.skills.base import BaseSkill, SkillRequest, SkillResponse
 
@@ -34,6 +34,10 @@ class UnconfiguredBrowserProvider:
 @dataclass
 class BrowserAutomationSkill(BaseSkill):
     """Expose browser automation through one Skill."""
+
+    # 原因：浏览器可访问外部站点并执行交互，必须独立于普通 Skill 的默认权限。
+    # 作用：后续接入真实 provider 时仍需本轮显式开启 browser 权限。
+    agent_tool_permission: ClassVar[str | None] = "browser"
 
     name: str = "browser"
 
@@ -67,4 +71,8 @@ class BrowserAutomationSkill(BaseSkill):
 
 def create_skill() -> BaseSkill:
     """Factory used by SkillRegistry for zero-manual registration."""
-    return BrowserAutomationSkill()
+    # 原因：默认工厂若继续返回占位 Provider，Registry 虽能发现但永远无法真实执行。
+    # 作用：延迟创建 Playwright Provider；只有调用 browser Skill 时才要求可选依赖。
+    from qwopus_agent.integrations.playwright_browser import PlaywrightBrowserProvider
+
+    return BrowserAutomationSkill(provider=PlaywrightBrowserProvider())

@@ -50,6 +50,9 @@ class ChatStartRequest(BaseModel):
 
     content: str = Field(min_length=1)
     enable_web_search: bool = False
+    # 原因：浏览器可渲染动态站点，权限范围大于 Tavily 搜索，必须由用户单独开启。
+    # 作用：HTTP 请求把 Browser 授权固定在当前聊天轮次，不形成全局状态。
+    enable_browser: bool = False
     enable_local_knowledge: bool = False
     # 原因：全局知识可能包含其他聊天上传的内容，不能跟随 Knowledge 默认自动授权。
     # 作用：只有用户在当前请求显式开启时，Agent 才会收到全局检索 Tool。

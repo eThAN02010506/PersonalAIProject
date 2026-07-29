@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import ClassVar
 
 from qwopus_agent.documents import parse_document
 from qwopus_agent.skills.base import BaseSkill, SkillRequest, SkillResponse
@@ -17,6 +18,10 @@ SUPPORTED_EXTENSIONS = {
 @dataclass
 class DocumentParserSkill(BaseSkill):
     """Convert supported documents into Markdown before indexing."""
+
+    # 原因：模型自行提供任意 file_path 会扩大本地文件读取范围。
+    # 作用：文档服务继续只把用户已上传或显式选择的文件交给该 Skill。
+    agent_tool_permission: ClassVar[str | None] = "documents"
 
     # Reason: All document types should enter memory through one normalized Markdown pipeline.
     name: str = "document_parser"

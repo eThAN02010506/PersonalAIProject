@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Protocol
+from typing import ClassVar, Protocol
 
 from qwopus_agent.skills.base import BaseSkill, SkillRequest, SkillResponse
 
@@ -27,6 +27,11 @@ class UnconfiguredWebSearchProvider:
 @dataclass
 class WebSearchSkill(BaseSkill):
     """Provide one search(query) capability for the Planner."""
+
+    # 原因：联网能力会产生外部请求，不能因为模块被自动发现就绕过用户的 Web 开关。
+    # 作用：Registry 仍负责发现，运行时只在本轮拥有 web 权限时把它暴露给 Agent。
+    agent_tool_permission: ClassVar[str | None] = "web"
+    agent_tool_name: ClassVar[str | None] = "tavily_search"
 
     # Reason: Planner should choose web search without caring about the provider.
     name: str = "web_search"

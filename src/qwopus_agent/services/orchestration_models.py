@@ -146,6 +146,9 @@ class OrchestrationRequest(BaseModel):
     history: tuple[ConversationTurn, ...] = ()
     uploaded_files: tuple[OrchestrationFile, ...] = ()
     enable_web_search: bool = False
+    # 原因：真实浏览器比搜索 API 拥有更大的网络访问面，不能跟随 Web 开关隐式授权。
+    # 作用：每轮请求单独决定是否向 Agent 暴露受控 browser_open Tool。
+    enable_browser: bool = False
     enable_local_knowledge: bool = False
     include_global_knowledge: bool = False
     # 原因：不同问题对召回率和精度的要求不同，不能使用全局可变阈值。

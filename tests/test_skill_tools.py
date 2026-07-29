@@ -6,8 +6,10 @@ from dataclasses import dataclass
 
 from qwopus_agent.integrations.skill_tools import (
     build_promoted_workflow_tools,
+    build_registered_skill_tools,
     build_skill_tool,
 )
+from qwopus_agent.skills import SkillRegistry
 from qwopus_agent.skills.base import BaseSkill, SkillRequest, SkillResponse
 from qwopus_agent.skills.workflow import WorkflowSpec
 
@@ -60,6 +62,18 @@ class SkillToolAdapterTests(unittest.TestCase):
         result = tool.forward("中文内容很长", 2)
 
         self.assertIn("truncated", result)
+
+    def test_registry_automatically_builds_default_agent_tools(self) -> None:
+        registry = SkillRegistry()
+        registry.register(EchoSkill())
+        fake_module = types.SimpleNamespace(Tool=FakeTool)
+        with unittest.mock.patch.dict(sys.modules, {"smolagents": fake_module}):
+            tools = build_registered_skill_tools(registry)
+
+        # 原因：仅测试目录发现不能证明新增 Skill 真正进入 smolagents。
+        # 作用：锁定 Registry → Tool 的零中央注册链路和实际调用结果。
+        self.assertEqual([tool.name for tool in tools], ["echo"])
+        self.assertEqual(tools[0].forward("hello"), "hello:None")
 
     def test_promoted_workflow_uses_only_authorized_runtime_tools(self) -> None:
         class RuntimeSearchTool:

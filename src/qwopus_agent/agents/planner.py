@@ -282,6 +282,7 @@ class AgentPlanningRequest:
     objective: str
     has_documents: bool = False
     enable_web_search: bool = False
+    enable_browser: bool = False
     enable_local_knowledge: bool = False
     generate_report: bool = False
 
@@ -313,6 +314,13 @@ class Planner:
                 DelegatedTask("research", request.objective, "research_agent")
             )
             evidence_ids.append("research")
+        if request.enable_browser:
+            # 原因：浏览器渲染和 Tavily 搜索是不同能力，Planner 不应把两者混为一个 Agent。
+            # 作用：用户单独授权后创建 browser_agent，Executor 仍只执行确定的 DAG。
+            tasks.append(
+                DelegatedTask("browser", request.objective, "browser_agent")
+            )
+            evidence_ids.append("browser")
         if request.enable_local_knowledge:
             # 原因：上传文档必须先完成入库，当前请求的知识 Agent 才能检索到它。
             # 作用：仅在同次请求含上传文件时增加依赖，历史知识检索仍可并行执行。
@@ -334,6 +342,7 @@ class Planner:
             (
                 request.has_documents,
                 request.enable_web_search,
+                request.enable_browser,
                 request.enable_local_knowledge,
             )
         )
@@ -344,12 +353,25 @@ class Planner:
         )
         terminal_task_id = evidence_ids[-1]
         if route == "multi_agent":
+            synthesis_dependencies = list(evidence_ids)
+            if len(evidence_ids) > 1:
+                # 原因：多个独立来源可能互相矛盾，直接综合会让最终答案静默选择一方。
+                # 作用：先由无工具 reviewer 标出一致点、冲突和证据缺口，再交给 synthesis。
+                tasks.append(
+                    DelegatedTask(
+                        "review",
+                        request.objective,
+                        "review_agent",
+                        tuple(evidence_ids),
+                    )
+                )
+                synthesis_dependencies.append("review")
             tasks.append(
                 DelegatedTask(
                     "synthesis",
                     request.objective,
                     "synthesis_agent",
-                    tuple(evidence_ids),
+                    tuple(synthesis_dependencies),
                 )
             )
             terminal_task_id = "synthesis"

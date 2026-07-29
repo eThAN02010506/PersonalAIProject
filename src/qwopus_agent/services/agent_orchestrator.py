@@ -117,6 +117,7 @@ class AgentOrchestrator:
                     objective=planning_objective,
                     has_documents=bool(request.uploaded_files),
                     enable_web_search=request.enable_web_search,
+                    enable_browser=request.enable_browser,
                     enable_local_knowledge=request.enable_local_knowledge,
                     generate_report=request.generate_report,
                 )
@@ -197,6 +198,7 @@ class AgentOrchestrator:
                         (
                             bool(request.uploaded_files),
                             request.enable_web_search,
+                            request.enable_browser,
                             request.enable_local_knowledge,
                         )
                     )
@@ -229,6 +231,7 @@ class AgentOrchestrator:
             context: dict[str, Any],
             *,
             web: bool = False,
+            browser: bool = False,
             local: bool = False,
         ) -> _CapabilityResult:
             delegated_request = request.model_copy(update={"objective": question})
@@ -241,6 +244,7 @@ class AgentOrchestrator:
                     trace,
                     progress_callback,
                     web=web,
+                    browser=browser,
                     local=local,
                 ),
             )
@@ -260,6 +264,12 @@ class AgentOrchestrator:
                     "research_agent", question, context, web=True
                 )
             )
+        if request.enable_browser:
+            agents["browser_agent"] = _FunctionAgent(
+                lambda question, context: chat_handler(
+                    "browser_agent", question, context, browser=True
+                )
+            )
         if request.enable_local_knowledge:
             agents["knowledge_agent"] = _FunctionAgent(
                 lambda question, context: chat_handler(
@@ -270,6 +280,11 @@ class AgentOrchestrator:
             agents["chat_agent"] = _FunctionAgent(
                 lambda question, context: chat_handler("chat_agent", question, context)
             )
+        agents["review_agent"] = _FunctionAgent(
+            lambda question, context: self._review_capability(
+                request, question, context, trace, progress_callback
+            )
+        )
         agents["synthesis_agent"] = _FunctionAgent(
             lambda question, context: self._synthesis_capability(
                 request, question, context, trace, progress_callback
@@ -291,6 +306,7 @@ class AgentOrchestrator:
         progress_callback: ProgressCallback | None,
         *,
         web: bool,
+        browser: bool,
         local: bool,
     ) -> _CapabilityResult:
         started = time.monotonic()
@@ -303,6 +319,7 @@ class AgentOrchestrator:
                 history=history,
                 settings=self.settings,
                 enable_web_search=web,
+                enable_browser=browser,
                 enable_local_knowledge=local,
                 include_global_knowledge=(
                     request.include_global_knowledge if local else False
@@ -372,7 +389,7 @@ class AgentOrchestrator:
         return _CapabilityResult(
             content=run.answer,
             success=run.success,
-            confidence=(0.72 if web or local else 0.65) if run.success else 0.0,
+            confidence=(0.72 if web or browser or local else 0.65) if run.success else 0.0,
             citations=citations,
             error=run.error,
             debug_runs=run.debug_runs,
@@ -473,6 +490,71 @@ class AgentOrchestrator:
             debug_runs=tuple(getattr(outcome, "debug_runs", ())),
         )
 
+    async def _review_capability(
+        self,
+        request: OrchestrationRequest,
+        question: str,
+        context: dict[str, Any],
+        trace: list[ProcessEvent],
+        progress_callback: ProgressCallback | None,
+    ) -> _CapabilityResult:
+        """Review independent evidence without reopening any Tool."""
+        dependency_results = context.get("multi_agent", {}).get("dependency_results", {})
+        budget = TokenBudgetManager(
+            context_window=self.settings.context_window_tokens,
+            output_reserve=min(self.settings.max_tokens, 1200),
+        )
+        evidence = truncate_to_tokens(
+            "\n\n".join(
+                f"[{task_id}]\n{content}"
+                for task_id, content in dependency_results.items()
+            ),
+            budget.synthesis_budget,
+        )
+        review_request = request.model_copy(
+            update={
+                "objective": (
+                    f"Original request: {question}\n\n"
+                    f"Independent evidence:\n{evidence}\n\n"
+                    "Audit this evidence for the final answering agent. Identify agreements, "
+                    "factual conflicts, unsupported claims, and the safest resolution. Do not "
+                    "call tools and do not answer the user directly."
+                ),
+                "resolved_intent": None,
+                "history": (),
+                "enable_web_search": False,
+                "enable_browser": False,
+                "enable_local_knowledge": False,
+                "include_global_knowledge": False,
+            }
+        )
+        # 原因：让原 Evidence Agent 再“辩论”会重复访问文件、网络或知识库。
+        # 作用：只用已完成结果执行一次无工具审阅，延迟有界且证据快照保持一致。
+        reviewed = await self._chat_capability(
+            "review_agent",
+            review_request,
+            trace,
+            progress_callback,
+            web=False,
+            browser=False,
+            local=False,
+        )
+        trace.append(
+            ProcessEvent(
+                phase="reflection",
+                status="completed" if reviewed.success else "failed",
+                agent="review_agent",
+                message="Independent evidence review completed." if reviewed.success else "",
+            )
+        )
+        return _CapabilityResult(
+            content=reviewed.content,
+            success=reviewed.success,
+            confidence=0.85 if reviewed.success else 0.0,
+            error=reviewed.error,
+            debug_runs=reviewed.debug_runs,
+        )
+
     async def _synthesis_capability(
         self,
         request: OrchestrationRequest,
@@ -503,6 +585,7 @@ class AgentOrchestrator:
                 ),
                 "history": (),
                 "enable_web_search": False,
+                "enable_browser": False,
                 "enable_local_knowledge": False,
                 "include_global_knowledge": False,
             }
@@ -514,6 +597,7 @@ class AgentOrchestrator:
                 trace,
                 progress_callback,
                 web=False,
+                browser=False,
                 local=False,
             )
             return _CapabilityResult(

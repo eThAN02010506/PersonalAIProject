@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import ClassVar
 
 from qwopus_agent.analysis import analyze_uploaded_file
 from qwopus_agent.skills.base import BaseSkill, SkillRequest, SkillResponse
@@ -12,6 +13,10 @@ from qwopus_agent.skills.base import BaseSkill, SkillRequest, SkillResponse
 @dataclass
 class ExcelAnalysisSkill(BaseSkill):
     """Analyze Excel files through local code execution, not raw LLM ingestion."""
+
+    # 原因：分析 Skill 同样依赖经上传边界批准的文件路径和本地代码沙箱。
+    # 作用：阻止普通聊天通过自动 Tool 装配读取未选择的本地文件。
+    agent_tool_permission: ClassVar[str | None] = "documents"
 
     # Reason: Planner needs a distinct skill for analysis after schema inspection.
     name: str = "excel_analysis"

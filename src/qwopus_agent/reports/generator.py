@@ -3,11 +3,30 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
+from xml.sax.saxutils import escape
 
 import pandas as pd
+from reportlab.lib.enums import TA_CENTER
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.styles import ParagraphStyle
+from reportlab.lib.units import mm
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.cidfonts import UnicodeCIDFont
+from reportlab.pdfbase.ttfonts import TTFont
+from reportlab.platypus import Flowable, Paragraph, SimpleDocTemplate, Spacer
 
 from qwopus_agent.reports.charts import ChartRenderer
+
+_REPORT_FONT_NAME = "QwopusReportUnicode"
+_REPORT_FONT_CANDIDATES = (
+    Path("/System/Library/Fonts/Supplemental/Arial Unicode.ttf"),
+    Path("/Library/Fonts/Arial Unicode.ttf"),
+    Path("/System/Library/Fonts/Hiragino Sans GB.ttc"),
+    Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"),
+    Path("/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc"),
+)
 
 
 @dataclass(frozen=True)
@@ -109,46 +128,65 @@ def _excel_sheet_name(name: str, fallback: str) -> str:
 
 
 def _write_simple_pdf(path: Path, title: str, body: str) -> Path:
-    """Write a minimal PDF without introducing a new runtime dependency."""
-    content = _escape_pdf_text(f"{title}\n\n{body}"[:3500])
-    stream = f"BT /F1 12 Tf 72 760 Td 14 TL ({content}) Tj ET"
-    objects = [
-        "1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj",
-        "2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj",
-        (
-            "3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
-            "/Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >> endobj"
-        ),
-        "4 0 obj << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> endobj",
-        (
-            "5 0 obj << /Length "
-            f"{len(stream.encode('latin-1', errors='replace'))} >> stream\n"
-            f"{stream}\nendstream endobj"
-        ),
-    ]
-    offsets: list[int] = []
-    pdf = "%PDF-1.4\n"
-    for obj in objects:
-        offsets.append(len(pdf.encode("latin-1", errors="replace")))
-        pdf += obj + "\n"
-    xref_start = len(pdf.encode("latin-1", errors="replace"))
-    pdf += f"xref\n0 {len(objects) + 1}\n0000000000 65535 f \n"
-    for offset in offsets:
-        pdf += f"{offset:010d} 00000 n \n"
-    pdf += (
-        f"trailer << /Size {len(objects) + 1} /Root 1 0 R >>\n"
-        f"startxref\n{xref_start}\n%%EOF\n"
+    """Write the complete report as a paginated Unicode PDF."""
+    font_name = _register_report_font()
+    document = SimpleDocTemplate(
+        str(path),
+        pagesize=A4,
+        rightMargin=18 * mm,
+        leftMargin=18 * mm,
+        topMargin=18 * mm,
+        bottomMargin=18 * mm,
+        title=title.strip() or "Qwopus Report",
     )
-    path.write_bytes(pdf.encode("latin-1", errors="replace"))
+    title_style = ParagraphStyle(
+        "QwopusReportTitle",
+        fontName=font_name,
+        fontSize=18,
+        leading=24,
+        alignment=TA_CENTER,
+        spaceAfter=10 * mm,
+        wordWrap="CJK",
+    )
+    body_style = ParagraphStyle(
+        "QwopusReportBody",
+        fontName=font_name,
+        fontSize=10.5,
+        leading=16,
+        spaceAfter=2.5 * mm,
+        wordWrap="CJK",
+        splitLongWords=True,
+    )
+    story: list[Flowable] = [
+        Paragraph(escape(title.strip() or "Qwopus Report"), title_style)
+    ]
+    for line in body.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            story.append(Spacer(1, 2.5 * mm))
+            continue
+        # 原因：报告正文来自 Markdown，直接交给 Paragraph 会把尖括号误解为 XML 标签。
+        # 作用：转义用户内容并保留换行，让 Platypus 自动分页而不再截断正文。
+        story.append(Paragraph(escape(stripped), body_style))
+    if not body.strip():
+        story.append(Paragraph("<i>No report content.</i>", body_style))
+
+    document.build(story)
     return path
 
 
-def _escape_pdf_text(text: str) -> str:
-    """Escape text for a simple PDF text operator."""
-    ascii_text = text.encode("latin-1", errors="replace").decode("latin-1")
-    return (
-        ascii_text.replace("\\", "\\\\")
-        .replace("(", "\\(")
-        .replace(")", "\\)")
-        .replace("\n", "\\n")
-    )
+@lru_cache(maxsize=1)
+def _register_report_font() -> str:
+    """Register one broad Unicode font and return its ReportLab name."""
+    for font_path in _REPORT_FONT_CANDIDATES:
+        if font_path.is_file():
+            # 原因：Helvetica 只支持单字节字符，中文、日文等内容会被替换成问号。
+            # 作用：嵌入本机 Unicode TrueType 字体，使 PDF 可显示且可搜索原始文本。
+            pdfmetrics.registerFont(TTFont(_REPORT_FONT_NAME, str(font_path)))
+            return _REPORT_FONT_NAME
+
+    # 原因：并非所有 Linux 部署都预装 Noto/Arial Unicode 字体。
+    # 作用：使用 ReportLab 内置的简体中文 CID 字体保底，避免重新退回 latin-1。
+    fallback_name = "STSong-Light"
+    pdfmetrics.registerFont(UnicodeCIDFont(fallback_name))
+    return fallback_name

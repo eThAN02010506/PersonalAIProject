@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -61,6 +61,10 @@ class WorkflowSpec(BaseModel):
 
 class WorkflowSkill(BaseSkill):
     """Execute a validated WorkflowSpec through the normal Skill Registry."""
+
+    # 原因：Workflow 的权限取决于其底层步骤，不能按普通自动 Skill 直接暴露。
+    # 作用：继续由 promoted workflow 装配器检查本轮授权后再生成 Tool。
+    agent_tool_permission: ClassVar[str | None] = None
 
     def __init__(self, spec: WorkflowSpec, registry: SkillRegistry) -> None:
         if not spec.checksum_is_valid():

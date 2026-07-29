@@ -126,6 +126,7 @@ def format_agent_chat_prompt(
     history: list[ChatMessage],
     user_message: str,
     enable_web_search: bool,
+    enable_browser: bool = False,
     enable_local_knowledge: bool = False,
     include_global_knowledge: bool = False,
     knowledge_primary_scope: Literal["private", "global", "none"] | None = None,
@@ -168,6 +169,14 @@ def format_agent_chat_prompt(
         )
     else:
         lines.append("Internet search is disabled; do not claim that you searched the web.")
+    if enable_browser:
+        lines.append(
+            "Use browser_open only for a specific public HTTP(S) page or when JavaScript "
+            "rendering is necessary. Read its rendered text once, then produce final_answer; "
+            "do not retry blocked private/local URLs."
+        )
+    else:
+        lines.append("Browser automation is disabled; do not claim that you opened a page.")
 
     _append_knowledge_instructions(
         lines,

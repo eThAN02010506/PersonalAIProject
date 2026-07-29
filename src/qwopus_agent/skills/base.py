@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any
+from collections.abc import Mapping
+from typing import Any, ClassVar
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -32,6 +33,17 @@ class SkillResponse(BaseModel):
 
 class BaseSkill(ABC):
     """Abstract base class for every independently reusable Agent capability."""
+
+    # 原因：新增普通 Skill 应由 Registry 自动暴露给 Agent，不应再修改中央工具清单。
+    # 作用：默认 query-only Tool 可零注册接入；敏感 Skill 通过覆盖 permission 保持显式授权。
+    agent_tool_permission: ClassVar[str | None] = "always"
+    agent_tool_inputs: ClassVar[Mapping[str, dict[str, Any]]] = {
+        "query": {
+            "type": "string",
+            "description": "The current user objective for this skill.",
+        }
+    }
+    agent_tool_name: ClassVar[str | None] = None
 
     # Reason: The registry needs a stable unique key for dynamic lookup.
     name: str

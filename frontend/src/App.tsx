@@ -4,6 +4,7 @@ import {
   Layers3,
   Menu,
   MessageCircle,
+  Monitor,
   Network,
   Search,
   ScanText,
@@ -60,6 +61,7 @@ export default function App() {
   const [mode, setMode] = useState<ViewMode>("chat");
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [webSearch, setWebSearch] = useState(false);
+  const [browserAccess, setBrowserAccess] = useState(false);
   const [localKnowledge, setLocalKnowledge] = useState(false);
   const [globalKnowledge, setGlobalKnowledge] = useState(false);
   const [minSourceRelevance, setMinSourceRelevance] = useState(0.55);
@@ -177,6 +179,7 @@ export default function App() {
         // 作用：联网、MiniRAG、图谱和 Multi-Agent 开关由后端规划器决定并留下同一份运行轨迹。
         const started = await api.startRun(conversationId, content, {
           enableWebSearch: webSearch,
+          enableBrowser: browserAccess,
           enableLocalKnowledge: localKnowledge,
           includeGlobalKnowledge: globalKnowledge,
           minSourceRelevance,
@@ -204,6 +207,7 @@ export default function App() {
     },
     [
       activeId,
+      browserAccess,
       globalKnowledge,
       isRunning,
       interpretationMode,
@@ -303,6 +307,14 @@ export default function App() {
               <label title="Allow Tavily web search">
                 <input type="checkbox" checked={webSearch} onChange={(event) => setWebSearch(event.target.checked)} />
                 <Search size={15} /> Web
+              </label>
+              <label title="Allow isolated browser rendering for public pages">
+                <input
+                  type="checkbox"
+                  checked={browserAccess}
+                  onChange={(event) => setBrowserAccess(event.target.checked)}
+                />
+                <Monitor size={15} /> Browser
               </label>
               <label title="Allow MiniRAG and knowledge graph search">
                 <input

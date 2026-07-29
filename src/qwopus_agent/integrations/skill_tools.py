@@ -14,10 +14,44 @@ from qwopus_agent.utils.token_budget import estimate_tokens, truncate_to_tokens
 
 SkillRequestFactory = Callable[[Mapping[str, Any]], SkillRequest]
 _RUNTIME_SKILL_ALIASES = {
+    "browser_open": "browser",
     "tavily_search": "web_search",
     "rag_search": "rag_search",
     "graph_search": "graph_search",
 }
+
+
+def build_registered_skill_tools(
+    registry: SkillRegistry,
+    *,
+    enabled_permissions: set[str] | None = None,
+    existing_tool_names: set[str] | None = None,
+    max_output_tokens: int | None = None,
+    progress_callback: Callable[[str], None] | None = None,
+) -> list[Any]:
+    """Adapt every Registry Skill authorized for the current Agent run."""
+    permissions = enabled_permissions or {"always"}
+    occupied_names = set(existing_tool_names or ())
+    tools: list[Any] = []
+    for skill_name in registry.list_names():
+        skill = registry.get(skill_name)
+        permission = skill.agent_tool_permission
+        tool_name = skill.agent_tool_name or skill.name
+        if permission not in permissions or tool_name in occupied_names:
+            continue
+        # 原因：Registry 自动发现若停在目录清单，新 Skill 仍需手工写 smolagents 装配代码。
+        # 作用：统一把获准 Skill 转为 Tool；新增 query-only Skill 无需修改任何中央列表。
+        tools.append(
+            build_skill_tool(
+                skill,
+                inputs=skill.agent_tool_inputs,
+                tool_name=tool_name,
+                max_output_tokens=max_output_tokens,
+                progress_callback=progress_callback,
+            )
+        )
+        occupied_names.add(tool_name)
+    return tools
 
 
 def build_skill_tool(
