@@ -81,12 +81,12 @@ class DocumentAnalysisTests(unittest.TestCase):
             self.assertEqual(parsed.metadata["parser"], "mineru")
 
     def test_mineru_command_prefers_vendor_source(self) -> None:
-        with patch.object(mineru, "VENDOR_MINERU_DIR", Path("vendor/MinerU")):
+        with patch.object(mineru, "VENDOR_MINERU_DIR", Path("vendor/mineru")):
             command = mineru._build_mineru_command()
 
         self.assertIn("-m", command.args)
         self.assertIn("mineru.cli.client", command.args)
-        self.assertIn("vendor/MinerU", command.env["PYTHONPATH"])
+        self.assertIn("vendor/mineru", command.env["PYTHONPATH"])
 
     def test_mineru_uses_pipeline_ocr_for_images(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

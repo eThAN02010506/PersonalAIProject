@@ -7,7 +7,7 @@
 - Local-first: the first concrete model adapter targets `mlx_lm.server` through its OpenAI-compatible API.
 - Incremental: each capability is independently testable and composed at CLI/UI boundaries.
 
-## First-Stage Modules
+## Runtime Modules
 
 ### LLM
 
@@ -52,31 +52,38 @@ multi-hop paths and cross-document evidence without manual registration.
 
 `SkillGrowthService` observes complete successful Agent runs. Repeated traces are converted into
 declarative `WorkflowSpec` files, stripped of paths and credentials, integrity checked, assigned a
-semantic version in `SkillCatalog`, and loaded into `SkillRegistry`. It never deploys model-generated
-arbitrary Python.
+semantic version in `SkillCatalog`, and loaded into `SkillRegistry`.
+
+`SkillAuthoringService` lets an approved Debug Console user ask the current `BaseLLM` to compose a
+candidate from explicitly allowed existing Skills. Pydantic rejects unknown fields, unapproved
+capabilities, persistent arguments, and malformed output. The candidate remains outside the runtime
+Registry until manual promotion; review exposes its exact spec, checksum checks, version diff, and a
+side-effect-free dry run. Model-generated arbitrary Python is not accepted or deployed.
 
 ### Reports
 
 `ReportGenerator` is the unified report module. It writes Markdown, Excel, real PNG/SVG charts, and a
 PDF artifact from one request.
 
+### Prompts
+
+`qwopus_agent.prompts` owns model-facing task construction, response-depth rules, language policy,
+and evidence requirements. smolagents integration code consumes these policies but does not own
+them.
+
 ### Reflection
 
 `TaskReflectionEvaluator` provides structured quality observations and retry suggestions without
 requiring another LLM call.
 
-### Remaining Provider Work
+## Current Boundaries
 
-- inject a production browser-automation provider into the existing Browser Skill contract
-
-## Suggested Milestone Order
-
-1. Stabilize `BaseLLM` and local MLX adapter.
-2. Add agent loop observability and structured plan outputs.
-3. Add a first real tool, such as a Python execution tool or file read tool.
-4. Add memory interfaces and a local persistence backend.
-5. Add reflection hooks.
-6. Add skill loading and reuse.
-7. Build the research agent on top of the stable primitives.
-8. Add production web-search provider wiring.
-9. Add report download integration in the UI.
+- Browser automation has a tested Skill and provider contract, but no production browser provider
+  is wired into the application.
+- The FastAPI and React application is designed for one trusted local operator. Authentication,
+  authorization, and multi-user tenancy are outside the current runtime.
+- The MiniRAG adapter uses upstream persistent vector storage inside Qwopus-owned chunking,
+  conversation scoping, graph extraction, and evidence rendering. It does not expose the complete
+  upstream `MiniRAG.query` pipeline.
+- Model-authored Skills remain declarative workflows and require manual promotion. Arbitrary
+  generated Python is not accepted as deployable Skill code.

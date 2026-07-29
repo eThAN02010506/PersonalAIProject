@@ -1,4 +1,4 @@
-"""Prompt and evidence-policy helpers for smolagents chat runs."""
+"""Prompt construction and evidence policies for smolagents chat runs."""
 
 from __future__ import annotations
 

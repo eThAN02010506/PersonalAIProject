@@ -13,11 +13,32 @@ from qwopus_agent.api.repository import ConversationRepository
 from qwopus_agent.api.routes.analysis import analysis_view
 from qwopus_agent.documents import DocumentStore, build_document_structure, chunk_document_structure
 from qwopus_agent.integrations.smolagents_runtime import AgentDebugRun, SmolagentsModelSettings
-from qwopus_agent.llm import ModelCapabilities
+from qwopus_agent.llm import BaseLLM, ChatMessage, LLMResponse, ModelCapabilities
 from qwopus_agent.memory import ConversationKnowledgeManager
 from qwopus_agent.services.orchestration_models import OrchestrationResult
 from qwopus_agent.services.skill_growth_service import SkillRunTrace, SkillTraceStep
 from qwopus_agent.utils.debug_store import load_debug_records
+
+
+class ApiStaticLLM(BaseLLM):
+    """Deterministic authoring model that never reaches the configured server."""
+
+    def generate(
+        self,
+        messages: list[ChatMessage],
+        *,
+        temperature: float = 0.2,
+        max_tokens: int | None = None,
+    ) -> LLMResponse:
+        return LLMResponse(
+            content=(
+                '{"name":"debug_report","description":"Inspect then summarize.",'
+                '"intent_examples":["prepare a report"],'
+                '"steps":[{"skill_name":"excel_schema",'
+                '"query_template":"Inspect {query}","arguments":{}}]}'
+            ),
+            model="api-authoring-model",
+        )
 
 
 class ApiTests(unittest.TestCase):
@@ -168,6 +189,8 @@ class ApiTests(unittest.TestCase):
         self.assertIn("/api/reports/{filename}", schema["paths"])
         self.assertIn("/api/debug", schema["paths"])
         self.assertIn("/api/skills", schema["paths"])
+        self.assertIn("/api/debug/skills/generate", schema["paths"])
+        self.assertIn("/api/debug/skills/{name}/{version}/test", schema["paths"])
 
     def test_skill_api_promotes_and_rolls_back_reviewed_versions(self) -> None:
         growth = self.client.app.state.skill_growth
@@ -219,6 +242,63 @@ class ApiTests(unittest.TestCase):
                 "learned_web_search"
             ).version,
             "0.1.0",
+        )
+
+    def test_debug_console_generates_reviews_and_tests_workflow_candidate(self) -> None:
+        authoring = self.client.app.state.skill_authoring
+        authoring.llm_factory = lambda: ApiStaticLLM()
+
+        capabilities = self.client.get("/api/debug/skills/capabilities")
+        generated = self.client.post(
+            "/api/debug/skills/generate",
+            json={
+                "goal": "Prepare a spreadsheet report",
+                "requested_name": "spreadsheet_report",
+                "intent_examples": ["analyze this workbook"],
+                "allowed_skills": ["excel_schema"],
+            },
+        )
+
+        self.assertEqual(capabilities.status_code, 200)
+        self.assertIn(
+            "excel_schema",
+            [item["name"] for item in capabilities.json()],
+        )
+        self.assertEqual(generated.status_code, 200)
+        payload = generated.json()
+        self.assertEqual(payload["skill"]["name"], "learned_spreadsheet_report")
+        self.assertEqual(payload["skill"]["status"], "candidate")
+        self.assertEqual(payload["skill"]["source_model"], "api-authoring-model")
+        self.assertIn("+++ learned_spreadsheet_report@0.1.0", payload["diff"])
+        self.assertTrue(all(check["passed"] for check in payload["checks"]))
+        self.assertNotIn(
+            "learned_spreadsheet_report",
+            self.client.app.state.skill_registry.list_names(),
+        )
+
+        detail = self.client.get(
+            "/api/debug/skills/learned_spreadsheet_report/0.1.0"
+        )
+        tested = self.client.post(
+            "/api/debug/skills/learned_spreadsheet_report/0.1.0/test",
+            json={"query": "sales.xlsx"},
+        )
+        promoted = self.client.post(
+            "/api/skills/learned_spreadsheet_report/0.1.0/promote"
+        )
+
+        self.assertEqual(detail.status_code, 200)
+        self.assertIsNone(detail.json()["model_output"])
+        self.assertEqual(tested.status_code, 200)
+        self.assertTrue(tested.json()["success"])
+        self.assertEqual(
+            tested.json()["steps"][0]["query"],
+            "Inspect sales.xlsx",
+        )
+        self.assertEqual(promoted.status_code, 200)
+        self.assertIn(
+            "learned_spreadsheet_report",
+            self.client.app.state.skill_registry.list_names(),
         )
 
     def test_spa_static_files_do_not_serve_parent_files(self) -> None:

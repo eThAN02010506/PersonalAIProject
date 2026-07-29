@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import ipaddress
 import os
 import platform
 import time
@@ -13,6 +12,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
+from qwopus_agent.api.debug_access import debug_lan_enabled, require_debug_client
 from qwopus_agent.api.model_runtime import RuntimeModelController
 from qwopus_agent.api.models import (
     DebugOverviewView,
@@ -22,9 +22,6 @@ from qwopus_agent.api.models import (
 )
 from qwopus_agent.api.runs import ChatRunRegistry
 from qwopus_agent.utils.debug_store import load_debug_record, load_debug_records
-
-_LOCAL_CLIENTS = {"127.0.0.1", "::1", "localhost", "testclient"}
-_LAN_DEBUG_ENV = "QWOPUS_DEBUG_ALLOW_LAN"
 
 
 def build_debug_router(
@@ -36,9 +33,9 @@ def build_debug_router(
     started_at: float,
     allow_lan: bool | None = None,
 ) -> APIRouter:
-    """Build a read-only diagnostics route without exposing mutation endpoints."""
+    """Build read-only diagnostics routes for approved clients."""
     router = APIRouter()
-    lan_enabled = _environment_flag(_LAN_DEBUG_ENV) if allow_lan is None else allow_lan
+    lan_enabled = debug_lan_enabled(allow_lan)
 
     @router.get("/api/debug", response_model=DebugOverviewView)
     async def debug_overview(
@@ -46,7 +43,7 @@ def build_debug_router(
         limit: int = Query(default=50, ge=1, le=200),
         log_lines: int = Query(default=500, ge=0, le=2_000),
     ) -> DebugOverviewView:
-        _require_debug_client(request, allow_lan=lan_enabled)
+        require_debug_client(request, allow_lan=lan_enabled)
         records = await asyncio.to_thread(
             load_debug_records,
             limit=limit,
@@ -90,7 +87,7 @@ def build_debug_router(
 
     @router.get("/api/debug/records/{record_id}", response_model=dict[str, object])
     async def debug_record(request: Request, record_id: str) -> dict[str, object]:
-        _require_debug_client(request, allow_lan=lan_enabled)
+        require_debug_client(request, allow_lan=lan_enabled)
         record = await asyncio.to_thread(
             load_debug_record,
             record_id,
@@ -101,34 +98,6 @@ def build_debug_router(
         return record
 
     return router
-
-
-def _require_debug_client(request: Request, *, allow_lan: bool) -> None:
-    """Reject raw diagnostic access outside the explicitly approved network scope."""
-    host = request.client.host if request.client is not None else ""
-    if not _debug_host_is_allowed(host, allow_lan=allow_lan):
-        # 原因：记录可能包含完整 Prompt、文档片段和 Tool Observation。
-        # 作用：LAN 必须显式开启，并继续阻止公网来源读取原始诊断。
-        raise HTTPException(
-            status_code=403,
-            detail="Debug diagnostics are not available to this network client.",
-        )
-
-
-def _debug_host_is_allowed(host: str, *, allow_lan: bool) -> bool:
-    """Return whether one direct client address is inside the approved scope."""
-    if host in _LOCAL_CLIENTS:
-        return True
-    try:
-        address = ipaddress.ip_address(host.split("%", 1)[0])
-    except ValueError:
-        return False
-    return allow_lan and (address.is_private or address.is_link_local)
-
-
-def _environment_flag(name: str) -> bool:
-    """Read one explicit boolean environment switch."""
-    return os.getenv(name, "").strip().casefold() in {"1", "true", "yes", "on"}
 
 
 def _directory_size(directory: Path) -> int:

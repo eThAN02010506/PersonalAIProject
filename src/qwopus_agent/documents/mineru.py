@@ -12,7 +12,7 @@ from uuid import uuid4
 
 MINERU_OUTPUT_DIR = Path("storage/cache/mineru")
 MINERU_COMMANDS = ("mineru", "magic-pdf")
-VENDOR_MINERU_DIR = Path("vendor/MinerU")
+VENDOR_MINERU_DIR = Path("vendor/mineru")
 MINERU_BACKEND = "pipeline"
 OCR_IMAGE_EXTENSIONS = {".png", ".jpeg", ".jpg"}
 

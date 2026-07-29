@@ -1,1 +1,1 @@
-"""Prompt assets and prompt builders will live here."""
+"""Prompt construction and evidence policies for Agent runtimes."""

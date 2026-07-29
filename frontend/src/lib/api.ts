@@ -9,6 +9,9 @@ import type {
   LocalFolderTree,
   RunView,
   SavedDocument,
+  SkillCandidateReview,
+  SkillCandidateTest,
+  SkillCapability,
   SkillVersion,
 } from "./types";
 
@@ -73,6 +76,41 @@ export const api = {
   listDocuments: () => request<SavedDocument[]>("/api/documents"),
 
   listSkills: () => request<SkillVersion[]>("/api/skills"),
+
+  listSkillCapabilities: () =>
+    request<SkillCapability[]>("/api/debug/skills/capabilities"),
+
+  generateSkillCandidate: (payload: {
+    goal: string;
+    requestedName?: string;
+    intentExamples: string[];
+    allowedSkills: string[];
+  }) =>
+    request<SkillCandidateReview>("/api/debug/skills/generate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        goal: payload.goal,
+        requested_name: payload.requestedName || null,
+        intent_examples: payload.intentExamples,
+        allowed_skills: payload.allowedSkills,
+      }),
+    }),
+
+  reviewSkillCandidate: (name: string, version: string) =>
+    request<SkillCandidateReview>(
+      `/api/debug/skills/${encodeURIComponent(name)}/${encodeURIComponent(version)}`,
+    ),
+
+  testSkillCandidate: (name: string, version: string, query: string) =>
+    request<SkillCandidateTest>(
+      `/api/debug/skills/${encodeURIComponent(name)}/${encodeURIComponent(version)}/test`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ query }),
+      },
+    ),
 
   promoteSkill: (name: string, version: string) =>
     skillAction(name, version, "promote"),

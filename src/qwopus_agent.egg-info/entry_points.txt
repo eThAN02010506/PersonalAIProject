@@ -1,3 +1,0 @@
-[console_scripts]
-qwopus-agent = qwopus_agent.cli:main
-qwopus-smolagents-smoke = qwopus_agent.integrations.smolagents_smoke:main

@@ -77,9 +77,37 @@ export type SkillVersion = {
   status: "candidate" | "active" | "archived" | "rejected";
   created_at: string;
   source_run_id?: string;
+  source_model?: string;
   intent_examples: string[];
   steps: Array<{ skill_name: string }>;
   spec_valid: boolean;
+};
+
+export type SkillCapability = {
+  name: string;
+  description: string;
+};
+
+export type SkillCandidateReview = {
+  skill: SkillVersion;
+  spec_json: string;
+  diff: string;
+  checks: Array<{
+    name: string;
+    passed: boolean;
+    detail: string;
+  }>;
+  model_output?: string;
+};
+
+export type SkillCandidateTest = {
+  success: boolean;
+  output: string;
+  steps: Array<{
+    skill_name: string;
+    query: string;
+    argument_keys: string[];
+  }>;
 };
 
 export type SourceCoverage = {

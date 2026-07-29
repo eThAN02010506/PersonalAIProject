@@ -255,6 +255,87 @@ class SkillGrowthService:
                 required_status="archived",
             )
 
+    def create_candidate(
+        self,
+        *,
+        name: str,
+        description: str,
+        intent_examples: tuple[str, ...],
+        steps: tuple[WorkflowStep, ...],
+        source_run_id: str,
+        source_model: str | None = None,
+    ) -> SkillManifest:
+        """Persist one explicitly authored workflow as an inactive candidate."""
+        with self._lock:
+            normalized_name = _safe_name(name)
+            if not normalized_name.startswith(self.policy.name_prefix):
+                normalized_name = f"{self.policy.name_prefix}{normalized_name}"
+            if len(normalized_name) > 90:
+                digest = hashlib.sha256(
+                    normalized_name.encode("utf-8")
+                ).hexdigest()[:10]
+                normalized_name = f"{normalized_name[:79]}_{digest}"
+
+            signature_payload = {
+                "name": normalized_name,
+                "description": description,
+                "intent_examples": intent_examples,
+                "steps": [
+                    step.model_dump(mode="json")
+                    for step in steps
+                ],
+            }
+            signature = hashlib.sha256(
+                json.dumps(
+                    signature_payload,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
+            version = self.catalog.next_patch_version(normalized_name)
+            spec = WorkflowSpec(
+                name=normalized_name,
+                version=version,
+                description=description,
+                intent_examples=intent_examples,
+                steps=steps,
+                source_signature=signature,
+            ).sealed()
+            self.validate(spec)
+            spec_path = self._persist_spec(spec)
+            manifest = SkillManifest(
+                name=spec.name,
+                version=spec.version,
+                description=spec.description,
+                module_path="qwopus_agent.skills.workflow:WorkflowSkill",
+                checksum=spec.checksum,
+                status="candidate",
+                spec_path=str(spec_path.resolve()),
+                created_at=datetime.now(UTC).isoformat(),
+                source_run_id=source_run_id,
+                source_signature=signature,
+                source_model=source_model,
+            )
+            # 原因：模型作者只能提出候选，不能通过生成接口改变运行时 Registry。
+            # 作用：Catalog 保留待审核版本，只有现有 promote() 能完成热加载和激活。
+            self.catalog.register(manifest)
+            return manifest
+
+    def manifest_for(self, name: str, version: str) -> SkillManifest:
+        """Resolve one exact persisted version for local review operations."""
+        manifest = next(
+            (
+                item
+                for item in self.catalog.list()
+                if item.name == name and item.version == version
+            ),
+            None,
+        )
+        if manifest is None:
+            raise KeyError(f"Unknown Skill version: {name}@{version}")
+        return manifest
+
     def spec_for(self, manifest: SkillManifest) -> WorkflowSpec | None:
         """Load one valid confined spec for review without activating it."""
         if manifest.spec_path is None:

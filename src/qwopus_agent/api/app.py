@@ -23,10 +23,13 @@ from qwopus_agent.api.routes import (
     build_local_folder_router,
     build_model_router,
     build_report_router,
+    build_skill_authoring_router,
     build_skill_router,
 )
 from qwopus_agent.documents import DocumentStore
+from qwopus_agent.llm import create_default_llm_registry
 from qwopus_agent.memory import ConversationKnowledgeManager
+from qwopus_agent.services.skill_authoring_service import SkillAuthoringService
 from qwopus_agent.services.skill_growth_service import SkillGrowthService
 from qwopus_agent.skills import SkillCatalog, SkillRegistry
 from qwopus_agent.utils.debug_store import DEFAULT_DEBUG_DIRECTORY
@@ -90,6 +93,16 @@ def create_app(
         workflow_root=skill_root / "workflows",
         history_path=skill_root / "growth_history.json",
     )
+    runtime = model_runtime or RuntimeModelController()
+    llm_registry = create_default_llm_registry()
+    skill_authoring = SkillAuthoringService(
+        growth=skill_growth,
+        # 原因：用户可在运行时切换模型地址和模型 ID，作者服务不能缓存旧适配器。
+        # 作用：每次生成都从 RuntimeModelController 获取当前在线模型并走 BaseLLM。
+        llm_factory=lambda: llm_registry.create_from_settings(
+            runtime.require_online_settings()
+        ),
+    )
     runs = ChatRunRegistry(
         repo,
         debug_directory=debug_path,
@@ -98,7 +111,6 @@ def create_app(
         skill_catalog=skill_catalog,
         skill_growth=skill_growth,
     )
-    runtime = model_runtime or RuntimeModelController()
     documents = document_store or DocumentStore()
     started_at = time.monotonic()
 
@@ -127,6 +139,7 @@ def create_app(
     api.state.skill_catalog = skill_catalog
     api.state.skill_registry = skill_registry
     api.state.skill_growth = skill_growth
+    api.state.skill_authoring = skill_authoring
     api.add_middleware(
         CORSMiddleware,
         allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
@@ -151,6 +164,12 @@ def create_app(
     api.include_router(build_local_folder_router(runtime, repo, debug_path))
     api.include_router(build_report_router(REPORT_DIRECTORY))
     api.include_router(build_skill_router(skill_growth))
+    api.include_router(
+        build_skill_authoring_router(
+            skill_authoring,
+            allow_lan=debug_allow_lan,
+        )
+    )
     api.include_router(
         build_debug_router(
             runtime,

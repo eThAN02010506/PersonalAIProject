@@ -29,6 +29,7 @@ class SkillManifest:
     created_at: str = ""
     source_run_id: str | None = None
     source_signature: str | None = None
+    source_model: str | None = None
 
 
 @dataclass

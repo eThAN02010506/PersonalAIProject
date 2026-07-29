@@ -9,6 +9,7 @@ import {
   Database,
   Download,
   FileJson,
+  Layers3,
   RefreshCw,
   Server,
   Terminal,
@@ -18,8 +19,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { api } from "../lib/api";
 import type { DebugAgentRun, DebugOverview, DebugRecord } from "../lib/types";
+import { SkillWorkspace } from "./SkillWorkspace";
 
-type ConsoleView = "runs" | "logs";
+type ConsoleView = "runs" | "logs" | "skills";
 
 export function DebugConsole() {
   const [overview, setOverview] = useState<DebugOverview | null>(null);
@@ -156,6 +158,9 @@ export function DebugConsole() {
         <button className={view === "logs" ? "active" : ""} onClick={() => setView("logs")}>
           <Terminal size={16} /> Runtime log
         </button>
+        <button className={view === "skills" ? "active" : ""} onClick={() => setView("skills")}>
+          <Layers3 size={16} /> Skill authoring
+        </button>
       </nav>
 
       {view === "runs" ? (
@@ -227,8 +232,12 @@ export function DebugConsole() {
             )}
           </div>
         </section>
-      ) : (
+      ) : view === "logs" ? (
         <RuntimeLog overview={overview} />
+      ) : (
+        <section className="debug-skill-view">
+          <SkillWorkspace enableAuthoring />
+        </section>
       )}
     </main>
   );

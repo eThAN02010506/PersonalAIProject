@@ -1,6 +1,7 @@
 import {
   Ban,
   Check,
+  FileDiff,
   Layers3,
   LoaderCircle,
   RefreshCw,
@@ -9,14 +10,22 @@ import {
 import { useCallback, useEffect, useState } from "react";
 
 import { api } from "../lib/api";
-import type { SkillVersion } from "../lib/types";
+import type { SkillCandidateReview, SkillVersion } from "../lib/types";
+import { SkillAuthoringForm } from "./SkillAuthoringForm";
+import { SkillCandidateReviewPanel } from "./SkillCandidateReview";
 
 type SkillAction = "promote" | "reject" | "rollback";
 
-export function SkillWorkspace() {
+type SkillWorkspaceProps = {
+  enableAuthoring?: boolean;
+};
+
+export function SkillWorkspace({ enableAuthoring = false }: SkillWorkspaceProps) {
   const [skills, setSkills] = useState<SkillVersion[]>([]);
   const [loading, setLoading] = useState(true);
   const [activeAction, setActiveAction] = useState<string | null>(null);
+  const [reviewLoading, setReviewLoading] = useState<string | null>(null);
+  const [review, setReview] = useState<SkillCandidateReview | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
@@ -51,10 +60,30 @@ export function SkillWorkspace() {
         await api.rollbackSkill(skill.name, skill.version);
       }
       await refresh();
+      if (
+        enableAuthoring
+        && review?.skill.name === skill.name
+        && review.skill.version === skill.version
+      ) {
+        setReview(await api.reviewSkillCandidate(skill.name, skill.version));
+      }
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Skill action failed");
     } finally {
       setActiveAction(null);
+    }
+  };
+
+  const inspectCandidate = async (skill: SkillVersion) => {
+    const reviewId = `${skill.name}@${skill.version}`;
+    setReviewLoading(reviewId);
+    setError(null);
+    try {
+      setReview(await api.reviewSkillCandidate(skill.name, skill.version));
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not review candidate");
+    } finally {
+      setReviewLoading(null);
     }
   };
 
@@ -86,6 +115,17 @@ export function SkillWorkspace() {
       </header>
 
       {error && <div className="error-banner skill-error">{error}</div>}
+      {enableAuthoring && (
+        <SkillAuthoringForm
+          onGenerated={(generated) => {
+            setReview(generated);
+            void refresh();
+          }}
+        />
+      )}
+      {enableAuthoring && review && (
+        <SkillCandidateReviewPanel review={review} onClose={() => setReview(null)} />
+      )}
       {loading && !skills.length && (
         <div className="workspace-loading">
           <LoaderCircle className="spin" size={18} />
@@ -114,6 +154,19 @@ export function SkillWorkspace() {
               </div>
               <span className={`skill-status ${skill.status}`}>{skill.status}</span>
               <div className="skill-version-actions">
+                {enableAuthoring && skill.spec_valid && (
+                  <button
+                    className="secondary-button"
+                    disabled={reviewLoading === `${skill.name}@${skill.version}`}
+                    onClick={() => void inspectCandidate(skill)}
+                    type="button"
+                  >
+                    {reviewLoading === `${skill.name}@${skill.version}`
+                      ? <LoaderCircle className="spin" size={14} />
+                      : <FileDiff size={14} />}
+                    Review
+                  </button>
+                )}
                 {skill.status === "candidate" && (
                   <>
                     <button

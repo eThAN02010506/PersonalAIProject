@@ -16,10 +16,10 @@ from qwopus_agent.integrations import (
     smolagents_debug,
     smolagents_knowledge,
     smolagents_model,
-    smolagents_prompts,
 )
 from qwopus_agent.integrations.skill_tools import build_promoted_workflow_tools
 from qwopus_agent.memory import DEFAULT_CONVERSATION_KNOWLEDGE_ROOT
+from qwopus_agent.prompts import smolagents as smolagents_prompts
 from qwopus_agent.reports import contract as report_contract
 from qwopus_agent.reports import grounded
 from qwopus_agent.services.answer_quality import AnswerQualityEvaluator

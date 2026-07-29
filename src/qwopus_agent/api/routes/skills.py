@@ -17,7 +17,7 @@ def build_skill_router(growth: SkillGrowthService) -> APIRouter:
 
     @router.get("/api/skills", response_model=list[SkillVersionView])
     def list_skills() -> list[SkillVersionView]:
-        return [_skill_view(growth, manifest) for manifest in growth.catalog.list()]
+        return [skill_version_view(growth, manifest) for manifest in growth.catalog.list()]
 
     @router.post(
         "/api/skills/{name}/{version}/promote",
@@ -56,10 +56,10 @@ def _run_action(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except (OSError, ValueError) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    return _skill_view(growth, manifest)
+    return skill_version_view(growth, manifest)
 
 
-def _skill_view(
+def skill_version_view(
     growth: SkillGrowthService,
     manifest: SkillManifest,
 ) -> SkillVersionView:
@@ -72,6 +72,7 @@ def _skill_view(
         status=manifest.status,
         created_at=manifest.created_at,
         source_run_id=manifest.source_run_id,
+        source_model=manifest.source_model,
         intent_examples=list(spec.intent_examples) if spec is not None else [],
         steps=(
             [SkillStepView(skill_name=step.skill_name) for step in spec.steps]

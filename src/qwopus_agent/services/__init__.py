@@ -37,6 +37,7 @@ _EXPORTS = {
     "SkillGrowthDecision": ("skill_growth_service", "SkillGrowthDecision"),
     "SkillGrowthPolicy": ("skill_growth_service", "SkillGrowthPolicy"),
     "SkillGrowthService": ("skill_growth_service", "SkillGrowthService"),
+    "SkillAuthoringService": ("skill_authoring_service", "SkillAuthoringService"),
     "SkillRunTrace": ("skill_growth_service", "SkillRunTrace"),
     "SkillTraceStep": ("skill_growth_service", "SkillTraceStep"),
 }

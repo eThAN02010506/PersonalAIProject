@@ -152,9 +152,73 @@ class SkillVersionView(BaseModel):
     status: Literal["candidate", "active", "archived", "rejected"]
     created_at: str
     source_run_id: str | None = None
+    source_model: str | None = None
     intent_examples: list[str] = Field(default_factory=list)
     steps: list[SkillStepView] = Field(default_factory=list)
     spec_valid: bool = False
+
+
+class SkillCapabilityView(BaseModel):
+    """One existing Skill that may be granted to the authoring model."""
+
+    name: str
+    description: str
+
+
+class SkillAuthoringRequest(BaseModel):
+    """Bounded authoring input submitted from the local Debug Console."""
+
+    goal: str = Field(min_length=3, max_length=2_000)
+    requested_name: str | None = Field(
+        default=None,
+        max_length=90,
+        pattern=r"^[a-zA-Z0-9_]*$",
+    )
+    intent_examples: list[str] = Field(default_factory=list, max_length=8)
+    allowed_skills: list[str] = Field(
+        min_length=1,
+        max_length=8,
+    )
+
+
+class SkillCandidateCheckView(BaseModel):
+    """One validation check displayed before promotion."""
+
+    name: str
+    passed: bool
+    detail: str
+
+
+class SkillCandidateReviewView(BaseModel):
+    """Full local-only review material for a generated Workflow candidate."""
+
+    skill: SkillVersionView
+    spec_json: str
+    diff: str
+    checks: list[SkillCandidateCheckView] = Field(default_factory=list)
+    model_output: str | None = None
+
+
+class SkillCandidateTestRequest(BaseModel):
+    """Dry-run query used without calling real providers."""
+
+    query: str = Field(min_length=1, max_length=2_000)
+
+
+class SkillCandidateTestStepView(BaseModel):
+    """One rendered step from the side-effect-free candidate dry run."""
+
+    skill_name: str
+    query: str
+    argument_keys: list[str] = Field(default_factory=list)
+
+
+class SkillCandidateTestView(BaseModel):
+    """Dry-run result returned to the Debug Console."""
+
+    success: bool
+    output: str
+    steps: list[SkillCandidateTestStepView] = Field(default_factory=list)
 
 
 class AnalysisView(BaseModel):

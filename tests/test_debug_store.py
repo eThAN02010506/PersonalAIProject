@@ -9,8 +9,8 @@ from unittest.mock import MagicMock, patch
 
 from pydantic import BaseModel
 
+from qwopus_agent.api.debug_access import debug_host_is_allowed
 from qwopus_agent.api.repository import ConversationRepository
-from qwopus_agent.api.routes.debug import _debug_host_is_allowed
 from qwopus_agent.api.runs import ChatRunRegistry
 from qwopus_agent.integrations.smolagents_runtime import SmolagentsModelSettings
 from qwopus_agent.services.chat_service import ChatTaskResult
@@ -41,11 +41,11 @@ class DebugStoreTests(unittest.TestCase):
     def test_debug_network_scope_requires_explicit_private_lan_permission(self) -> None:
         # 原因：Debug 内容包含原始 Prompt 和 Observation，监听 0.0.0.0 不能等于允许公网读取。
         # 作用：锁定回环始终可用、私网仅按开关放行、公网始终拒绝。
-        self.assertTrue(_debug_host_is_allowed("127.0.0.1", allow_lan=False))
-        self.assertFalse(_debug_host_is_allowed("192.168.1.42", allow_lan=False))
-        self.assertTrue(_debug_host_is_allowed("192.168.1.42", allow_lan=True))
-        self.assertTrue(_debug_host_is_allowed("fd00::42", allow_lan=True))
-        self.assertFalse(_debug_host_is_allowed("8.8.8.8", allow_lan=True))
+        self.assertTrue(debug_host_is_allowed("127.0.0.1", allow_lan=False))
+        self.assertFalse(debug_host_is_allowed("192.168.1.42", allow_lan=False))
+        self.assertTrue(debug_host_is_allowed("192.168.1.42", allow_lan=True))
+        self.assertTrue(debug_host_is_allowed("fd00::42", allow_lan=True))
+        self.assertFalse(debug_host_is_allowed("8.8.8.8", allow_lan=True))
 
     def test_round_trip_preserves_nested_raw_agent_fields(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
