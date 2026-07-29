@@ -239,6 +239,35 @@ button { color: inherit; }
 }
 .mode-switch button.active { background: #fff; color: #222321; box-shadow: 0 1px 3px #00000018; }
 
+.hover-help-target {
+  display: inline-flex;
+  min-width: 0;
+  flex: 0 0 auto;
+}
+/* 原因：工具栏本身需要横向滚动，内部绝对定位的说明会被裁切。 */
+/* 作用：固定定位的 Portal 气泡可跨越工具栏边界，并保持稳定的延迟悬停体验。 */
+.hover-help-popup {
+  position: fixed;
+  z-index: 80;
+  display: grid;
+  transform: translateX(-50%);
+  gap: 5px;
+  border: 1px solid #d4d4cf;
+  border-radius: 7px;
+  background: #242522;
+  box-shadow: 0 9px 28px #1f201d2e;
+  padding: 10px 12px;
+  color: #f7f7f3;
+  pointer-events: none;
+  animation: hover-help-in .12s ease-out;
+}
+.hover-help-popup strong { font-size: 12px; letter-spacing: 0; }
+.hover-help-popup span { color: #d7d8d2; font-size: 11px; line-height: 1.45; }
+@keyframes hover-help-in {
+  from { opacity: 0; transform: translate(-50%, -3px); }
+  to { opacity: 1; transform: translate(-50%, 0); }
+}
+
 .capability-toggles {
   display: flex;
   min-width: 0;
@@ -282,9 +311,9 @@ button { color: inherit; }
   color: #5d5e59;
   font-size: 12px;
 }
-.mode-switch + .source-relevance { margin-left: auto; }
 .source-relevance input { width: 92px; margin: 0; accent-color: #cf473e; }
 .source-relevance output { width: 29px; color: #333431; font-variant-numeric: tabular-nums; }
+.mode-switch + .source-help { margin-left: auto; }
 
 .chat-workspace { position: relative; min-height: 0; flex: 1; overflow: hidden; }
 .thread-root, .thread-viewport { min-height: 0; height: 100%; }
@@ -874,11 +903,15 @@ button { color: inherit; }
   .capability-toggles label { width: 34px; padding: 0; justify-content: center; }
   .capability-toggles label input, .capability-toggles label:not(:has(svg)) { display: none; }
   .capability-toggles label { font-size: 0; }
-  .source-relevance {
+  .source-help {
     order: 3;
     width: 100%;
-    height: 26px;
     flex-basis: 100%;
+    justify-content: flex-end;
+  }
+  .source-relevance {
+    width: 100%;
+    height: 26px;
     justify-content: flex-end;
     gap: 5px;
   }
