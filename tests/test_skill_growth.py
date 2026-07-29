@@ -6,7 +6,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
 
-from qwopus_agent.agents import AgentRouter, Plan, PlanStep, SkillExecutor
+from qwopus_agent.agents import AgentRouter, Plan, PlanStep, SkillExecutor, SkillPlanner
 from qwopus_agent.services.skill_growth_service import (
     SkillGrowthPolicy,
     SkillGrowthService,
@@ -67,6 +67,7 @@ class SkillGrowthServiceTests(unittest.TestCase):
         *,
         min_successes: int = 2,
         fail_second: bool = False,
+        auto_promote: bool = True,
     ) -> tuple[SkillRegistry, SkillCatalog, SkillGrowthService, RecordingSkill, RecordingSkill]:
         registry = SkillRegistry()
         first = RecordingSkill("alpha")
@@ -79,7 +80,11 @@ class SkillGrowthServiceTests(unittest.TestCase):
             catalog=catalog,
             workflow_root=root / "workflows",
             history_path=root / "history.json",
-            policy=SkillGrowthPolicy(min_successes=min_successes, min_output_chars=1),
+            policy=SkillGrowthPolicy(
+                min_successes=min_successes,
+                min_output_chars=1,
+                auto_promote=auto_promote,
+            ),
         )
         return registry, catalog, service, first, second
 
@@ -118,6 +123,8 @@ class SkillGrowthServiceTests(unittest.TestCase):
             self.assertNotIn("must-not-persist", spec_text)
             self.assertNotIn("/private/original.xlsx", spec_text)
             self.assertIn('"mode": "summary"', spec_text)
+            self.assertIn("analyze workbook", spec_text)
+            self.assertIn("analyze another workbook", spec_text)
 
             response = asyncio.run(
                 registry.execute(
@@ -132,6 +139,48 @@ class SkillGrowthServiceTests(unittest.TestCase):
             self.assertEqual(len(response.data["steps"]), 2)
             self.assertEqual(first.calls[-1].arguments["file_path"], "/tmp/new.xlsx")
             self.assertEqual(second.calls[-1].arguments["file_path"], "/tmp/new.xlsx")
+
+            vague_plan = asyncio.run(
+                SkillPlanner(registry).plan(
+                    "do that again",
+                    context={"previous_objective": "analyze another workbook"},
+                )
+            )
+            self.assertEqual(
+                [step.skill_name for step in vague_plan.steps],
+                ["learned_alpha_then_beta"],
+            )
+
+    def test_candidate_requires_promotion_when_auto_promote_is_disabled(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            registry, catalog, service, _, _ = self._components(
+                root,
+                min_successes=1,
+                auto_promote=False,
+            )
+            router = AgentRouter(
+                planner=StaticPlanner(
+                    [PlanStep("alpha", "run"), PlanStep("beta", "run")]
+                ),
+                executor=SkillExecutor(registry),
+                observers=(service,),
+            )
+
+            run = asyncio.run(router.run("prepare the recurring report"))
+            candidate = catalog.latest("learned_alpha_then_beta")
+
+            self.assertEqual(run.observer_errors, ())
+            self.assertIsNotNone(candidate)
+            self.assertEqual(candidate.status, "candidate")
+            self.assertNotIn("learned_alpha_then_beta", registry.list_names())
+
+            promoted = service.promote(candidate.name, candidate.version)
+
+            # 原因：持久化 candidate 本身不应成为可调用能力。
+            # 作用：证明只有显式 promote 完成校验、热加载和 active 切换。
+            self.assertEqual(promoted.status, "active")
+            self.assertIn("learned_alpha_then_beta", registry.list_names())
 
     def test_failed_execution_is_never_observed_as_a_skill(self) -> None:
         with TemporaryDirectory() as tmpdir:

@@ -113,6 +113,30 @@ class DocumentAnalysisTests(unittest.TestCase):
             command = run.call_args.args[0]
             self.assertEqual(command[command.index("-b") + 1], "pipeline")
             self.assertEqual(command[-2:], ["-m", "ocr"])
+            self.assertNotEqual(
+                Path(command[command.index("-o") + 1]),
+                Path(tmpdir) / "output",
+            )
+
+    def test_mineru_timeout_uses_the_parser_fallback_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "slow.pdf"
+            path.write_bytes(b"%PDF placeholder")
+
+            with (
+                patch.object(
+                    mineru.subprocess,
+                    "run",
+                    side_effect=mineru.subprocess.TimeoutExpired("mineru", 300),
+                ),
+                self.assertRaisesRegex(mineru.MinerUUnavailableError, "could not complete"),
+            ):
+                # 原因：TimeoutExpired 过去绕过 PDF/DOCX 的回退异常合同。
+                # 作用：锁定超时也被标准化，调用方可继续使用 pypdf/python-docx。
+                mineru.parse_document_with_mineru(
+                    path,
+                    output_root=Path(tmpdir) / "output",
+                )
 
     def test_analyze_csv_returns_schema_and_sample_without_full_llm_payload(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 if TYPE_CHECKING:
     from qwopus_agent.agents.multi_agent import MultiAgentRun
@@ -24,12 +25,20 @@ class ConversationTurn(BaseModel):
 
 
 class OrchestrationFile(BaseModel):
-    """Framework-neutral uploaded file payload."""
+    """Framework-neutral uploaded or explicitly selected local file."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     name: str = Field(min_length=1)
-    content: bytes
+    content: bytes | None = None
+    local_path: Path | None = None
+
+    @model_validator(mode="after")
+    def validate_source(self) -> OrchestrationFile:
+        """Require exactly one file source."""
+        if (self.content is None) == (self.local_path is None):
+            raise ValueError("Provide exactly one of content or local_path.")
+        return self
 
 
 class OrchestrationRequest(BaseModel):
@@ -49,6 +58,9 @@ class OrchestrationRequest(BaseModel):
     # 原因：不同问题对召回率和精度的要求不同，不能使用全局可变阈值。
     # 作用：把用户选择固定在单次编排请求中，并限制为索引支持的安全范围。
     min_source_relevance: float = Field(default=0.55, ge=0.25, le=0.95)
+    # 原因：回答详略属于用户本轮偏好，不能靠修改模型全局 token 上限实现。
+    # 作用：统一传递简洁、标准和详细三档策略，同时让简单问题仍可快速回答。
+    response_detail: Literal["concise", "balanced", "detailed"] = "detailed"
     # 原因：问题检索、章节阅读和全文总结需要不同的工具策略。
     # 作用：把用户选择作为请求数据传入 Agent，而不是由前端改写自然语言问题。
     analysis_mode: Literal["question", "section", "full"] = "question"

@@ -5,6 +5,7 @@ import type {
   DebugOverview,
   DebugRecord,
   Health,
+  LocalFolderTree,
   RunView,
   SavedDocument,
 } from "./types";
@@ -69,6 +70,47 @@ export const api = {
 
   listDocuments: () => request<SavedDocument[]>("/api/documents"),
 
+  attachSavedDocuments: (conversationId: string, documentIds: string[]) =>
+    request<{
+      conversation_id: string;
+      attached_count: number;
+      documents: SavedDocument[];
+    }>(`/api/conversations/${conversationId}/documents/attach`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ document_ids: documentIds }),
+    }),
+
+  analyzeSavedDocuments: (payload: {
+    conversationId: string;
+    documentIds: string[];
+    question: string;
+    generateReport: boolean;
+    minSourceRelevance: number;
+    analysisMode: "question" | "section" | "full";
+    selectedSections: Record<string, string[]>;
+  }) =>
+    request<AnalysisResult>("/api/documents/analyze", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        conversation_id: payload.conversationId,
+        document_ids: payload.documentIds,
+        question: payload.question,
+        generate_report: payload.generateReport,
+        min_source_relevance: payload.minSourceRelevance,
+        analysis_mode: payload.analysisMode,
+        selected_sections: payload.selectedSections,
+      }),
+    }),
+
+  scanLocalFolder: (path: string) =>
+    request<LocalFolderTree>("/api/local-folders/scan", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path }),
+    }),
+
   startRun: (
     conversationId: string,
     content: string,
@@ -77,6 +119,7 @@ export const api = {
       enableLocalKnowledge: boolean;
       includeGlobalKnowledge: boolean;
       minSourceRelevance: number;
+      responseDetail: "concise" | "balanced" | "detailed";
     },
   ) =>
     request<{ run_id: string; status: "running" }>(
@@ -90,6 +133,7 @@ export const api = {
           enable_local_knowledge: options.enableLocalKnowledge,
           include_global_knowledge: options.includeGlobalKnowledge,
           min_source_relevance: options.minSourceRelevance,
+          response_detail: options.responseDetail,
         }),
       },
     ),
@@ -120,6 +164,29 @@ export const api = {
     form.append("selected_sections", JSON.stringify(selectedSections));
     return request<AnalysisResult>("/api/analysis", { method: "POST", body: form });
   },
+
+  analyzeLocalFolder: (payload: {
+    conversationId: string;
+    root: string;
+    selectedFiles: string[];
+    question: string;
+    generateReport: boolean;
+    analysisMode: "question" | "section" | "full";
+    selectedSections: Record<string, string[]>;
+  }) =>
+    request<AnalysisResult>("/api/local-folders/analyze", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        conversation_id: payload.conversationId,
+        root: payload.root,
+        selected_files: payload.selectedFiles,
+        question: payload.question,
+        generate_report: payload.generateReport,
+        analysis_mode: payload.analysisMode,
+        selected_sections: payload.selectedSections,
+      }),
+    }),
 };
 
 export async function waitForRun(

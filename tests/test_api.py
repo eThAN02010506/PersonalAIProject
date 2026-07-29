@@ -3,11 +3,12 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from qwopus_agent.analysis import AnalysisResult
-from qwopus_agent.api.app import create_app
-from qwopus_agent.api.model_runtime import RuntimeModelStatus
+from qwopus_agent.api.app import SPAStaticFiles, create_app
+from qwopus_agent.api.model_runtime import ModelRuntimeError, RuntimeModelStatus
 from qwopus_agent.api.repository import ConversationRepository
 from qwopus_agent.documents import DocumentStore, build_document_structure, chunk_document_structure
 from qwopus_agent.integrations.smolagents_runtime import AgentDebugRun, SmolagentsModelSettings
@@ -42,6 +43,7 @@ class ApiTests(unittest.TestCase):
         )
         self.model_runtime = MagicMock()
         self.model_runtime.current_settings.return_value = self.model_settings
+        self.model_runtime.require_online_settings.return_value = self.model_settings
         self.model_runtime.status.return_value = self.model_status
         self.model_runtime.configure_remote.return_value = self.model_status
         self.model_runtime.configure_local.return_value = self.model_status
@@ -95,16 +97,63 @@ class ApiTests(unittest.TestCase):
             404,
         )
 
+    def test_deleting_conversation_cancels_its_active_runs_first(self) -> None:
+        conversation_id = self.client.post(
+            "/api/conversations",
+            json={"title": "Running"},
+        ).json()["id"]
+        runs = self.client.app.state.runs
+
+        with patch("qwopus_agent.api.runs.start_chat_task") as start_task:
+            task = start_task.return_value
+            run_id = runs.start(
+                conversation_id,
+                "long task",
+                self.model_settings,
+                enable_web_search=False,
+                enable_local_knowledge=False,
+            )
+
+            response = self.client.delete(f"/api/conversations/{conversation_id}")
+
+        # 原因：浏览器可以关闭或切换聊天，删除一致性不能依靠 UI 的 isRunning。
+        # 作用：证明 worker 在 SQLite 和私有知识目录删除前被取消，并保留可轮询终态。
+        self.assertEqual(response.status_code, 204)
+        task.cancel.assert_called_once()
+        self.assertEqual(runs.poll(run_id).status, "cancelled")
+
     def test_openapi_exposes_agent_and_document_boundaries(self) -> None:
         schema = self.client.get("/openapi.json").json()
 
         self.assertIn("/api/conversations/{conversation_id}/runs", schema["paths"])
         self.assertIn("/api/runs/{run_id}", schema["paths"])
         self.assertIn("/api/analysis", schema["paths"])
+        self.assertIn("/api/local-folders/scan", schema["paths"])
+        self.assertIn("/api/local-folders/analyze", schema["paths"])
         self.assertIn("/api/documents", schema["paths"])
         self.assertIn("/api/model-settings", schema["paths"])
         self.assertIn("/api/reports/{filename}", schema["paths"])
         self.assertIn("/api/debug", schema["paths"])
+
+    def test_spa_static_files_do_not_serve_parent_files(self) -> None:
+        root = Path(self.temp_directory.name)
+        frontend = root / "frontend"
+        frontend.mkdir()
+        (frontend / "index.html").write_text("safe spa", encoding="utf-8")
+        (root / "secret.txt").write_text("private value", encoding="utf-8")
+        static_app = FastAPI()
+        static_app.mount("/", SPAStaticFiles(directory=frontend), name="frontend")
+
+        with TestClient(static_app) as client:
+            response = client.get("/..%2Fsecret.txt")
+            spa_response = client.get("/debug")
+
+        # 原因：SPA fallback 必须支持前端路由，但不能把编码后的父目录当作静态文件。
+        # 作用：确认越界路径被拒绝，同时普通 React 路由仍得到安全入口。
+        self.assertEqual(response.status_code, 404)
+        self.assertNotIn("private value", response.text)
+        self.assertEqual(spa_response.status_code, 200)
+        self.assertEqual(spa_response.text, "safe spa")
 
     def test_saved_document_inventory_lists_only_complete_parsed_documents(self) -> None:
         original = Path(self.temp_directory.name) / "paper.md"
@@ -291,6 +340,76 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 404)
         self.assertEqual(response.json()["detail"], "Conversation not found.")
 
+    def test_analysis_rejects_unsupported_upload_type(self) -> None:
+        conversation_id = self.client.post(
+            "/api/conversations",
+            json={"title": "Documents"},
+        ).json()["id"]
+
+        response = self.client.post(
+            "/api/analysis",
+            files={"files": ("archive.zip", b"not a document", "application/zip")},
+            data={"conversation_id": conversation_id},
+        )
+
+        self.assertEqual(response.status_code, 415)
+        self.assertIn("Unsupported upload type", response.json()["detail"])
+
+    def test_local_folder_api_scans_and_analyzes_only_selected_files(self) -> None:
+        conversation_id = self.client.post(
+            "/api/conversations",
+            json={"title": "Local folder"},
+        ).json()["id"]
+        root = Path(self.temp_directory.name) / "source_folder"
+        root.mkdir()
+        selected = root / "selected.md"
+        ignored = root / "ignored.md"
+        selected.write_text("# Selected\nChosen evidence", encoding="utf-8")
+        ignored.write_text("# Ignored\nOther evidence", encoding="utf-8")
+
+        scan_response = self.client.post(
+            "/api/local-folders/scan",
+            json={"path": str(root)},
+        )
+        self.assertEqual(scan_response.status_code, 200)
+        self.assertEqual(scan_response.json()["file_count"], 2)
+        self.assertEqual(scan_response.json()["max_selection"], 100)
+
+        structure = chunk_document_structure(
+            build_document_structure(selected.read_text(), source="selected.md")
+        )
+        orchestrator = MagicMock()
+        orchestrator.run_sync.return_value = OrchestrationResult(
+            success=True,
+            final_answer="Selected file analyzed.",
+            route="single_agent",
+            analysis_result=AnalysisResult(
+                markdown_summary="# Selected",
+                markdown_document="# Selected\nChosen evidence",
+                document_structures=(structure,),
+            ),
+        )
+        with patch(
+            "qwopus_agent.api.routes.local_folders.AgentOrchestrator",
+            return_value=orchestrator,
+        ):
+            response = self.client.post(
+                "/api/local-folders/analyze",
+                json={
+                    "conversation_id": conversation_id,
+                    "root": str(root),
+                    "selected_files": ["selected.md"],
+                    "question": "Summarize",
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        request = orchestrator.run_sync.call_args.args[0]
+        self.assertEqual(len(request.uploaded_files), 1)
+        self.assertEqual(request.uploaded_files[0].name, "selected.md")
+        self.assertEqual(request.uploaded_files[0].local_path, selected.resolve())
+        self.assertIsNone(request.uploaded_files[0].content)
+
     def test_chat_rejects_global_knowledge_without_local_permission(self) -> None:
         conversation_id = self.client.post(
             "/api/conversations",
@@ -307,6 +426,34 @@ class ApiTests(unittest.TestCase):
         )
 
         self.assertEqual(response.status_code, 422)
+
+    def test_chat_rejects_offline_model_before_starting_worker(self) -> None:
+        conversation_id = self.client.post(
+            "/api/conversations",
+            json={"title": "Knowledge"},
+        ).json()["id"]
+        self.model_runtime.require_online_settings.side_effect = ModelRuntimeError(
+            "host is down"
+        )
+
+        response = self.client.post(
+            f"/api/conversations/{conversation_id}/runs",
+            json={
+                "content": "总结知识库",
+                "enable_local_knowledge": True,
+            },
+        )
+
+        # 原因：离线模型不是请求格式错误，也不应启动一个最终必然失败的 Agent 进程。
+        # 作用：前端立即得到可展示的 503，且未成功的消息不会写入对话记录。
+        self.assertEqual(response.status_code, 503)
+        self.assertIn("Model service is unavailable", response.json()["detail"])
+        self.assertEqual(
+            self.client.get(
+                f"/api/conversations/{conversation_id}/messages"
+            ).json(),
+            [],
+        )
 
 
 if __name__ == "__main__":

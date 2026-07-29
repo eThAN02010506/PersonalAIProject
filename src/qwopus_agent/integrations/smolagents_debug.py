@@ -98,7 +98,13 @@ def extract_agent_observations(steps: list[dict[str, Any]]) -> list[str]:
 def extract_inspected_file_names(steps: list[dict[str, Any]]) -> set[str]:
     """Return files passed to a content-bearing current-document Tool."""
     inspected: set[str] = set()
-    content_tools = {"document_search", "document_read_section", "document_summary"}
+    content_tools = {
+        "document_search",
+        "document_read_section",
+        "document_summary",
+        "excel_schema",
+        "excel_analysis",
+    }
     for step in steps:
         if not isinstance(step, dict):
             continue
@@ -115,6 +121,34 @@ def extract_inspected_file_names(steps: list[dict[str, Any]]) -> set[str]:
             if isinstance(arguments, dict) and isinstance(arguments.get("file_name"), str):
                 inspected.add(arguments["file_name"])
     return inspected
+
+
+def extract_collection_covered_file_names(steps: list[dict[str, Any]]) -> set[str]:
+    """Read the trusted source manifest emitted by document_collection_summary."""
+    covered: set[str] = set()
+    marker = re.compile(r"QWOPUS_SOURCE_COVERAGE=(\[[^\r\n]*\])")
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        if "document_collection_summary" not in extract_agent_tool_calls([step]):
+            continue
+        observation = step.get("observations")
+        if not isinstance(observation, str):
+            continue
+        match = marker.search(observation)
+        if match is None:
+            continue
+        try:
+            sources = json.loads(match.group(1))
+        except json.JSONDecodeError:
+            continue
+        if isinstance(sources, list):
+            covered.update(
+                source
+                for source in sources
+                if isinstance(source, str) and source.strip()
+            )
+    return covered
 
 
 def required_file_tools(spreadsheet_names: list[str]) -> set[str]:

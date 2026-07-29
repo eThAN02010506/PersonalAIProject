@@ -12,7 +12,11 @@ from qwopus_agent.integrations.smolagents_runtime import (
     ChatAgentRun,
     SmolagentsModelSettings,
 )
-from qwopus_agent.services.agent_orchestrator import AgentOrchestrator
+from qwopus_agent.services.agent_orchestrator import (
+    AgentOrchestrator,
+    _citations_from_chat,
+    _file_analysis_citations,
+)
 from qwopus_agent.services.orchestration_models import (
     ConversationTurn,
     OrchestrationFile,
@@ -121,6 +125,76 @@ class AgentOrchestratorTests(unittest.TestCase):
         self.assertTrue(any(event.tool == "graph_search" for event in result.trace))
         self.assertEqual(len(calls), 3)
 
+    def test_final_answer_citations_exclude_unused_retrieval_candidates(self) -> None:
+        run = ChatAgentRun(
+            answer=(
+                "The frontend uses React. "
+                "[Source: README.md | Section: Project Layout]"
+            ),
+            observations=(
+                "[Source: unrelated.md | Section: Other] http://127.0.0.1:8010/debug`.",
+                "[Source: README.md | Section: Project Layout]",
+            ),
+        )
+
+        citations = _citations_from_chat(run)
+
+        # 原因：RAG Observation 是候选证据集，不等于最终回答真正采用的来源。
+        # 作用：锁定正式答案只显示被 final answer 引用的文件，并去掉 Section 元数据。
+        self.assertEqual(len(citations), 1)
+        self.assertEqual(citations[0].kind, "local")
+        self.assertEqual(citations[0].source, "README.md")
+
+    def test_plain_filename_reference_excludes_observation_urls(self) -> None:
+        run = ChatAgentRun(
+            answer="According to README.md, the frontend uses React and the backend uses FastAPI.",
+            observations=(
+                "[Source: README.md | Section: Project Layout] "
+                "Examples: http://127.0.0.1:8010/ and http://127.0.0.1:8010/debug",
+                "[Source: unrelated.md | Section: Other]",
+            ),
+        )
+
+        citations = _citations_from_chat(run)
+
+        # 原因：本地知识回答可能只写文件名，Observation 还可能包含文档正文中的示例 URL。
+        # 作用：证明 UI 只收到回答实际采用的 README，而不会显示无关 localhost 链接。
+        self.assertEqual(len(citations), 1)
+        self.assertEqual(citations[0].kind, "local")
+        self.assertEqual(citations[0].source, "README.md")
+
+    def test_multiple_filename_references_exclude_unused_candidate(self) -> None:
+        run = ChatAgentRun(
+            answer="Facts are supported by alpha.md and beta.md.",
+            observations=(
+                "[Source: alpha.md] First fact.",
+                "[Source: beta.md] Second fact.",
+                "[Source: decoy.md] Unused candidate.",
+            ),
+        )
+
+        citations = _citations_from_chat(run)
+
+        # 原因：跨文件检索会返回多个候选来源，但答案可能只综合其中两份。
+        # 作用：锁定多文件引用按最终答案筛选、保持顺序，并排除未采用的候选文件。
+        self.assertEqual(
+            [citation.source for citation in citations],
+            ["alpha.md", "beta.md"],
+        )
+
+    def test_file_analysis_citations_exclude_uploaded_but_unused_file(self) -> None:
+        citations = _file_analysis_citations(
+            "The date is in *alpha.md* and the budget is in *beta.md*.",
+            ["alpha.md", "beta.md", "decoy.md"],
+        )
+
+        # 原因：文件分析路径以前把“成功上传”错误等同于“最终答案采用”。
+        # 作用：锁定上传分析与知识对话使用相同的最终答案来源原则。
+        self.assertEqual(
+            [citation.source for citation in citations],
+            ["alpha.md", "beta.md"],
+        )
+
     def test_failed_evidence_is_not_misreported_as_success(self) -> None:
         def fake_chat(**kwargs):
             if kwargs["enable_web_search"]:
@@ -186,6 +260,36 @@ class AgentOrchestratorTests(unittest.TestCase):
             any(
                 event.status == "failed" and event.agent == "knowledge_agent"
                 for event in result.trace
+            )
+        )
+
+    def test_knowledge_connection_failure_returns_safe_localized_error(self) -> None:
+        def failing_chat(**_kwargs):
+            raise RuntimeError(
+                "AgentGenerationError: Error while generating output: Connection error."
+            )
+
+        result = asyncio.run(
+            AgentOrchestrator(self.settings, chat_runner=failing_chat).run(
+                OrchestrationRequest(
+                    objective="总结知识库",
+                    conversation_id="conversation-1",
+                    enable_local_knowledge=True,
+                )
+            )
+        )
+
+        # 原因：运行期间断线无法通过启动前探测完全避免，底层 Agent 异常不能直接展示。
+        # 作用：用户看到中文恢复建议，Debug trace 仍保留 AgentGenerationError 供排查。
+        self.assertFalse(result.success)
+        self.assertIn("模型服务连接已中断", result.final_answer)
+        self.assertNotIn("knowledge_agent was unavailable", result.final_answer)
+        self.assertNotIn("AgentGenerationError", result.final_answer)
+        self.assertTrue(
+            any(
+                "AgentGenerationError" in event.message
+                for event in result.trace
+                if event.agent == "knowledge_agent"
             )
         )
 

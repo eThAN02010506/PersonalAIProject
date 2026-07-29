@@ -42,8 +42,11 @@ ProgressCallback = Callable[[str], None]
 ChatRunner = Callable[..., ChatAgentRun]
 AnalysisRunner = Callable[..., Any]
 
-_URL_PATTERN = re.compile(r"https?://[^\s)\]>]+")
-_SOURCE_PATTERN = re.compile(r"\[Source:\s*(?P<source>[^\]\n]+)\]", re.I)
+_URL_PATTERN = re.compile(r"""https?://[^\s)\]>`"']+""")
+_SOURCE_PATTERN = re.compile(
+    r"\[Source:\s*(?P<source>[^|\]\n]+?)(?:\s*\|[^\]\n]*)?\]",
+    re.I,
+)
 _EVIDENCE_PATTERN = re.compile(
     r"\[(?P<source>[^\],\n]+\.(?:pdf|docx|md|txt|png|jpe?g|csv|xlsx?|xls))"
     r"(?:,\s*page\s*(?P<page>[^\]]+))?\]",
@@ -282,21 +285,45 @@ class AgentOrchestrator:
         started = time.monotonic()
         trace.append(ProcessEvent(phase="execution", status="started", agent=agent_name))
         history = [turn.model_dump() for turn in request.history]
-        run = await asyncio.to_thread(
-            self.chat_runner,
-            user_message=request.objective,
-            history=history,
-            settings=self.settings,
-            enable_web_search=web,
-            enable_local_knowledge=local,
-            include_global_knowledge=(
-                request.include_global_knowledge if local else False
-            ),
-            min_source_relevance=request.min_source_relevance,
-            knowledge_scope=request.conversation_id,
-            knowledge_root=self.knowledge_root,
-            progress_callback=progress_callback,
-        )
+        try:
+            run = await asyncio.to_thread(
+                self.chat_runner,
+                user_message=request.objective,
+                history=history,
+                settings=self.settings,
+                enable_web_search=web,
+                enable_local_knowledge=local,
+                include_global_knowledge=(
+                    request.include_global_knowledge if local else False
+                ),
+                min_source_relevance=request.min_source_relevance,
+                response_detail=request.response_detail,
+                knowledge_scope=request.conversation_id,
+                knowledge_root=self.knowledge_root,
+                document_evidence_available=bool(request.uploaded_files),
+                progress_callback=progress_callback,
+            )
+        except Exception as exc:
+            if not _is_model_connection_error(exc):
+                raise
+            technical_error = f"{type(exc).__name__}: {exc}"
+            trace.append(
+                ProcessEvent(
+                    phase="execution",
+                    status="failed",
+                    agent=agent_name,
+                    message=technical_error,
+                    duration_seconds=round(time.monotonic() - started, 3),
+                )
+            )
+            # 原因：模型可能在预检成功后、Tool 检索或最终生成期间断开连接。
+            # 作用：正式答案不暴露 smolagents 异常，完整技术原因仍保留在运行轨迹中。
+            return _CapabilityResult(
+                content=_model_connection_error_answer(request.objective),
+                success=False,
+                confidence=0.0,
+                error=technical_error,
+            )
         citations = _citations_from_chat(run)
         for tool_name in run.tool_calls:
             if tool_name != "final_answer":
@@ -333,7 +360,10 @@ class AgentOrchestrator:
         trace: list[ProcessEvent],
         progress_callback: ProgressCallback | None,
     ) -> _CapabilityResult:
-        if self.minirag is None:
+        direct_local_files = all(
+            item.local_path is not None for item in request.uploaded_files
+        )
+        if self.minirag is None and not direct_local_files:
             raise RuntimeError("Document orchestration requires a MiniRAG instance.")
         if progress_callback is not None:
             progress_callback("analyzing")
@@ -350,7 +380,11 @@ class AgentOrchestrator:
         outcome: UploadAnalysisOutcome = await asyncio.to_thread(
             analysis_runner,
             uploaded_files=[
-                UploadedFileInput(name=item.name, content=item.content)
+                UploadedFileInput(
+                    name=item.name,
+                    content=item.content,
+                    local_path=item.local_path,
+                )
                 for item in request.uploaded_files
             ],
             user_question=request.objective,
@@ -361,9 +395,33 @@ class AgentOrchestrator:
             analysis_mode=request.analysis_mode,
         )
         answer = outcome.result.llm_analysis or outcome.result.markdown_summary
-        citations = tuple(
-            SourceCitation(kind="local", source=name)
-            for name in outcome.analyzed_file_names
+        if request.objective.strip() and not outcome.result.llm_analysis:
+            # 原因：本地解析摘要不是用户所要求的生成式写作答案，模型离线时不能冒充完成。
+            # 作用：保留解析产物供内部诊断，但让 API/任务状态 fail closed。
+            message = (
+                "The documents were parsed, but the model did not produce the requested "
+                "analysis. Check the model connection and retry."
+            )
+            trace.append(
+                ProcessEvent(
+                    phase="execution",
+                    status="failed",
+                    agent="document_agent",
+                    message=message,
+                    duration_seconds=round(time.monotonic() - started, 3),
+                )
+            )
+            return _CapabilityResult(
+                content=message,
+                success=False,
+                confidence=0.0,
+                error=message,
+                analysis_result=outcome.result,
+                debug_runs=tuple(getattr(outcome, "debug_runs", ())),
+            )
+        citations = _file_analysis_citations(
+            answer,
+            outcome.analyzed_file_names,
         )
         for message in outcome.debug_steps:
             trace.append(
@@ -535,10 +593,58 @@ class AgentOrchestrator:
 
 
 def _citations_from_chat(run: ChatAgentRun) -> tuple[SourceCitation, ...]:
+    """Return sources cited by the final answer, with Observation as a fallback."""
+    citations = _parse_citations(run.answer)
+    if citations:
+        # 原因：一次 RAG 查询会返回多个候选 chunk，但最终答案通常只采用其中一部分。
+        # 作用：只展示模型实际引用的来源，避免把未使用的 Observation 全部追加给用户。
+        return citations
+    observation_citations = _parse_citations("\n".join(run.observations))
+    mentioned_local = tuple(
+        citation
+        for citation in observation_citations
+        if citation.kind == "local"
+        and Path(citation.source).name.casefold() in run.answer.casefold()
+    )
+    if mentioned_local:
+        # 原因：部分模型会直接写出文件名，却不遵循结构化 Source 标记。
+        # 作用：仍能识别真实采用的本地文档，同时排除 Observation 内未使用的 URL。
+        return mentioned_local
+    return observation_citations
+
+
+def _file_analysis_citations(
+    answer: str,
+    analyzed_file_names: list[str],
+) -> tuple[SourceCitation, ...]:
+    """Return uploaded files named by the final analysis answer."""
+    normalized_answer = answer.casefold()
+    mentioned = [
+        name
+        for name in analyzed_file_names
+        if Path(name).name.casefold() in normalized_answer
+    ]
+    # 原因：上传成功只表示文件可用，不表示最终答案实际采用了该文件。
+    # 作用：优先展示答案明确引用的来源；旧模型完全不写文件名时仍保留兼容回退。
+    cited_names = mentioned or analyzed_file_names
+    return tuple(
+        SourceCitation(kind="local", source=name)
+        for name in cited_names
+    )
+
+
+def _parse_citations(evidence: str) -> tuple[SourceCitation, ...]:
+    """Extract normalized web and local citations from one answer or evidence block."""
     citations: list[SourceCitation] = []
-    evidence = "\n".join((*run.observations, run.answer))
     for url in _URL_PATTERN.findall(evidence):
-        citations.append(SourceCitation(kind="web", source=url, url=url))
+        normalized_url = url.rstrip(".,;:")
+        citations.append(
+            SourceCitation(
+                kind="web",
+                source=normalized_url,
+                url=normalized_url,
+            )
+        )
     for match in _SOURCE_PATTERN.finditer(evidence):
         citations.append(SourceCitation(kind="local", source=match.group("source").strip()))
     for match in _EVIDENCE_PATTERN.finditer(evidence):
@@ -581,6 +687,36 @@ def _deduplicate_citations(citations: list[SourceCitation]) -> tuple[SourceCitat
         key = (citation.kind, citation.source, citation.page, citation.url)
         unique[key] = citation
     return tuple(unique.values())
+
+
+def _is_model_connection_error(exc: BaseException) -> bool:
+    """Recognize provider connection failures through wrapped exception chains."""
+    current: BaseException | None = exc
+    while current is not None:
+        text = f"{type(current).__name__}: {current}".casefold()
+        if any(
+            marker in text
+            for marker in (
+                "connection error",
+                "connecterror",
+                "connection refused",
+                "host is down",
+                "failed to connect",
+            )
+        ):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
+def _model_connection_error_answer(objective: str) -> str:
+    """Return a stable user-facing message in the current question's language."""
+    if re.search(r"[\u3400-\u9fff]", objective):
+        return "模型服务连接已中断。请检查模型地址和服务状态，确认模型在线后重试。"
+    return (
+        "The model service connection was interrupted. Check the configured model "
+        "address and service status, then retry."
+    )
 
 
 def _append_citations(

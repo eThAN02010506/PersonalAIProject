@@ -19,45 +19,61 @@ load_dotenv()
 SmolagentsModelSettings = ModelSettings
 
 
+def probe_model_settings(
+    settings: SmolagentsModelSettings | None = None,
+) -> tuple[SmolagentsModelSettings, bool, str]:
+    """Probe once and return refreshed settings together with connection status."""
+    settings = settings or SmolagentsModelSettings.from_env()
+    try:
+        status, payload = _request_models(settings)
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+        reason = getattr(exc, "reason", str(exc))
+        return (
+            settings,
+            False,
+            f"无法连接模型服务: {settings.base_url} ({reason})",
+        )
+
+    if not 200 <= status < 300:
+        return settings, False, f"模型服务异常: {status}"
+
+    model_entry = _extract_server_model_entry(payload)
+    model_id = _extract_server_model_id(payload)
+    resolved = settings
+    if model_entry is not None and model_id:
+        capabilities = _capabilities_from_server(
+            model_entry,
+            settings.capabilities,
+        )
+        # 原因：状态检测和模型发现读取的是同一个 /models 响应，分开调用会重复网络请求。
+        # 作用：一次探测同步刷新模型 ID 与能力，降低局域网服务负载和瞬时误报概率。
+        resolved = replace(
+            settings,
+            model_id=model_id,
+            capabilities=capabilities,
+        )
+    return (
+        resolved,
+        True,
+        f"模型服务在线: {settings.base_url} "
+        f"(当前模型: {_display_model_name(resolved.model_id)})",
+    )
+
+
 def resolve_model_settings(
     settings: SmolagentsModelSettings | None = None,
 ) -> SmolagentsModelSettings:
     """Return settings updated with the model currently exposed by the server."""
-    settings = settings or SmolagentsModelSettings.from_env()
-    try:
-        status, payload = _request_models(settings)
-    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError):
-        return settings
-
-    model_entry = _extract_server_model_entry(payload) if 200 <= status < 300 else None
-    if model_entry is None:
-        return settings
-    model_id = _extract_server_model_id(payload)
-    if not model_id:
-        return settings
-
-    capabilities = _capabilities_from_server(model_entry, settings.capabilities)
-    # 原因：服务器加载的模型和上下文能力都可能在不重启 Qwopus 时变化。
-    # 作用：每次请求模型列表后刷新可发现字段，用户显式配置的其余能力保持不变。
-    return replace(settings, model_id=model_id, capabilities=capabilities)
+    resolved, _online, _message = probe_model_settings(settings)
+    return resolved
 
 
 def check_model_connection(
     settings: SmolagentsModelSettings | None = None,
 ) -> tuple[bool, str]:
     """Probe the configured OpenAI-compatible model-list endpoint."""
-    settings = settings or SmolagentsModelSettings.from_env()
-    try:
-        status, payload = _request_models(settings)
-        if 200 <= status < 300:
-            model_id = _extract_server_model_id(payload) or settings.model_id
-            return True, (
-                f"模型服务在线: {settings.base_url} (当前模型: {_display_model_name(model_id)})"
-            )
-        return False, f"模型服务异常: {status}"
-    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
-        reason = getattr(exc, "reason", str(exc))
-        return False, f"无法连接模型服务: {settings.base_url} ({reason})"
+    _resolved, online, message = probe_model_settings(settings)
+    return online, message
 
 
 def _request_models(settings: SmolagentsModelSettings) -> tuple[int, dict[str, Any]]:

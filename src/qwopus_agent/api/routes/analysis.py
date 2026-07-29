@@ -14,8 +14,10 @@ from qwopus_agent.api.models import (
     AnalysisView,
     DocumentOutlineView,
     DocumentSectionView,
+    SourceCoverageView,
 )
 from qwopus_agent.api.repository import ConversationRepository
+from qwopus_agent.documents.parser import SUPPORTED_DOCUMENT_EXTENSIONS
 from qwopus_agent.memory import ConversationKnowledgeManager
 from qwopus_agent.services.agent_orchestrator import AgentOrchestrator
 from qwopus_agent.services.orchestration_models import (
@@ -24,6 +26,12 @@ from qwopus_agent.services.orchestration_models import (
     OrchestrationResult,
 )
 from qwopus_agent.utils.debug_store import append_debug_record
+
+MAX_UPLOAD_FILES = 20
+MAX_UPLOAD_FILE_BYTES = 100 * 1024 * 1024
+MAX_UPLOAD_TOTAL_BYTES = 256 * 1024 * 1024
+UPLOAD_READ_CHUNK_BYTES = 1024 * 1024
+SUPPORTED_UPLOAD_EXTENSIONS = SUPPORTED_DOCUMENT_EXTENSIONS | {".csv", ".xlsx", ".xls"}
 
 
 def build_analysis_router(
@@ -55,19 +63,7 @@ def build_analysis_router(
         except (json.JSONDecodeError, TypeError, ValueError) as exc:
             raise HTTPException(status_code=422, detail="Invalid selected sections.") from exc
 
-        # 原因：生成式中包含 await 时会产生 async_generator，不能直接交给 tuple()。
-        # 作用：逐个读取上传字节，确保 MinerU/MiniRAG 编排收到完整且有序的文件集合。
-        uploads = tuple(
-            [
-                OrchestrationFile(
-                    name=file.filename or "upload",
-                    content=await file.read(),
-                )
-                for file in files
-            ]
-        )
-        if not uploads:
-            raise HTTPException(status_code=400, detail="At least one file is required.")
+        uploads = await _read_uploads(files)
 
         request = OrchestrationRequest(
             objective=question,
@@ -104,9 +100,54 @@ def build_analysis_router(
         )
         if not result.success:
             raise HTTPException(status_code=500, detail=result.final_answer)
-        return _analysis_view(result)
+        return analysis_view(result)
 
     return router
+
+
+async def _read_uploads(files: list[UploadFile]) -> tuple[OrchestrationFile, ...]:
+    """Read supported uploads with bounded per-file and aggregate memory use."""
+    if not files:
+        raise HTTPException(status_code=400, detail="At least one file is required.")
+    if len(files) > MAX_UPLOAD_FILES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Upload at most {MAX_UPLOAD_FILES} files per analysis.",
+        )
+
+    uploads: list[OrchestrationFile] = []
+    total_bytes = 0
+    for file in files:
+        name = Path(file.filename or "").name
+        if not name or Path(name).suffix.lower() not in SUPPORTED_UPLOAD_EXTENSIONS:
+            raise HTTPException(
+                status_code=415,
+                detail=f"Unsupported upload type: {name or 'unnamed file'}",
+            )
+
+        content = bytearray()
+        while chunk := await file.read(UPLOAD_READ_CHUNK_BYTES):
+            content.extend(chunk)
+            total_bytes += len(chunk)
+            if len(content) > MAX_UPLOAD_FILE_BYTES:
+                # 原因：UploadFile 会落盘，但转换成 OrchestrationFile 时仍会进入进程内存。
+                # 作用：在 MinerU、pandas 或 MiniRAG 解析前限制单个文档的内存占用。
+                raise HTTPException(
+                    status_code=413,
+                    detail=f"File exceeds {MAX_UPLOAD_FILE_BYTES // (1024 * 1024)} MiB: {name}",
+                )
+            if total_bytes > MAX_UPLOAD_TOTAL_BYTES:
+                # 原因：多个合法大小文件仍可能合计耗尽本地 Agent 进程内存。
+                # 作用：为一次分析设置确定的总内存上界，不依赖客户端 Content-Length。
+                raise HTTPException(
+                    status_code=413,
+                    detail=(
+                        "Combined uploads exceed "
+                        f"{MAX_UPLOAD_TOTAL_BYTES // (1024 * 1024)} MiB."
+                    ),
+                )
+        uploads.append(OrchestrationFile(name=name, content=bytes(content)))
+    return tuple(uploads)
 
 
 def _parse_selected_sections(payload: str) -> dict[str, tuple[str, ...]]:
@@ -129,7 +170,8 @@ def _parse_selected_sections(payload: str) -> dict[str, tuple[str, ...]]:
     return parsed
 
 
-def _analysis_view(result: OrchestrationResult) -> AnalysisView:
+def analysis_view(result: OrchestrationResult) -> AnalysisView:
+    """Map internal analysis artifacts onto the public response contract."""
     reports = []
     if result.report is not None:
         reports = [
@@ -140,12 +182,32 @@ def _analysis_view(result: OrchestrationResult) -> AnalysisView:
             }
             for artifact in result.report.artifacts
         ]
+    source_coverage = (
+        result.analysis_result.metadata.get("source_coverage")
+        if result.analysis_result is not None
+        else None
+    )
+    generation_mode = (
+        result.analysis_result.metadata.get("generation_mode")
+        if result.analysis_result is not None
+        else None
+    )
     return AnalysisView(
         answer=result.final_answer,
         route=result.route,
         citations=[item.model_dump(mode="json") for item in result.citations],
         trace=[item.model_dump(mode="json") for item in result.trace],
         reports=reports,
+        source_coverage=(
+            SourceCoverageView.model_validate(source_coverage)
+            if isinstance(source_coverage, dict)
+            else None
+        ),
+        generation_mode=(
+            str(generation_mode)
+            if isinstance(generation_mode, str)
+            else None
+        ),
         documents=[
             DocumentOutlineView(
                 document_id=structure.document_id,

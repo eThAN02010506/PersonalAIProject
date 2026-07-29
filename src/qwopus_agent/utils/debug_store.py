@@ -5,13 +5,15 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import asdict, is_dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
 DEFAULT_DEBUG_DIRECTORY = Path("logs/debug_runs")
 MAX_DEBUG_RECORDS = 200
+MAX_DEBUG_STORAGE_BYTES = 64 * 1024 * 1024
+MAX_DEBUG_RECORD_AGE = timedelta(days=14)
 logger = logging.getLogger("qwopus_agent.debug_store")
 
 
@@ -110,13 +112,44 @@ def _json_value(value: Any) -> Any:
     return value
 
 
-def _prune_debug_records(directory: Path, keep: int = MAX_DEBUG_RECORDS) -> None:
-    """Bound raw diagnostic storage without touching active temporary writes."""
+def _prune_debug_records(
+    directory: Path,
+    keep: int = MAX_DEBUG_RECORDS,
+    max_bytes: int = MAX_DEBUG_STORAGE_BYTES,
+    max_age: timedelta = MAX_DEBUG_RECORD_AGE,
+) -> None:
+    """Bound complete diagnostics by age, count, and aggregate bytes."""
     paths = sorted(directory.glob("*.json"), reverse=True)
-    # 原因：完整 Prompt 和 Observation 可能很大，无限保留会持续占用本地磁盘。
-    # 作用：仅删除最旧的完整 JSON；当前写入的 .tmp 文件和最近记录保持不变。
-    for path in paths[keep:]:
+    cutoff = datetime.now(UTC).timestamp() - max_age.total_seconds()
+    retained: list[tuple[Path, int]] = []
+    for path in paths:
         try:
-            path.unlink()
+            stat = path.stat()
         except OSError:
-            logger.warning("debug_record_prune_failed path=%s", path)
+            continue
+        if stat.st_mtime < cutoff:
+            _unlink_debug_record(path)
+            continue
+        retained.append((path, stat.st_size))
+
+    total_bytes = sum(size for _, size in retained)
+    # 原因：单个 Trace 大小时，仅限制记录数量仍可能让 Debug 目录持续占满磁盘。
+    # 作用：从最旧记录开始删除，直到数量和总字节数同时回到固定上限。
+    for path, size in retained[keep:]:
+        if _unlink_debug_record(path):
+            total_bytes -= size
+    retained = retained[:keep]
+    while retained and total_bytes > max_bytes:
+        path, size = retained.pop()
+        if _unlink_debug_record(path):
+            total_bytes -= size
+
+
+def _unlink_debug_record(path: Path) -> bool:
+    """Delete one complete record while keeping cleanup failure non-fatal."""
+    try:
+        path.unlink()
+    except OSError:
+        logger.warning("debug_record_prune_failed path=%s", path)
+        return False
+    return True

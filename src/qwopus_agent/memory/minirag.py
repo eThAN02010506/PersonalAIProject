@@ -1,4 +1,4 @@
-"""Persistent semantic knowledge facade backed by MiniRAG's vector storage."""
+"""Qwopus knowledge adapter backed by MiniRAG's NanoVectorDB component."""
 
 from __future__ import annotations
 
@@ -48,10 +48,11 @@ _diverse_chunks = minirag_retrieval.diverse_chunks
 _embedding_content = minirag_retrieval.embedding_content
 _render_graph_search_result = minirag_retrieval.render_graph_search_result
 _render_search_result = minirag_retrieval.render_search_result
+_source_matches_query = minirag_retrieval.source_matches_query
 
 DEFAULT_MINIRAG_STORE_PATH = Path("storage/minirag/documents.jsonl")
 DEFAULT_EMBEDDING_MODEL = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
-SEARCH_CANDIDATE_K = 30
+SEARCH_CANDIDATE_K = 96
 COSINE_THRESHOLD = 0.25
 GRAPH_SEARCH_LIMIT = 3
 
@@ -104,7 +105,12 @@ class SentenceTransformerEmbedding:
 
 @dataclass
 class MiniRAG:
-    """Expose only document insertion and semantic search to the Agent."""
+    """Implement KnowledgeStore with persistent vectors and Qwopus graph retrieval.
+
+    This adapter uses MiniRAG's NanoVectorDB storage component. It is intentionally
+    not the upstream project's full ``MiniRAG.query`` pipeline; Qwopus owns chunking,
+    source scoping, graph extraction, and result rendering around that component.
+    """
 
     storage_path: Path = DEFAULT_MINIRAG_STORE_PATH
     embedding_backend: EmbeddingBackend | None = field(default=None, repr=False)
@@ -116,6 +122,11 @@ class MiniRAG:
     _graph: PersistentKnowledgeGraph = field(init=False, repr=False)
     _graph_index: KnowledgeGraphIndex = field(init=False, repr=False)
     _thread_lock: Any = field(default_factory=RLock, init=False, repr=False)
+    _storage_signature: tuple[int, int] | None = field(
+        default=None,
+        init=False,
+        repr=False,
+    )
 
     def __post_init__(self) -> None:
         """Load documents and the persisted MiniRAG vector index on startup."""
@@ -147,11 +158,15 @@ class MiniRAG:
         }
         self._vector_store = self._create_vector_store()
         self._synchronize_vector_index()
+        self._storage_signature = _storage_signature(self.storage_path)
 
     def insert(self, document: str, *, document_id: str | None = None) -> str:
         """Insert one Markdown-normalized document into persistent semantic memory."""
         with self._thread_lock, _exclusive_storage_lock(self.storage_path):
-            return self._insert_unlocked(document, document_id=document_id)
+            self._refresh_from_disk_if_changed()
+            resolved_id = self._insert_unlocked(document, document_id=document_id)
+            self._storage_signature = _storage_signature(self.storage_path)
+            return resolved_id
 
     def _insert_unlocked(self, document: str, *, document_id: str | None = None) -> str:
         """Perform insertion while the public boundary owns both storage locks."""
@@ -202,7 +217,8 @@ class MiniRAG:
         sources: Sequence[str] | None = None,
     ) -> list[str]:
         """Return graph paths first, then complementary semantic chunks."""
-        with self._thread_lock:
+        with self._thread_lock, _exclusive_storage_lock(self.storage_path):
+            self._refresh_from_disk_if_changed()
             return self._search_unlocked(
                 query,
                 min_relevance,
@@ -245,6 +261,18 @@ class MiniRAG:
         if not self._chunks or len(results) >= SEARCH_TOP_K:
             return results[:SEARCH_TOP_K]
 
+        source_matched_chunks = [
+            chunk
+            for chunk in self._chunks.values()
+            if (
+                _source_matches_query(query, chunk.source)
+                and chunk.id not in graph_chunk_ids
+                and (not document_filter or chunk.document_id in document_filter)
+                and (not section_filter or chunk.section_id in section_filter)
+                and (not source_filter or chunk.source.casefold() in source_filter)
+            )
+        ]
+        source_matched_ids = {chunk.id for chunk in source_matched_chunks}
         matches = _run_coroutine(
             self._vector_store.query(query, top_k=SEARCH_CANDIDATE_K)
         )
@@ -258,6 +286,7 @@ class MiniRAG:
             if (
                 chunk is not None
                 and chunk.id not in graph_chunk_ids
+                and chunk.id not in source_matched_ids
                 and (not document_filter or chunk.document_id in document_filter)
                 and (not section_filter or chunk.section_id in section_filter)
                 and (not source_filter or chunk.source.casefold() in source_filter)
@@ -265,13 +294,14 @@ class MiniRAG:
                 ranked_chunks.append(chunk)
         vector_results = [
             _render_search_result(chunk)
-            for chunk in _diverse_chunks(ranked_chunks)
+            for chunk in _diverse_chunks(source_matched_chunks + ranked_chunks)
         ]
         return (results + vector_results)[:SEARCH_TOP_K]
 
-    def _list_sources(self) -> list[str]:
-        """Return indexed file sources for the separate maintenance service."""
-        with self._thread_lock:
+    def list_sources(self) -> list[str]:
+        """Return indexed file sources without exposing document contents."""
+        with self._thread_lock, _exclusive_storage_lock(self.storage_path):
+            self._refresh_from_disk_if_changed()
             return sorted(
                 {
                     source
@@ -282,10 +312,17 @@ class MiniRAG:
                 key=str.casefold,
             )
 
+    def _list_sources(self) -> list[str]:
+        """Compatibility alias for the existing maintenance service."""
+        return self.list_sources()
+
     def _delete_source(self, source: str) -> int:
         """Delete all records for one exact file source from every index."""
         with self._thread_lock, _exclusive_storage_lock(self.storage_path):
-            return self._delete_source_unlocked(source)
+            self._refresh_from_disk_if_changed()
+            deleted = self._delete_source_unlocked(source)
+            self._storage_signature = _storage_signature(self.storage_path)
+            return deleted
 
     def _delete_source_unlocked(self, source: str) -> int:
         """Delete a source while the maintenance boundary owns storage locks."""
@@ -306,6 +343,7 @@ class MiniRAG:
     def _rebuild_indexes(self) -> None:
         """Recreate vector and graph indexes from persisted Markdown records."""
         with self._thread_lock, _exclusive_storage_lock(self.storage_path):
+            self._refresh_from_disk_if_changed()
             self._rebuild_indexes_unlocked()
 
     def _rebuild_indexes_unlocked(self) -> None:
@@ -354,6 +392,15 @@ class MiniRAG:
                 embedding_backend=self.embedding_backend,
             ),
         )
+
+    def _refresh_from_disk_if_changed(self) -> None:
+        """Reload derived state when another process changed the fact store."""
+        signature = _storage_signature(self.storage_path)
+        if signature == self._storage_signature:
+            return
+        # 原因：文件锁只能阻止同时写盘，不能自动刷新其他进程已经缓存的记录和向量对象。
+        # 作用：在操作锁内按需重载最新事实库，使 API worker 与 Agent 子进程立即看到彼此写入。
+        self._initialize_storage()
 
     def _remove_records(self, records: Sequence[_DocumentRecord]) -> None:
         record_ids = {record.id for record in records}
@@ -464,6 +511,15 @@ class MiniRAG:
 
 def _index_directory(storage_path: Path) -> Path:
     return storage_path.parent / f"{storage_path.stem}_index"
+
+
+def _storage_signature(storage_path: Path) -> tuple[int, int] | None:
+    """Return a cheap process-independent version for the JSONL fact store."""
+    try:
+        stat = storage_path.stat()
+    except FileNotFoundError:
+        return None
+    return stat.st_mtime_ns, stat.st_size
 
 
 def _graph_path(storage_path: Path) -> Path:

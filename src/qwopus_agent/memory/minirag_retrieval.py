@@ -8,7 +8,7 @@ from collections.abc import Sequence
 from qwopus_agent.memory.graph_models import GraphPath
 from qwopus_agent.memory.minirag_records import KnowledgeChunk
 
-SEARCH_TOP_K = 5
+SEARCH_TOP_K = 12
 
 
 def render_search_result(chunk: KnowledgeChunk) -> str:
@@ -36,6 +36,23 @@ def embedding_content(chunk: KnowledgeChunk) -> str:
     if chunk.section_path == ("Document content",):
         return chunk.content
     return f"Section: {' / '.join(chunk.section_path)}\n\n{chunk.content}"
+
+
+def source_matches_query(query: str, source: str) -> bool:
+    """Match a query against persisted source metadata without changing body vectors."""
+    if source == "unknown":
+        return False
+    normalized_query = re.sub(r"\W+", "", query.casefold())
+    normalized_source = re.sub(r"\W+", "", source.casefold())
+    if normalized_query and normalized_query in normalized_source:
+        return True
+
+    query_tokens = _source_tokens(query)
+    source_tokens = _source_tokens(source)
+    overlap = query_tokens & source_tokens
+    # 原因：文件名进入正文向量会稀释短事实词的余弦分数，造成新的正文漏召回。
+    # 作用：用 metadata 补充文件名命中；两个短 token 或一个长 token 即可识别课次/文件名。
+    return len(overlap) >= 2 or any(len(token) >= 6 for token in overlap)
 
 
 def render_graph_search_result(path: GraphPath) -> str:
@@ -92,6 +109,17 @@ def _content_fingerprint(content: str) -> set[str]:
     if len(normalized) < 5:
         return {normalized} if normalized else set()
     return {normalized[index : index + 5] for index in range(len(normalized) - 4)}
+
+
+def _source_tokens(value: str) -> set[str]:
+    lowered = value.casefold()
+    latin_tokens = set(re.findall(r"[a-z0-9]+", lowered))
+    chinese = "".join(re.findall(r"[\u3400-\u9fff]", lowered))
+    chinese_bigrams = {
+        chinese[index : index + 2]
+        for index in range(max(len(chinese) - 1, 0))
+    }
+    return latin_tokens | chinese_bigrams
 
 
 def _jaccard_similarity(left: set[str], right: set[str]) -> float:

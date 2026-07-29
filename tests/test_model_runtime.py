@@ -23,6 +23,47 @@ class ModelRuntimeTests(unittest.TestCase):
         with self.assertRaises(ModelRuntimeError):
             _normalize_base_url("192.168.1.97:8001")
 
+    @patch(
+        "qwopus_agent.api.model_runtime.probe_model_settings",
+        side_effect=lambda settings: (settings, False, "host is down"),
+    )
+    def test_require_online_settings_rejects_offline_endpoint(
+        self,
+        _check: MagicMock,
+    ) -> None:
+        controller = RuntimeModelController(
+            SmolagentsModelSettings(
+                model_id="offline-model",
+                base_url="http://offline.example/v1",
+            )
+        )
+
+        # 原因：离线状态不能继续创建后台 Agent，否则用户只能在超时后看到 provider 异常。
+        # 作用：锁定 fail-fast 合同，并确认错误保留实际连接诊断。
+        with self.assertRaisesRegex(ModelRuntimeError, "host is down"):
+            controller.require_online_settings()
+
+    @patch(
+        "qwopus_agent.api.model_runtime.probe_model_settings",
+        side_effect=lambda settings: (settings, False, "offline"),
+    )
+    def test_status_reuses_short_lived_probe(
+        self,
+        check: MagicMock,
+    ) -> None:
+        controller = RuntimeModelController(
+            SmolagentsModelSettings(
+                model_id="offline-model",
+                base_url="http://offline.example/v1",
+            )
+        )
+
+        first = controller.status()
+        second = controller.status()
+
+        self.assertIs(first, second)
+        check.assert_called_once()
+
     def test_model_parent_venv_is_discovered(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -43,12 +84,13 @@ class ModelRuntimeTests(unittest.TestCase):
             (path / "model.safetensors").write_bytes(b"weights")
             self.assertEqual(_validate_model_path(str(path)), path.resolve())
 
-    @patch("qwopus_agent.api.model_runtime.resolve_model_settings", side_effect=lambda value: value)
-    @patch("qwopus_agent.api.model_runtime.check_model_connection", return_value=(True, "online"))
+    @patch(
+        "qwopus_agent.api.model_runtime.probe_model_settings",
+        side_effect=lambda value: (value, True, "online"),
+    )
     def test_remote_settings_replace_only_runtime_address(
         self,
-        _check: MagicMock,
-        _resolve: MagicMock,
+        probe: MagicMock,
     ) -> None:
         settings = SmolagentsModelSettings(
             model_id="current",
@@ -65,17 +107,19 @@ class ModelRuntimeTests(unittest.TestCase):
         self.assertEqual(status.settings.context_window_tokens, 65536)
         self.assertEqual(status.settings.capabilities.agent_mode, "code")
         self.assertEqual(status.mode, "remote")
+        probe.assert_called_once()
 
-    @patch("qwopus_agent.api.model_runtime.resolve_model_settings", side_effect=lambda value: value)
-    @patch("qwopus_agent.api.model_runtime.check_model_connection", return_value=(True, "online"))
+    @patch(
+        "qwopus_agent.api.model_runtime.probe_model_settings",
+        side_effect=lambda value: (value, True, "online"),
+    )
     @patch("qwopus_agent.api.model_runtime._wait_for_server")
     @patch("qwopus_agent.api.model_runtime._available_port", return_value=18080)
     def test_local_model_starts_discovered_mlx_server_without_shell(
         self,
         _port: MagicMock,
         wait_for_server: MagicMock,
-        _check: MagicMock,
-        _resolve: MagicMock,
+        _probe: MagicMock,
     ) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

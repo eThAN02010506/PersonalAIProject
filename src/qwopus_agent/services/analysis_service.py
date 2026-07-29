@@ -28,8 +28,11 @@ from qwopus_agent.integrations.smolagents_runtime import (
     check_model_connection,
     resolve_model_settings,
     run_smolagents_file_analysis_with_debug,
+    should_use_grounded_report_composer,
 )
 from qwopus_agent.integrations.smolagents_tools import (
+    build_direct_document_search_tool,
+    build_document_collection_summary_tool,
     build_document_outline_tool,
     build_document_search_tool,
     build_document_section_tool,
@@ -48,11 +51,19 @@ logger = get_logger("services.analysis_service")
 
 @dataclass(frozen=True)
 class UploadedFileInput:
-    """Uploaded file payload independent from any UI framework."""
+    """Uploaded bytes or one validated local path, independent from UI frameworks."""
 
     name: str
 
-    content: bytes
+    content: bytes | None = None
+
+    local_path: Path | None = None
+
+    def __post_init__(self) -> None:
+        # 原因：同时提供字节和路径会让保存、索引语义不明确；两者都没有则无法分析。
+        # 作用：所有入口在业务流程开始前都固定为上传模式或本地目录模式之一。
+        if (self.content is None) == (self.local_path is None):
+            raise ValueError("Provide exactly one of content or local_path.")
 
 
 @dataclass(frozen=True)
@@ -72,13 +83,27 @@ def analyze_uploaded_files(
     uploaded_files: list[UploadedFileInput],
     user_question: str,
     settings: SmolagentsModelSettings,
-    minirag: MiniRAG,
+    minirag: MiniRAG | None,
     min_source_relevance: float = 0.55,
     selected_sections: dict[str, tuple[str, ...]] | None = None,
     document_store: DocumentStore | None = None,
     analysis_mode: str = "question",
 ) -> UploadAnalysisOutcome:
     """Analyze uploaded files, update MiniRAG, and optionally call the LLM."""
+    if not uploaded_files:
+        raise ValueError("At least one file is required.")
+    has_local_paths = any(
+        uploaded_file.local_path is not None for uploaded_file in uploaded_files
+    )
+    has_uploaded_bytes = any(
+        uploaded_file.content is not None for uploaded_file in uploaded_files
+    )
+    if has_local_paths and has_uploaded_bytes:
+        raise ValueError("Uploaded bytes and local paths cannot be mixed.")
+    direct_mode = has_local_paths
+    if not direct_mode and minirag is None:
+        raise ValueError("Uploaded-file analysis requires a MiniRAG instance.")
+
     # 原因：服务端模型可能在两次上传分析之间发生切换。
     # 作用：每次分析开始时刷新模型 id，避免继续使用 .env 中的旧名称。
     settings = resolve_model_settings(settings)
@@ -96,30 +121,48 @@ def analyze_uploaded_files(
     debug_runs: list[AgentDebugRun] = []
 
     for uploaded_file in uploaded_files:
-        logger.info(
-            "upload_received filename=%s size=%s",
-            uploaded_file.name,
-            len(uploaded_file.content),
-        )
-        stored = save_uploaded_bytes(uploaded_file.name, uploaded_file.content)
-        logger.info("upload_saved filename=%s path=%s", stored.original_name, stored.path)
-        debug_steps.extend(
-            [
-                f"文件已保存：{stored.original_name}",
-                f"保存路径：{stored.path}",
-            ]
-        )
+        if uploaded_file.local_path is not None:
+            source_path = uploaded_file.local_path.expanduser().resolve(strict=True)
+            file_name = uploaded_file.name
+            file_size = source_path.stat().st_size
+            logger.info(
+                "local_file_selected filename=%s path=%s size=%s",
+                file_name,
+                source_path,
+                file_size,
+            )
+            debug_steps.append(f"已选择本地文件：{file_name}")
+        else:
+            content = uploaded_file.content
+            if content is None:
+                raise ValueError(f"Missing uploaded bytes: {uploaded_file.name}")
+            logger.info(
+                "upload_received filename=%s size=%s",
+                uploaded_file.name,
+                len(content),
+            )
+            stored = save_uploaded_bytes(uploaded_file.name, content)
+            source_path = stored.path
+            file_name = stored.original_name
+            logger.info("upload_saved filename=%s path=%s", file_name, source_path)
+            debug_steps.extend(
+                [
+                    f"文件已保存：{file_name}",
+                    f"保存路径：{source_path}",
+                ]
+            )
+
         # 原因：文件解析是确定性的输入预处理，不应该再启动另一套 Planner/Executor。
         # 作用：只生成 UI、MiniRAG 和 Tool 共用的安全上下文；Agent 决策留给 smolagents。
         result = analyze_uploaded_file(
-            stored.path,
+            source_path,
             user_question=effective_question,
-            source_name=stored.original_name,
+            source_name=file_name,
         )
         if result.markdown_document:
             if result.metadata.get("source_type") == "spreadsheet":
-                spreadsheet_contexts[stored.original_name] = result.markdown_document
-                spreadsheet_paths[stored.original_name] = stored.path
+                spreadsheet_contexts[file_name] = result.markdown_document
+                spreadsheet_paths[file_name] = source_path
             else:
                 structure = (
                     result.document_structures[0]
@@ -127,17 +170,17 @@ def analyze_uploaded_files(
                     else chunk_document_structure(
                         build_document_structure(
                             result.markdown_document,
-                            source=stored.original_name,
+                            source=file_name,
                         )
                     )
                 )
-                document_structures[stored.original_name] = structure
+                document_structures[file_name] = structure
                 summary = summarize_document(structure)
-                document_summaries[stored.original_name] = summary
-                if stored.path.exists():
+                document_summaries[file_name] = summary
+                if not direct_mode and source_path.exists():
                     resolved_store = document_store or DocumentStore()
                     resolved_store.persist(
-                        original_path=stored.path,
+                        original_path=source_path,
                         markdown=result.markdown_document,
                         structure=structure,
                         metadata=result.metadata,
@@ -145,11 +188,11 @@ def analyze_uploaded_files(
                     resolved_store.persist_summary(summary)
         logger.info(
             "upload_analyzed filename=%s metadata=%s",
-            stored.original_name,
+            file_name,
             result.metadata,
         )
-        debug_steps.append(f"本地预处理完成：{stored.original_name}: {result.metadata}")
-        analyzed_results.append((stored.original_name, result))
+        debug_steps.append(f"本地预处理完成：{file_name}: {result.metadata}")
+        analyzed_results.append((file_name, result))
 
     result = combine_analysis_results(analyzed_results)
     scoped_sections = _scope_sections_by_file(
@@ -158,15 +201,26 @@ def analyze_uploaded_files(
     )
     if analysis_mode == "section" and not scoped_sections:
         raise ValueError("Section analysis requires at least one valid selected section.")
-    memory_hit_count = _index_uploaded_results(
-        result=result,
-        analyzed_results=analyzed_results,
-        document_structures=document_structures,
-        question=effective_question,
-        minirag=minirag,
-        min_source_relevance=min_source_relevance,
-        debug_steps=debug_steps,
-    )
+    if direct_mode:
+        # 原因：目录分析针对用户本次勾选的原文件，不需要制造持久知识副本或向量索引。
+        # 作用：只在内存中使用解析结构和本地 Tool，storage/minirag 不会被读取或写入。
+        result.metadata["minirag_inserted"] = False
+        result.metadata["minirag_search_hits"] = 0
+        result.metadata["analysis_source"] = "local_folder"
+        memory_hit_count = 0
+        debug_steps.append("本地目录直接分析：未读取或写入 MiniRAG。")
+    else:
+        if minirag is None:
+            raise ValueError("Uploaded-file analysis requires a MiniRAG instance.")
+        memory_hit_count = _index_uploaded_results(
+            result=result,
+            analyzed_results=analyzed_results,
+            document_structures=document_structures,
+            question=effective_question,
+            minirag=minirag,
+            min_source_relevance=min_source_relevance,
+            debug_steps=debug_steps,
+        )
     result, model_debug_runs = _run_model_analysis(
         result=result,
         analyzed_results=analyzed_results,
@@ -181,6 +235,7 @@ def analyze_uploaded_files(
         minirag=minirag,
         min_source_relevance=min_source_relevance,
         memory_hit_count=memory_hit_count,
+        direct_mode=direct_mode,
         debug_steps=debug_steps,
     )
     debug_runs.extend(model_debug_runs)
@@ -260,9 +315,10 @@ def _run_model_analysis(
     question: str,
     analysis_mode: str,
     settings: SmolagentsModelSettings,
-    minirag: MiniRAG,
+    minirag: MiniRAG | None,
     min_source_relevance: float,
     memory_hit_count: int,
+    direct_mode: bool,
     debug_steps: list[str],
 ) -> tuple[AnalysisResult, tuple[AgentDebugRun, ...]]:
     """Run the model phase after local parsing and indexing are complete."""
@@ -273,11 +329,24 @@ def _run_model_analysis(
         debug_steps.append("本地解析没有得到 Markdown 文档内容，因此没有调用模型。")
         return result, ()
 
+    file_names = [file_name for file_name, _ in analyzed_results]
+    grounded_composer_available = should_use_grounded_report_composer(
+        file_names=file_names,
+        spreadsheet_names=list(spreadsheet_contexts),
+        user_question=question,
+        has_collection_summary=(
+            analysis_mode != "section" and len(document_summaries) > 1
+        ),
+    )
     online, connection_message = check_model_connection(settings)
     debug_steps.append(f"模型连接检测：{connection_message}")
-    if not online:
+    if not online and not grounded_composer_available:
         debug_steps.append(f"模型未连接，仅展示本地解析结果：{connection_message}")
         return result, ()
+    if not online:
+        debug_steps.append(
+            "模型未连接；此全来源长报告改用本地证据合成，不依赖远程生成。"
+        )
 
     budget_manager = TokenBudgetManager(
         context_window=settings.context_window_tokens,
@@ -292,10 +361,12 @@ def _run_model_analysis(
         scoped_sections=scoped_sections,
         min_source_relevance=min_source_relevance,
         budget_manager=budget_manager,
+        direct_mode=direct_mode,
+        question=question,
+        analysis_mode=analysis_mode,
     )
     # 原因：smolagents 是文件分析的统一驱动，服务层只注入当前任务允许访问的能力。
     # 作用：Agent 自行选择文档、Excel 沙箱或 MiniRAG Tool，且无法访问未上传的路径。
-    file_names = [file_name for file_name, _ in analyzed_results]
     analysis_run = run_smolagents_file_analysis_with_debug(
         file_names=file_names,
         spreadsheet_names=list(spreadsheet_contexts),
@@ -318,6 +389,23 @@ def _run_model_analysis(
             "answer": analysis_run.answer,
         },
     )
+    required_sources = tuple(file_names)
+    covered_sources = tuple(
+        file_name
+        for file_name in required_sources
+        if file_name in analysis_run.inspected_file_names
+    )
+    missing_sources = tuple(
+        file_name for file_name in required_sources if file_name not in covered_sources
+    )
+    if missing_sources:
+        # 原因：API 的 completed 状态必须代表所有显式选择的来源都实际进入 Agent 证据。
+        # 作用：即使未来 runtime 被替换或 mocked，也不能把少源答案包装成成功结果。
+        raise RuntimeError(
+            "Document source coverage incomplete: "
+            + ", ".join(missing_sources)
+            + "."
+        )
     return (
         AnalysisResult(
             markdown_summary=result.markdown_summary,
@@ -325,9 +413,18 @@ def _run_model_analysis(
             metadata={
                 **result.metadata,
                 "minirag_search_hits": memory_hit_count,
-                "minirag_context_used": "rag_search" in analysis_run.tool_calls,
+                "minirag_context_used": (
+                    minirag is not None and "rag_search" in analysis_run.tool_calls
+                ),
                 "pandas_sandbox_used": "excel_analysis" in analysis_run.tool_calls,
                 "smolagents_tool_calls": analysis_run.tool_calls,
+                "generation_mode": analysis_run.generation_mode,
+                "source_coverage": {
+                    "required_sources": list(required_sources),
+                    "covered_sources": list(covered_sources),
+                    "missing_sources": list(missing_sources),
+                    "complete": not missing_sources,
+                },
             },
             markdown_document=result.markdown_document,
             llm_analysis=analysis_run.answer,
@@ -387,7 +484,7 @@ def _scope_sections_by_file(
 
 def _build_analysis_tools(
     *,
-    minirag: MiniRAG,
+    minirag: MiniRAG | None,
     document_structures: dict[str, DocumentStructure],
     document_summaries: dict[str, HierarchicalDocumentSummary],
     spreadsheet_contexts: dict[str, str],
@@ -395,23 +492,36 @@ def _build_analysis_tools(
     scoped_sections: dict[str, tuple[str, ...]],
     min_source_relevance: float,
     budget_manager: TokenBudgetManager,
+    direct_mode: bool,
+    question: str,
+    analysis_mode: str,
 ) -> list[Any]:
     """Compose task-scoped Tool adapters without adding business decisions."""
     tools: list[Any] = []
     if document_structures:
+        if direct_mode:
+            search_tool = build_direct_document_search_tool(
+                document_structures,
+                selected_section_ids=scoped_sections,
+                budget_manager=budget_manager,
+            )
+        else:
+            if minirag is None:
+                raise ValueError("Indexed document search requires MiniRAG.")
+            search_tool = build_document_search_tool(
+                minirag,
+                document_structures,
+                min_relevance=min_source_relevance,
+                selected_section_ids=scoped_sections,
+                budget_manager=budget_manager,
+            )
         tools.extend(
             [
                 build_document_outline_tool(
                     document_structures,
                     budget_manager=budget_manager,
                 ),
-                build_document_search_tool(
-                    minirag,
-                    document_structures,
-                    min_relevance=min_source_relevance,
-                    selected_section_ids=scoped_sections,
-                    budget_manager=budget_manager,
-                ),
+                search_tool,
                 build_document_section_tool(
                     document_structures,
                     selected_section_ids=scoped_sections,
@@ -423,6 +533,15 @@ def _build_analysis_tools(
                 ),
             ]
         )
+        if analysis_mode != "section" and len(document_summaries) > 1:
+            tools.append(
+                build_document_collection_summary_tool(
+                    document_summaries,
+                    documents=document_structures,
+                    query=question,
+                    budget_manager=budget_manager,
+                )
+            )
     if spreadsheet_contexts:
         tools.extend(
             [
@@ -433,13 +552,14 @@ def _build_analysis_tools(
                 build_excel_analysis_tool(spreadsheet_paths),
             ]
         )
-    tools.append(
-        build_minirag_search_tool(
-            minirag,
-            min_relevance=min_source_relevance,
-            budget_manager=budget_manager,
+    if minirag is not None and not direct_mode:
+        tools.append(
+            build_minirag_search_tool(
+                minirag,
+                min_relevance=min_source_relevance,
+                budget_manager=budget_manager,
+            )
         )
-    )
     return tools
 
 

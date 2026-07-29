@@ -15,6 +15,7 @@ from qwopus_agent.documents import (
 )
 from qwopus_agent.integrations.smolagents_tools import (
     TavilySearchConfig,
+    build_document_collection_summary_tool,
     build_document_outline_tool,
     build_document_search_tool,
     build_document_section_tool,
@@ -29,6 +30,7 @@ from qwopus_agent.memory.graph_backend import PersistentKnowledgeGraph
 from qwopus_agent.memory.graph_extraction import RuleBasedGraphExtractor
 from qwopus_agent.memory.graph_models import GraphChunk
 from qwopus_agent.memory.knowledge_graph import KnowledgeGraphIndex
+from qwopus_agent.utils.token_budget import TokenBudgetManager, estimate_tokens
 from tests.minirag_fakes import make_test_minirag
 
 
@@ -38,6 +40,29 @@ class FakeTool:
 
 
 class SmolagentsToolsTests(unittest.TestCase):
+    def test_minirag_tool_preserves_user_named_source_hint(self) -> None:
+        queries: list[str] = []
+
+        class RecordingKnowledgeStore:
+            def insert(self, document: str, *, document_id: str | None = None) -> str:
+                return document_id or "unused"
+
+            def search(self, query: str, min_relevance: float = 0.25) -> list[str]:
+                queries.append(query)
+                return ["[Source: README.md]\nReact and FastAPI."]
+
+        with patch.dict(sys.modules, {"smolagents": types.SimpleNamespace(Tool=FakeTool)}):
+            tool = build_minirag_search_tool(
+                RecordingKnowledgeStore(),
+                source_hints=("README.md",),
+            )
+            result = tool.forward("frontend framework")
+
+        # 原因：真实模型把用户写出的 README.md 从 Tool 查询参数中删掉后发生了零召回。
+        # 作用：锁定工具适配层会保留用户点名的已授权来源，不需要放宽全局相关性阈值。
+        self.assertIn("User-named sources: README.md", queries[0])
+        self.assertIn("React and FastAPI", result)
+
     def test_tavily_tool_formats_search_results(self) -> None:
         fake_module = types.SimpleNamespace(Tool=FakeTool)
         payload = {
@@ -131,6 +156,163 @@ class SmolagentsToolsTests(unittest.TestCase):
         self.assertIn("remaining_chunks=0", section_result)
         with self.assertRaisesRegex(ValueError, "Unknown file_name"):
             outline.forward("../secret.txt")
+
+    def test_document_search_falls_back_to_exact_text_in_selected_file(self) -> None:
+        fake_module = types.SimpleNamespace(Tool=FakeTool)
+        structure = chunk_document_structure(
+            build_document_structure(
+                "# Finance\n\nThe approved delivery budget is USD 4.2 million.",
+                source="beta.md",
+            )
+        )
+
+        class EmptyKnowledgeStore:
+            def insert(self, document: str, *, document_id: str | None = None) -> str:
+                return document_id or "unused"
+
+            def search(self, query: str, **kwargs) -> list[str]:
+                return []
+
+        with patch.dict(sys.modules, {"smolagents": fake_module}):
+            tool = build_document_search_tool(
+                EmptyKnowledgeStore(),
+                {"beta.md": structure},
+            )
+            result = tool.forward("beta.md", "approved budget")
+
+        # 原因：真实多文件测试中 embedding 阈值漏掉了包含完全相同词组的短文档。
+        # 作用：证明回退只读取指定文件的匹配 chunk，并保留可追踪的本地来源。
+        self.assertIn("USD 4.2 million", result)
+        self.assertIn("[beta.md / Finance]", result)
+
+    def test_collection_evidence_keeps_first_and_last_source_with_verified_manifest(self) -> None:
+        fake_module = types.SimpleNamespace(Tool=FakeTool)
+        documents = {}
+        summaries = {}
+        for index in range(30):
+            source = f"lesson-{index + 1:02d}.md"
+            structure = chunk_document_structure(
+                build_document_structure(
+                    f"# Lesson {index + 1}\n\n"
+                    + (f"Distinct evidence for lesson {index + 1}. " * 80),
+                    source=source,
+                )
+            )
+            documents[source] = structure
+            summaries[source] = summarize_document(structure)
+
+        with patch.dict(sys.modules, {"smolagents": fake_module}):
+            tool = build_document_collection_summary_tool(
+                summaries,
+                documents=documents,
+                query="Compare every lesson and use specific evidence.",
+            )
+        observation = tool.forward()
+
+        # 原因：旧实现把所有 per-source 预算用完后再做 prefix truncate，尾部来源必然消失。
+        # 作用：manifest、首尾 source 和逐来源 chunk 引用同时存在，证明没有伪全覆盖。
+        marker = observation.splitlines()[0]
+        self.assertTrue(marker.startswith("QWOPUS_SOURCE_COVERAGE="))
+        self.assertEqual(len(json.loads(marker.split("=", 1)[1])), 30)
+        self.assertIn("# File: lesson-01.md", observation)
+        self.assertIn("# File: lesson-30.md", observation)
+        self.assertIn("chunk_id=", observation)
+
+    def test_collection_evidence_reserves_each_lessons_exact_topic_and_scripture(self) -> None:
+        fake_module = types.SimpleNamespace(Tool=FakeTool)
+        lesson_facts = {
+            29: (
+                "题目：我只在乎谁？",
+                "--- 不只求自己的事，更求耶稣的事（中）",
+                "经文：腓立比书2章21节",
+            ),
+            30: (
+                "题目：我只在乎谁",
+                "--- 一个靠谱的人，是怎样炼成的（下）",
+                "经文：腓立比书2章22-24节",
+            ),
+            31: (
+                "题目：成熟的人，如何活在多重关系里（上）",
+                "",
+                "经文：腓立比书2章25节",
+            ),
+        }
+        documents = {}
+        summaries = {}
+        for lesson in range(21, 34):
+            source = f"腓立比书查经第{lesson}课.docx"
+            topic, continuation, scripture = lesson_facts.get(
+                lesson,
+                (
+                    f"题目：第{lesson}课的唯一主题",
+                    "",
+                    f"经文：测试书2章{lesson}节",
+                ),
+            )
+            metadata_lines = "\n".join(
+                line
+                for line in (
+                    f"腓立比书查经第{lesson}课",
+                    topic,
+                    continuation,
+                    scripture,
+                )
+                if line
+            )
+            structure = chunk_document_structure(
+                build_document_structure(
+                    metadata_lines
+                    + "\n\n"
+                    + (f"这是第{lesson}课独有的正文证据。 " * 240),
+                    source=source,
+                )
+            )
+            documents[source] = structure
+            summaries[source] = summarize_document(structure)
+
+        budget = TokenBudgetManager(
+            context_window=8192,
+            output_reserve=2048,
+            system_reserve=1024,
+            history_reserve=512,
+            safety_reserve=1024,
+        )
+        with patch.dict(sys.modules, {"smolagents": fake_module}):
+            tool = build_document_collection_summary_tool(
+                summaries,
+                documents=documents,
+                query="逐课比较全部文件的题目、经文和正文主题。",
+                budget_manager=budget,
+            )
+        observation = tool.forward()
+
+        def source_block(source: str) -> str:
+            start = observation.index(f"# File: {source}")
+            end = observation.find("\n\n# File:", start + 1)
+            return observation[start:] if end == -1 else observation[start:end]
+
+        # 原因：29～31课共享相邻段落和相似系列名，泛化摘要很容易把三课复制成同一课。
+        # 作用：即使小窗口迫使 overview 大幅压缩，每课原始题目与经文仍被固定保留，
+        # 且事实锚点先于可截断的正文 evidence/overview。
+        for lesson, (topic, continuation, scripture) in lesson_facts.items():
+            source = f"腓立比书查经第{lesson}课.docx"
+            block = source_block(source)
+            self.assertIn(f"topic_line: {topic}", block)
+            if continuation:
+                self.assertIn(f"topic_continuation: {continuation}", block)
+            self.assertIn(f"scripture_line: {scripture}", block)
+            self.assertLess(block.index("SOURCE_FACTS"), block.index("QUERY_RELEVANT_EVIDENCE"))
+
+        lesson_29 = source_block("腓立比书查经第29课.docx")
+        lesson_30 = source_block("腓立比书查经第30课.docx")
+        lesson_31 = source_block("腓立比书查经第31课.docx")
+        self.assertNotIn("scripture_line: 经文：腓立比书2章22-24节", lesson_29)
+        self.assertNotIn("scripture_line: 经文：腓立比书2章25节", lesson_30)
+        self.assertNotIn("一个靠谱的人，是怎样炼成的", lesson_31)
+        self.assertIn("Never infer, renumber, reconstruct", observation)
+        self.assertIn("Similar adjacent lessons remain distinct", observation)
+        self.assertIn("QWOPUS_EXPLICIT_RUBRIC_FOUND=false", observation)
+        self.assertLessEqual(estimate_tokens(observation), budget.synthesis_budget)
 
     def test_excel_schema_tool_bounds_safe_context(self) -> None:
         fake_module = types.SimpleNamespace(Tool=FakeTool)

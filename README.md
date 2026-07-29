@@ -24,13 +24,13 @@ src/qwopus_agent/
   api/          FastAPI app composition, focused route modules, SQLite conversations, and runs
   agents/       Planner, Executor, Router, research, and supervised Multi-Agent orchestration
   documents/    Markdown normalization, section structure, chunking, summaries, and local storage
-  integrations/ smolagents execution, model discovery, debug normalization, and Tool adapters
+  integrations/ smolagents runtime, prompt policy, capability assembly, and focused Tool adapters
   llm/          BaseLLM interface and LocalMLXLLM adapter
   memory/       MiniRAG facade, conversation-scoped lifecycle, retrieval, graph, and multi-hop queries
   skills/       Reusable, auto-discovered, and learned Workflow Skills
   services/     UI-independent analysis and knowledge lifecycle workflows
   reflection/   Lightweight task reflection evaluator
-  reports/      Unified report generation module
+  reports/      Artifact generation plus grounded facts, rendering, and report-contract validation
   prompts/      Prompt templates and system prompt assets
 frontend/       React, assistant-ui, Vite, and the production chat/document workspace
 tests/          Unit tests for first-stage architecture
@@ -160,6 +160,13 @@ AgentOrchestrator + smolagents
 - Long documents are structured by heading and page, chunked with section provenance, and summarized
   hierarchically. The React document workspace can target a question, selected sections, or the whole
   document without sending the complete source to the model.
+- Local folder mode accepts an absolute folder path, recursively displays supported files as a
+  selectable tree, and analyzes only the selected originals. It skips hidden paths and symbolic
+  links, allows up to 100 selected files per run, and uses in-memory document/Excel tools without
+  copying those files into uploads, saved documents, or MiniRAG.
+- Saved documents can be selected for direct re-analysis or explicitly attached to the active chat.
+  Attachment indexes their normalized Markdown into that chat's private MiniRAG; merely seeing a
+  document in the saved-document list does not grant chat access to it.
 - The initial OpenAI-compatible endpoint is read from the existing environment configuration. The
   model settings dialog can switch the runtime address without modifying `.env`, and the current
   model identifier is resolved from the selected server for each run.
@@ -194,6 +201,18 @@ PYTHONPATH=src python -m uvicorn qwopus_agent.api.app:app --host 127.0.0.1 --por
 Open the formal application at `http://127.0.0.1:8010/` and the Debug Console at
 `http://127.0.0.1:8010/debug`.
 
+To expose the application and read-only Debug Console to trusted devices on the same private LAN,
+start it with an explicit diagnostics permission:
+
+```bash
+QWOPUS_DEBUG_ALLOW_LAN=1 \
+PYTHONPATH=src python -m uvicorn qwopus_agent.api.app:app --host 0.0.0.0 --port 8010
+```
+
+Then open `http://<mac-lan-ip>:8010/debug`. LAN diagnostics are disabled by default, and the
+backend still rejects non-private client addresses because traces may contain prompts, document
+evidence, and Tool observations. Use this mode only on a trusted network.
+
 The Debug Console provides:
 
 - current model identity, endpoint, process, Python, platform, uptime, task counts, and trace storage
@@ -211,7 +230,9 @@ runs, so the primary React frontend continues to receive only final answers, cit
 process events. FastAPI writes internal records atomically under `logs/debug_runs/`; the Debug API
 only reads those files and does not initialize MiniRAG, MinerU, Torch, or an Agent worker. Raw
 diagnostics reject non-loopback clients even if the main API is later exposed to the local network.
-The newest 200 complete run records are retained so sensitive diagnostics stay bounded.
+Debug retention keeps at most the newest 200 complete records, 64 MiB in aggregate, and 14 days of
+history. Cleanup never touches an active `.tmp` write, so sensitive diagnostics stay bounded without
+exposing partially written JSON.
 
 Manual checks:
 
@@ -226,11 +247,35 @@ in the global aggregate at `storage/minirag/documents.jsonl`, alongside compatib
 That aggregate is never opened by a chat turn unless Global is explicitly authorized.
 Markdown-normalized documents and safe spreadsheet summaries are inserted through the
 `MiniRAG.insert(document)` facade, and later analysis can retrieve existing context through
-`MiniRAG.search(query)`. The facade uses MiniRAG's persistent
-NanoVectorDB backend and a local multilingual sentence-transformer, so retrieval does not depend on
+`MiniRAG.search(query)`. Application Skills depend on the small `KnowledgeStore` protocol rather
+than on vector or graph internals. The current `MiniRAG` class is a Qwopus adapter using the
+upstream package's persistent NanoVectorDB component; it is not a wrapper around the upstream
+project's complete `MiniRAG.query` pipeline. Qwopus owns chunking, conversation scoping, graph
+extraction, and evidence rendering around that component. A local multilingual sentence-transformer
+keeps retrieval independent from
 the Gemma, Qwen, or other chat model currently served by the OpenAI-compatible endpoint. The installed
 `minirag-hku` package is linked to `vendor/MiniRAG-main`; Qwopus adds a persistent directed graph layer
 for evidence-bound entities, relations, cross-document aggregation, and bounded multi-hop paths.
+
+When a known file is not returned in chat, check the scope before changing the similarity slider:
+
+1. `Knowledge` searches only `storage/minirag/conversations/<conversation_id>/` by default.
+2. Use **Saved documents → Attach to chat** to make an existing parsed document available to the
+   active conversation.
+3. Enable `Global` only when the current turn may use documents from other conversations or legacy
+   global records.
+4. Lower `Sources` only when the correct scope is selected but semantic evidence is still too weak.
+
+MiniRAG treats `documents.jsonl` as the fact source and the NanoVectorDB file as rebuildable derived
+state. On startup it compares chunk ids and automatically fills or rebuilds a stale vector index, so
+missing derived vectors do not require re-uploading the original documents. Before each knowledge
+operation, a cached instance also checks the fact-store version under the cross-process file lock;
+API workers and Agent subprocesses therefore see documents written by another process without an
+application restart.
+
+MinerU parses each PDF, DOCX, PNG, or JPEG in its own directory under `storage/cache/mineru`. This
+keeps concurrent uploads from selecting another task's generated Markdown while preserving every
+output path in the debug metadata.
 
 Download the default embedding model once before the first document upload:
 

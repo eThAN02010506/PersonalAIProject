@@ -49,6 +49,7 @@ class SkillGrowthPolicy:
     min_successes: int = 2
     min_output_chars: int = 40
     name_prefix: str = "learned_"
+    auto_promote: bool = True
 
     def __post_init__(self) -> None:
         if self.min_successes < 1:
@@ -109,6 +110,10 @@ class SkillGrowthService:
                     "successes": successes,
                     "skills": [step.skill_name for step in run.plan.steps],
                     "last_objective": objective,
+                    "intent_examples": _append_intent_example(
+                        record.get("intent_examples"),
+                        objective,
+                    ),
                 }
             )
             history[signature] = record
@@ -132,7 +137,13 @@ class SkillGrowthService:
                 )
 
             version = self.catalog.next_patch_version(skill_name)
-            spec = self._build_spec(skill_name, version, signature, run).sealed()
+            spec = self._build_spec(
+                skill_name,
+                version,
+                signature,
+                run,
+                intent_examples=tuple(record["intent_examples"]),
+            ).sealed()
             self.validate(spec)
             spec_path = self._persist_spec(spec)
             source_run_id = str((context or {}).get("trace_id") or uuid.uuid4().hex)
@@ -151,8 +162,14 @@ class SkillGrowthService:
             # 原因：候选必须先进入 Catalog，激活状态才具备可审计的来源和版本。
             # 作用：运行时热部署成功后再切换 active，失败候选不会在下次启动时加载。
             self.catalog.register(candidate)
-            self.registry.register(WorkflowSkill(spec, self.registry), replace=True)
-            active_manifest = self.catalog.activate(spec.name, spec.version)
+            if not self.policy.auto_promote:
+                return SkillGrowthDecision(
+                    "candidate",
+                    "Workflow passed validation and is waiting for promotion.",
+                    signature,
+                    candidate,
+                )
+            active_manifest = self.promote(spec.name, spec.version)
             record["deployed_version"] = spec.version
             self._write_history(history)
             return SkillGrowthDecision(
@@ -161,6 +178,27 @@ class SkillGrowthService:
                 signature,
                 active_manifest,
             )
+
+    def promote(self, name: str, version: str) -> SkillManifest:
+        """Validate and activate one persisted candidate workflow."""
+        manifest = next(
+            (
+                item
+                for item in self.catalog.list()
+                if item.name == name and item.version == version
+            ),
+            None,
+        )
+        if manifest is None or manifest.spec_path is None:
+            raise KeyError(f"Unknown workflow candidate: {name}@{version}")
+        spec = WorkflowSpec.model_validate_json(
+            Path(manifest.spec_path).read_text(encoding="utf-8")
+        )
+        self.validate(spec)
+        # 原因：Catalog 的 active 状态不能证明当前进程已经加载了可执行 Skill。
+        # 作用：先完成完整性校验和热注册，再原子切换持久化激活版本。
+        self.registry.register(WorkflowSkill(spec, self.registry), replace=True)
+        return self.catalog.activate(name, version)
 
     def validate(self, spec: WorkflowSpec) -> None:
         """Validate integrity, references, recursion, and persisted arguments."""
@@ -201,6 +239,8 @@ class SkillGrowthService:
         version: str,
         signature: str,
         run: AgentRun,
+        *,
+        intent_examples: tuple[str, ...],
     ) -> WorkflowSpec:
         steps = tuple(
             WorkflowStep(
@@ -215,6 +255,7 @@ class SkillGrowthService:
             name=name,
             version=version,
             description=f"Learned and validated workflow: {sequence}.",
+            intent_examples=intent_examples,
             steps=steps,
             source_signature=signature,
         )
@@ -281,3 +322,18 @@ def _sanitize_arguments(value: Any) -> Any:
     if value is None or isinstance(value, (bool, int, float, str)):
         return value
     return str(value)
+
+
+def _append_intent_example(existing: Any, objective: str) -> list[str]:
+    """Keep a small, deduplicated set of successful user intents."""
+    examples = (
+        [str(item).strip()[:500] for item in existing if str(item).strip()]
+        if isinstance(existing, list)
+        else []
+    )
+    normalized = " ".join(objective.split())[:500]
+    if normalized and normalized not in examples:
+        examples.append(normalized)
+    # 原因：历史样例会进入持久化 Skill，不能随运行次数无限增长。
+    # 作用：保留最近八个已验证意图，足够辅助匹配且不膨胀 Catalog。
+    return examples[-8:]

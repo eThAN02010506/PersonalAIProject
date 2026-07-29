@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException
 
-from qwopus_agent.api.model_runtime import RuntimeModelController
+from qwopus_agent.api.model_runtime import ModelRuntimeError, RuntimeModelController
 from qwopus_agent.api.models import (
     ChatStartRequest,
     ConversationCreate,
@@ -119,6 +119,7 @@ class _ConversationEndpoints:
     def delete_conversation(self, conversation_id: str) -> None:
         if self.repository.get_conversation(conversation_id) is None:
             raise HTTPException(status_code=404, detail="Conversation not found.")
+        self.runs.cancel_conversation(conversation_id)
         # 原因：会话记录删除后，其私有向量与图谱目录不应变成不可见的孤立数据。
         # 作用：显式删除聊天时同步清理该 conversation_id 的知识库，不影响其他聊天。
         self.knowledge.delete(conversation_id)
@@ -145,14 +146,24 @@ class _ConversationEndpoints:
                 conversation_id,
                 _conversation_title(payload.content),
             )
+        try:
+            settings = self.runtime.require_online_settings()
+        except ModelRuntimeError as exc:
+            # 原因：MiniRAG 可用不代表知识 Agent 能在模型离线时生成最终自然语言答案。
+            # 作用：不启动注定失败的 worker，并让正式前端显示可操作的 503 错误。
+            raise HTTPException(
+                status_code=503,
+                detail=f"Model service is unavailable. {exc}",
+            ) from exc
         run_id = self.runs.start(
             conversation_id,
             payload.content,
-            self.runtime.current_settings(),
+            settings,
             enable_web_search=payload.enable_web_search,
             enable_local_knowledge=payload.enable_local_knowledge,
             include_global_knowledge=payload.include_global_knowledge,
             min_source_relevance=payload.min_source_relevance,
+            response_detail=payload.response_detail,
         )
         return RunStarted(run_id=run_id)
 

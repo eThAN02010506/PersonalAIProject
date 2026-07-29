@@ -54,6 +54,7 @@ class ChatServiceTests(unittest.TestCase):
             self.assertTrue(request.enable_local_knowledge)
             self.assertEqual(request.conversation_id, "conversation-1")
             self.assertEqual(request.min_source_relevance, 0.8)
+            self.assertEqual(request.response_detail, "balanced")
             assert progress_callback is not None
             progress_callback("planning")
             progress_callback("completed")
@@ -94,6 +95,7 @@ class ChatServiceTests(unittest.TestCase):
                     enable_web_search=True,
                     enable_local_knowledge=True,
                     min_source_relevance=0.8,
+                    response_detail="balanced",
                 ),
             )
 
@@ -149,6 +151,7 @@ class ChatServiceTests(unittest.TestCase):
                 enable_local_knowledge=True,
                 include_global_knowledge=True,
                 min_source_relevance=0.72,
+                response_detail="concise",
                 knowledge_root=Path("/tmp/conversation-knowledge"),
             )
 
@@ -170,6 +173,7 @@ class ChatServiceTests(unittest.TestCase):
         self.assertTrue(request.enable_local_knowledge)
         self.assertTrue(request.include_global_knowledge)
         self.assertEqual(request.min_source_relevance, 0.72)
+        self.assertEqual(request.response_detail, "concise")
         self.assertEqual(request.knowledge_root, Path("/tmp/conversation-knowledge"))
         self.assertIs(task.process, process)
         process.start.assert_called_once_with()

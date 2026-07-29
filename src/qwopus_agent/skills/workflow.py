@@ -32,6 +32,9 @@ class WorkflowSpec(BaseModel):
     name: str = Field(min_length=1, pattern=r"^[a-zA-Z0-9_]+$")
     version: str = Field(pattern=r"^\d+\.\d+\.\d+$")
     description: str = Field(min_length=1)
+    # 原因：工具序列只说明“怎么做”，不足以识别用户用模糊说法表达的“要做什么”。
+    # 作用：保存已验证任务的脱敏示例，Planner 可据此匹配已晋升工作流。
+    intent_examples: tuple[str, ...] = ()
     steps: tuple[WorkflowStep, ...] = Field(min_length=1)
     source_signature: str = Field(min_length=1)
     checksum: str = ""

@@ -1,16 +1,23 @@
 import json
+import os
 import tempfile
 import unittest
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from pydantic import BaseModel
 
+from qwopus_agent.api.routes.debug import _debug_host_is_allowed
 from qwopus_agent.api.runs import ChatRunRegistry
 from qwopus_agent.integrations.smolagents_runtime import SmolagentsModelSettings
 from qwopus_agent.services.chat_service import ChatTaskResult
-from qwopus_agent.utils.debug_store import append_debug_record, load_debug_records
+from qwopus_agent.utils.debug_store import (
+    _prune_debug_records,
+    append_debug_record,
+    load_debug_records,
+)
 
 
 @dataclass(frozen=True)
@@ -25,6 +32,15 @@ class _TraceEvent(BaseModel):
 
 
 class DebugStoreTests(unittest.TestCase):
+    def test_debug_network_scope_requires_explicit_private_lan_permission(self) -> None:
+        # 原因：Debug 内容包含原始 Prompt 和 Observation，监听 0.0.0.0 不能等于允许公网读取。
+        # 作用：锁定回环始终可用、私网仅按开关放行、公网始终拒绝。
+        self.assertTrue(_debug_host_is_allowed("127.0.0.1", allow_lan=False))
+        self.assertFalse(_debug_host_is_allowed("192.168.1.42", allow_lan=False))
+        self.assertTrue(_debug_host_is_allowed("192.168.1.42", allow_lan=True))
+        self.assertTrue(_debug_host_is_allowed("fd00::42", allow_lan=True))
+        self.assertFalse(_debug_host_is_allowed("8.8.8.8", allow_lan=True))
+
     def test_round_trip_preserves_nested_raw_agent_fields(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             directory = Path(temporary_directory)
@@ -101,6 +117,66 @@ class DebugStoreTests(unittest.TestCase):
                 records[0]["debug_runs"][0]["steps"][0]["observations"],
                 "raw",
             )
+            task.close.assert_called_once_with()
+
+    def test_debug_count_reaps_abandoned_terminal_run(self) -> None:
+        repository = MagicMock()
+        repository.list_messages.return_value = []
+        task = MagicMock()
+        task.refresh_phase.return_value = "completed"
+        task.poll_result.return_value = ChatTaskResult(
+            status="completed",
+            content="reaped answer",
+        )
+        registry = ChatRunRegistry(repository)
+
+        with patch("qwopus_agent.api.runs.start_chat_task", return_value=task):
+            registry.start(
+                "conversation-1",
+                "question",
+                SmolagentsModelSettings(model_id="test", base_url="http://local/v1"),
+                enable_web_search=False,
+                enable_local_knowledge=False,
+            )
+
+        # 原因：浏览器刷新后可能永远不会再次 poll 原 run_id。
+        # 作用：Debug/维护调用仍收割终态、保存答案并释放 worker 资源。
+        self.assertEqual(registry.debug_counts(), (0, 1))
+        repository.add_message.assert_called_with(
+            "conversation-1",
+            "assistant",
+            "reaped answer",
+        )
+        task.close.assert_called_once_with()
+
+    def test_completed_run_cache_is_bounded(self) -> None:
+        repository = MagicMock()
+        repository.list_messages.return_value = []
+        registry = ChatRunRegistry(repository, max_completed_runs=1)
+
+        for answer in ("first", "second"):
+            task = MagicMock()
+            task.refresh_phase.return_value = "completed"
+            task.poll_result.return_value = ChatTaskResult(
+                status="completed",
+                content=answer,
+            )
+            with patch("qwopus_agent.api.runs.start_chat_task", return_value=task):
+                run_id = registry.start(
+                    "conversation-1",
+                    answer,
+                    SmolagentsModelSettings(
+                        model_id="test",
+                        base_url="http://local/v1",
+                    ),
+                    enable_web_search=False,
+                    enable_local_knowledge=False,
+                )
+            registry.poll(run_id)
+
+        # 原因：对话答案已进入 SQLite，旧 RunView 不应无限常驻进程内存。
+        # 作用：锁定容量裁剪只保留最近完成的轮询结果。
+        self.assertEqual(registry.debug_counts(), (0, 1))
 
     def test_writer_prunes_only_old_complete_records(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -120,6 +196,45 @@ class DebugStoreTests(unittest.TestCase):
 
             self.assertEqual(len(list(directory.glob("*.json"))), 200)
             self.assertTrue(pending.exists())
+
+    def test_pruner_bounds_total_record_bytes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            directory = Path(temporary_directory)
+            for index in range(3):
+                (directory / f"{index}.json").write_text("x" * 10, encoding="utf-8")
+
+            # 原因：少数超大 Agent Trace 可以在 200 条数量限制内耗尽磁盘。
+            # 作用：锁定清理器会保留较新的记录，并按总字节数淘汰最旧记录。
+            _prune_debug_records(directory, keep=10, max_bytes=20)
+
+            self.assertEqual(
+                sorted(path.name for path in directory.glob("*.json")),
+                ["1.json", "2.json"],
+            )
+
+    def test_pruner_removes_expired_records(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            directory = Path(temporary_directory)
+            expired = directory / "expired.json"
+            recent = directory / "recent.json"
+            expired.write_text("{}", encoding="utf-8")
+            recent.write_text("{}", encoding="utf-8")
+            old_timestamp = (
+                datetime.now(UTC) - timedelta(days=2)
+            ).timestamp()
+            os.utime(expired, (old_timestamp, old_timestamp))
+
+            # 原因：低频使用时记录数和字节数都可能未超限，但敏感调试内容仍会永久留存。
+            # 作用：锁定超过保留期限的完整记录会被清理，近期记录不受影响。
+            _prune_debug_records(
+                directory,
+                keep=10,
+                max_bytes=1024,
+                max_age=timedelta(days=1),
+            )
+
+            self.assertFalse(expired.exists())
+            self.assertTrue(recent.exists())
 
 
 if __name__ == "__main__":

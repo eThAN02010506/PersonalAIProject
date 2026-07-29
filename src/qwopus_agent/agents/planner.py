@@ -6,12 +6,14 @@ without executing skills, reading files, or producing side effects.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
 from qwopus_agent.agents.multi_agent import DelegatedTask, DelegationPlan
 from qwopus_agent.skills import SkillRegistry
+from qwopus_agent.skills.workflow import WorkflowSkill
 
 SPREADSHEET_EXTENSIONS = {".csv", ".xls", ".xlsx"}
 DOCUMENT_EXTENSIONS = {".pdf", ".docx", ".md", ".txt", ".png", ".jpeg", ".jpg"}
@@ -177,9 +179,100 @@ class SkillPlanner:
                 ],
             )
 
+        promoted_skill = _match_promoted_workflow(
+            objective,
+            self.skill_registry,
+            previous_objective=context.get("previous_objective"),
+        )
+        if promoted_skill is not None:
+            return Plan(
+                objective=objective,
+                steps=[
+                    PlanStep(
+                        skill_name=promoted_skill,
+                        query=objective,
+                        arguments=arguments,
+                        reason=(
+                            "The request matched validated intent examples from a promoted Skill."
+                        ),
+                    )
+                ],
+            )
+
         # 原因：无法判断任务类型时自动选第一个 Skill 会执行错误能力。
         # 作用：返回空计划，让上层明确处理“无法规划”，而不是产生隐式副作用。
         return Plan(objective=objective, steps=[])
+
+
+def _match_promoted_workflow(
+    objective: str,
+    registry: SkillRegistry,
+    *,
+    previous_objective: Any = None,
+) -> str | None:
+    """Return one unambiguous promoted workflow matching validated intent examples."""
+    query = objective
+    if isinstance(previous_objective, str) and previous_objective.strip():
+        # 原因：“再做一次”“和刚才一样”等模糊请求本身没有足够的意图词。
+        # 作用：调用方显式提供上一任务时，用它补充匹配上下文但仍执行当前问题。
+        query = f"{previous_objective} {objective}"
+    query_units = _intent_units(query)
+    if len(query_units) < 2:
+        return None
+
+    scores: list[tuple[float, str]] = []
+    for skill_name in registry.list_names():
+        skill = registry.get(skill_name)
+        if not isinstance(skill, WorkflowSkill):
+            continue
+        score = max(
+            (
+                _intent_similarity(query, query_units, example)
+                for example in skill.spec.intent_examples
+            ),
+            default=0.0,
+        )
+        if score >= 0.5:
+            scores.append((score, skill_name))
+    scores.sort(reverse=True)
+    if not scores:
+        return None
+    if len(scores) > 1 and scores[0][0] - scores[1][0] < 0.12:
+        # 原因：两个 Skill 得分接近时自动选择会把模糊问题路由到错误工作流。
+        # 作用：保持空计划，由上层追问或要求用户显式选择 Skill。
+        return None
+    return scores[0][1]
+
+
+def _intent_similarity(query: str, query_units: set[str], example: str) -> float:
+    normalized_query = " ".join(query.casefold().split())
+    normalized_example = " ".join(example.casefold().split())
+    if (
+        len(normalized_query) >= 6
+        and (
+            normalized_query in normalized_example
+            or normalized_example in normalized_query
+        )
+    ):
+        return 1.0
+    example_units = _intent_units(example)
+    overlap = query_units & example_units
+    if len(overlap) < 2:
+        return 0.0
+    return len(overlap) / min(len(query_units), len(example_units))
+
+
+def _intent_units(value: str) -> set[str]:
+    """Tokenize Latin words and CJK bigrams without adding a model dependency."""
+    lowered = value.casefold()
+    words = {word for word in re.findall(r"[a-z0-9_]{3,}", lowered)}
+    cjk_runs = re.findall(r"[\u3400-\u9fff]+", lowered)
+    bigrams = {
+        run[index : index + 2]
+        for run in cjk_runs
+        for index in range(len(run) - 1)
+    }
+    return words | bigrams
 
 
 @dataclass(frozen=True)

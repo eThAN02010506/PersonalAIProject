@@ -14,7 +14,7 @@ import {
   Terminal,
   Wrench,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { api } from "../lib/api";
 import type { DebugAgentRun, DebugOverview, DebugRecord } from "../lib/types";
@@ -33,8 +33,11 @@ export function DebugConsole() {
   const [loading, setLoading] = useState(true);
   const [loadingRecord, setLoadingRecord] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const refreshInFlight = useRef(false);
 
   const refresh = useCallback(async () => {
+    if (refreshInFlight.current) return;
+    refreshInFlight.current = true;
     try {
       const snapshot = await api.debugOverview();
       setOverview(snapshot);
@@ -48,6 +51,9 @@ export function DebugConsole() {
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Unable to load diagnostics.");
     } finally {
+      // 原因：setInterval 不会等待上一次网络请求，离线模型探测可能让刷新重叠。
+      // 作用：同一标签页始终最多保留一个 Debug overview 请求。
+      refreshInFlight.current = false;
       setLoading(false);
     }
   }, []);

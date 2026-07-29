@@ -33,6 +33,7 @@ class ChatWorkerRequest:
     enable_local_knowledge: bool = False
     include_global_knowledge: bool = False
     min_source_relevance: float = 0.55
+    response_detail: Literal["concise", "balanced", "detailed"] = "detailed"
     knowledge_root: Path = DEFAULT_CONVERSATION_KNOWLEDGE_ROOT
     schema_version: int = CHAT_WORKER_REQUEST_SCHEMA_VERSION
 
@@ -106,15 +107,35 @@ class BackgroundChatTask:
 
     def cancel(self) -> None:
         """Terminate the local worker so the UI stops waiting immediately."""
-        if not self.process.is_alive():
-            return
-        # 原因：线程无法中断正在等待的模型 HTTP 请求，停止按钮会形同虚设。
-        # 作用：终止独立 Agent 进程并关闭其连接，让 Web UI 立即恢复交互。
-        self.process.terminate()
-        self.process.join(timeout=2)
         if self.process.is_alive():
-            self.process.kill()
-            self.process.join(timeout=1)
+            # 原因：线程无法中断正在等待的模型 HTTP 请求，停止按钮会形同虚设。
+            # 作用：终止独立 Agent 进程并关闭其连接，让 Web UI 立即恢复交互。
+            self.process.terminate()
+            self.process.join(timeout=2)
+            if self.process.is_alive():
+                self.process.kill()
+                self.process.join(timeout=1)
+        self._close_queues(wait=False)
+
+    def close(self) -> None:
+        """Release process and multiprocessing queue resources after a terminal run."""
+        if not self.process.is_alive():
+            self.process.join(timeout=0.1)
+        self._close_queues(wait=True)
+
+    def _close_queues(self, *, wait: bool) -> None:
+        for channel in (self.result_queue, self.progress_queue):
+            if not wait:
+                cancel_join = getattr(channel, "cancel_join_thread", None)
+                if callable(cancel_join):
+                    cancel_join()
+            close = getattr(channel, "close", None)
+            if callable(close):
+                close()
+            if wait:
+                join_thread = getattr(channel, "join_thread", None)
+                if callable(join_thread):
+                    join_thread()
 
 
 def start_chat_task(
@@ -126,6 +147,7 @@ def start_chat_task(
     enable_local_knowledge: bool = False,
     include_global_knowledge: bool = False,
     min_source_relevance: float = 0.55,
+    response_detail: Literal["concise", "balanced", "detailed"] = "detailed",
     knowledge_root: Path = DEFAULT_CONVERSATION_KNOWLEDGE_ROOT,
 ) -> BackgroundChatTask:
     """Start one cancelable Agent request in a spawned process."""
@@ -141,6 +163,7 @@ def start_chat_task(
         enable_local_knowledge=enable_local_knowledge,
         include_global_knowledge=include_global_knowledge,
         min_source_relevance=min_source_relevance,
+        response_detail=response_detail,
         knowledge_root=Path(knowledge_root),
     )
     process = context.Process(
@@ -194,6 +217,7 @@ def _run_chat_task(
                 enable_local_knowledge=request.enable_local_knowledge,
                 include_global_knowledge=request.include_global_knowledge,
                 min_source_relevance=request.min_source_relevance,
+                response_detail=request.response_detail,
             ),
             progress_callback=report_progress,
         )

@@ -81,34 +81,38 @@ def load_records(storage_path: Path) -> list[DocumentRecord]:
 
     records: dict[str, DocumentRecord] = {}
     source_ids: dict[str, str] = {}
-    for line in storage_path.read_text(encoding="utf-8").splitlines():
-        if not line.strip():
-            continue
-        try:
-            payload = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        document = payload.get("document")
-        if not isinstance(document, str) or not document.strip():
-            continue
-        source_documents = _split_source_documents(document)
-        for source_document in source_documents:
-            document_id = (
-                str(payload.get("document_id"))
-                if len(source_documents) == 1 and payload.get("document_id")
-                else stable_id("document", source_document)
-            )
-            # 原因：旧版 JSONL 可能把多个文件合在一条记录，也没有可靠的 chunk 元数据。
-            # 作用：加载时按来源拆分并确定性重建，使单文件更新/删除不会误伤其他文件。
-            record = build_record(document_id, source_document)
-            source = single_record_source(record)
-            if source is not None:
-                source_key = source.casefold()
-                previous_id = source_ids.get(source_key)
-                if previous_id is not None:
-                    records.pop(previous_id, None)
-                source_ids[source_key] = record.id
-            records[record.id] = record
+    # 原因：str.splitlines() 也会按 U+2028/U+2029 等正文字符切分，导致合法 JSON
+    # 被拆成数段并静默跳过（真实第 27 课文档包含这类字符）。
+    # 作用：TextIO 迭代只消费 JSONL 的物理换行，正文中的 Unicode 分隔符保持在字符串内。
+    with storage_path.open(encoding="utf-8") as stored_records:
+        for line in stored_records:
+            if not line.strip():
+                continue
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            document = payload.get("document")
+            if not isinstance(document, str) or not document.strip():
+                continue
+            source_documents = _split_source_documents(document)
+            for source_document in source_documents:
+                document_id = (
+                    str(payload.get("document_id"))
+                    if len(source_documents) == 1 and payload.get("document_id")
+                    else stable_id("document", source_document)
+                )
+                # 原因：旧版 JSONL 可能把多个文件合在一条记录，也没有可靠的 chunk 元数据。
+                # 作用：加载时按来源拆分并确定性重建，使单文件更新/删除不会误伤其他文件。
+                record = build_record(document_id, source_document)
+                source = single_record_source(record)
+                if source is not None:
+                    source_key = source.casefold()
+                    previous_id = source_ids.get(source_key)
+                    if previous_id is not None:
+                        records.pop(previous_id, None)
+                    source_ids[source_key] = record.id
+                records[record.id] = record
     return list(records.values())
 
 

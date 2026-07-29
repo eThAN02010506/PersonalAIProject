@@ -58,6 +58,74 @@ class DocumentStructureTests(unittest.TestCase):
         )
         self.assertIn("1. 普通列表", structure.sections[0].content)
 
+    def test_docx_unstyled_chinese_outline_recovers_substantive_subheadings(self) -> None:
+        structure = build_document_structure(
+            "腓立比书查经第二十六课\n\n"
+            "题目：不抱怨的人，是真正发光的人。\n\n"
+            "经文：腓立比书2章14节-16节上半节\n\n"
+            "一、破冰话题\n\n"
+            "这里有足够长的破冰内容，说明接下来的问题为何值得讨论。\n\n"
+            "二、经文解释和讨论\n\n"
+            "1.14节，“无论作什么，都不要发怨言、起争论。”\n\n"
+            "第一部分有足够长的解释正文，不应和下一部分混在一起。\n\n"
+            "2、15节上半节“使你们无可指摘，诚实无伪。”\n\n"
+            "第二部分也有足够长的解释正文，用来确认这是一组章节标题。\n\n"
+            "三、生活运用（15分钟）\n\n"
+            "1. 苹果\n\n"
+            "2. 梨\n\n"
+            "四、彼此代祷（10分钟）",
+            source="lesson.docx",
+        )
+
+        self.assertEqual(
+            [section.section_path for section in structure.sections],
+            [
+                ("Document content",),
+                ("一、破冰话题",),
+                ("二、经文解释和讨论",),
+                (
+                    "二、经文解释和讨论",
+                    "1.14节，“无论作什么，都不要发怨言、起争论。”",
+                ),
+                (
+                    "二、经文解释和讨论",
+                    "2、15节上半节“使你们无可指摘，诚实无伪。”",
+                ),
+                ("三、生活运用（15分钟）",),
+                ("四、彼此代祷（10分钟）",),
+            ],
+        )
+        application = next(
+            section
+            for section in structure.sections
+            if section.title == "三、生活运用（15分钟）"
+        )
+        self.assertIn("1. 苹果", application.content)
+        self.assertIn("2. 梨", application.content)
+
+    def test_docx_unstyled_decimal_outline_builds_nested_paths(self) -> None:
+        structure = build_document_structure(
+            "第一章：背景\n\n"
+            "本章正文提供足够长的介绍内容。\n\n"
+            "1.1 目标\n\n"
+            "目标部分有足够长的正文来证明它不是一个普通列表项。\n\n"
+            "1.2 范围\n\n"
+            "范围部分也有足够长的正文来形成连续的同级标题。\n\n"
+            "第二章：结论\n\n"
+            "结论正文。",
+            source="requirements.docx",
+        )
+
+        self.assertEqual(
+            [section.section_path for section in structure.sections],
+            [
+                ("第一章：背景",),
+                ("第一章：背景", "1.1 目标"),
+                ("第一章：背景", "1.2 范围"),
+                ("第二章：结论",),
+            ],
+        )
+
     def test_heading_free_document_gets_one_content_section(self) -> None:
         structure = build_document_structure(
             "A heading-free note.\n\nSecond paragraph.",

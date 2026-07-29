@@ -1,3 +1,4 @@
+import json
 import sys
 import types
 import unittest
@@ -69,9 +70,66 @@ class FakeToolCallingAgent:
         return f"agent reply: {prompt}"
 
 
+def _grounded_report_prompt(section_five: str = "给出具体例子") -> str:
+    return (
+        "请逐一阅读所有文件并按以下结构完整输出：\n"
+        "## 1. 文档理解与任务拆解\n"
+        "## 2. 写作整体策略\n"
+        "## 3. 详细写作框架（Outline）\n"
+        "## 4. 逐段写作指导\n"
+        f"## 5. {section_five}\n"
+        "## 6. 生成完整报告 Draft\n"
+        "## 7. Draft 后分析\n"
+        "## 8. 最终检查 Checklist"
+    )
+
+
+def _grounded_collection_observation(
+    manifest: tuple[str, ...] = (
+        "method.pdf",
+        "lesson-21.docx",
+        "lesson-22.docx",
+    ),
+) -> str:
+    return (
+        "QWOPUS_SOURCE_COVERAGE="
+        + json.dumps(
+            list(manifest),
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        + "\n\n"
+        "QWOPUS_EXPLICIT_RUBRIC_FOUND=true\n\n"
+        "# File: method.pdf\n"
+        "SOURCE_FACTS:\n"
+        "- document_heading: Context and thought-flow\n"
+        "QUERY_RELEVANT_EVIDENCE [chunk_id=method]:\n"
+        "Context changes what an observed detail contributes to an argument.\n\n"
+        "# File: lesson-21.docx\n"
+        "SOURCE_FACTS:\n"
+        "- document_heading: Lesson 21\n"
+        "- topic_line: Title: Active humility\n"
+        "- scripture_line: 经文：腓立比书2章8节\n"
+        "QUERY_RELEVANT_EVIDENCE [chunk_id=21-q]:\n"
+        "材料不是把卑微解释为自我贬低，而是主动走向低处。\n"
+        "APPLICATION_EVIDENCE [chunk_id=21-a]:\n"
+        "请辨认一次表面让步、内里压抑的关系处境，并说明动机。\n\n"
+        "# File: lesson-22.docx\n"
+        "SOURCE_FACTS:\n"
+        "- document_heading: Lesson 22\n"
+        "- topic_line: Title: Free obedience\n"
+        "- scripture_line: 经文：腓立比书2章8节\n"
+        "QUERY_RELEVANT_EVIDENCE [chunk_id=22-q]:\n"
+        "材料说明顺服不是盲从，而是理解之后仍然选择信靠和回应。\n"
+        "APPLICATION_EVIDENCE [chunk_id=22-a]:\n"
+        "请分析一次明知更正确却不愿行动的选择及其后果。"
+    )
+
+
 class SmolagentsRuntimeTests(unittest.TestCase):
     def setUp(self) -> None:
         FakeToolCallingAgent.queued_results = []
+        FakeToolCallingAgent.last_instance = None
         self.previous_module = sys.modules.get("smolagents")
         fake_module = types.ModuleType("smolagents")
         fake_module.OpenAIModel = FakeOpenAIModel
@@ -101,7 +159,7 @@ class SmolagentsRuntimeTests(unittest.TestCase):
         self.assertEqual(model.kwargs["api_base"], "http://127.0.0.1:8080/v1")
         self.assertEqual(model.kwargs["api_key"], "local_token")
         self.assertEqual(model.kwargs["client_kwargs"], {"timeout": 120})
-        self.assertNotIn("max_tokens", model.kwargs)
+        self.assertEqual(model.kwargs["max_tokens"], 128)
 
     def test_build_smolagents_code_agent_starts_without_tools(self) -> None:
         settings = SmolagentsModelSettings(
@@ -195,7 +253,144 @@ class SmolagentsRuntimeTests(unittest.TestCase):
             FakeMemory.instances[0].storage_path,
             Path("private-root/conversation-1/documents.jsonl"),
         )
-        self.assertIsNone(FakeMemory.instances[-1].storage_path)
+        self.assertEqual(
+            FakeMemory.instances[-1].storage_path,
+            Path("documents.jsonl"),
+        )
+
+    def test_empty_private_store_promotes_authorized_global_tools_before_model_run(self) -> None:
+        class FakeMemory:
+            def __init__(self, storage_path=None):
+                self.storage_path = Path(storage_path)
+                self.graph_index = ("graph", self.storage_path)
+
+            def list_sources(self):
+                if "conversation-empty" in self.storage_path.as_posix():
+                    return []
+                return ["conversation:other/global-notes.md"]
+
+        tool_bindings: list[tuple[str, Path]] = []
+
+        def rag_tool(memory, **kwargs):
+            name = kwargs.get("tool_name", "rag_search")
+            tool_bindings.append((name, memory.storage_path))
+            return name
+
+        def graph_tool(index, **kwargs):
+            name = kwargs.get("tool_name", "graph_search")
+            tool_bindings.append((name, index[1]))
+            return name
+
+        FakeToolCallingAgent.queued_results = [
+            types.SimpleNamespace(
+                output=(
+                    "全局资料 global-notes.md 提供了足够的项目证据，"
+                    "当前回答只依据该已授权来源并保留引用。该资料说明了项目目标、"
+                    "实施范围、关键责任和交付顺序，因此可以在不使用当前空私库的情况下"
+                    "形成有来源约束的总结，同时不会把模型常识伪装成文件内容。"
+                ),
+                state="success",
+                steps=[
+                    {
+                        "tool_calls": [{"function": {"name": "rag_search"}}],
+                        "observations": "[global-notes.md] authorized global evidence",
+                    }
+                ],
+            )
+        ]
+        with (
+            patch("qwopus_agent.memory.MiniRAG", FakeMemory),
+            patch(
+                "qwopus_agent.integrations.smolagents_tools.build_minirag_search_tool",
+                side_effect=rag_tool,
+            ),
+            patch(
+                "qwopus_agent.integrations.smolagents_tools.build_graph_search_tool",
+                side_effect=graph_tool,
+            ),
+        ):
+            result = run_agent_chat_turn_with_debug(
+                user_message="请根据我上传的所有文档总结项目",
+                history=[],
+                settings=SmolagentsModelSettings(
+                    model_id="any-model",
+                    base_url="http://127.0.0.1:8080/v1",
+                ),
+                enable_local_knowledge=True,
+                include_global_knowledge=True,
+                knowledge_scope="conversation-empty",
+                knowledge_root=Path("private-root"),
+            )
+
+        # 原因：空私库曾让模型先反复调用必然零命中的本地 rag_search，再自行决定是否 fallback。
+        # 作用：证明运行前已把授权全局库提升为标准工具，且没有安装空私库或重复 global_* 工具。
+        self.assertTrue(result.success)
+        self.assertEqual(
+            FakeToolCallingAgent.last_instance.tools,
+            ["rag_search", "graph_search"],
+        )
+        self.assertEqual(
+            tool_bindings,
+            [
+                ("rag_search", Path("documents.jsonl")),
+                ("graph_search", Path("documents.jsonl")),
+            ],
+        )
+        self.assertIn(
+            "deterministically bound to the global store",
+            FakeToolCallingAgent.last_instance.prompt,
+        )
+        self.assertEqual(FakeToolCallingAgent.last_instance.run_kwargs["max_steps"], 2)
+
+    def test_private_sources_keep_private_primary_and_global_secondary_tools(self) -> None:
+        class FakeMemory:
+            def __init__(self, storage_path=None):
+                self.storage_path = Path(storage_path)
+                self.graph_index = object()
+
+            def list_sources(self):
+                if "conversation-with-files" in self.storage_path.as_posix():
+                    return ["private-notes.md"]
+                return ["conversation:other/global-notes.md"]
+
+        def rag_tool(_memory, **kwargs):
+            return kwargs.get("tool_name", "rag_search")
+
+        def graph_tool(_index, **kwargs):
+            return kwargs.get("tool_name", "graph_search")
+
+        with (
+            patch("qwopus_agent.memory.MiniRAG", FakeMemory),
+            patch(
+                "qwopus_agent.integrations.smolagents_tools.build_minirag_search_tool",
+                side_effect=rag_tool,
+            ),
+            patch(
+                "qwopus_agent.integrations.smolagents_tools.build_graph_search_tool",
+                side_effect=graph_tool,
+            ),
+        ):
+            tools = build_local_knowledge_tools(
+                "conversation-with-files",
+                knowledge_root=Path("private-root"),
+                include_global_knowledge=True,
+            )
+
+        self.assertEqual(
+            tools,
+            [
+                "rag_search",
+                "graph_search",
+                "global_rag_search",
+                "global_graph_search",
+            ],
+        )
+        self.assertEqual(tools.primary_scope, "private")
+        self.assertEqual(tools.private_sources, ("private-notes.md",))
+        self.assertEqual(
+            tools.global_sources,
+            ("conversation:other/global-notes.md",),
+        )
 
     def test_run_agent_chat_turn_injects_tavily_tool_when_web_enabled(self) -> None:
         settings = SmolagentsModelSettings(
@@ -231,7 +426,7 @@ class SmolagentsRuntimeTests(unittest.TestCase):
         with patch(
             "qwopus_agent.integrations.smolagents_runtime.build_local_knowledge_tools",
             return_value=fake_tools,
-        ):
+        ) as build_tools:
             run_agent_chat_turn(
                 user_message="Company A 和 Company B 有什么关系？",
                 history=[],
@@ -246,6 +441,12 @@ class SmolagentsRuntimeTests(unittest.TestCase):
         self.assertIn("Use rag_search", FakeToolCallingAgent.last_instance.prompt)
         self.assertIn("Use graph_search", FakeToolCallingAgent.last_instance.prompt)
         self.assertEqual(FakeToolCallingAgent.last_instance.run_kwargs["max_steps"], 2)
+        # 原因：来源提示只能从当前用户问题提取，不能从历史或模型改写后的 query 猜测。
+        # 作用：证明 runtime 把原始问题传给知识工具装配层。
+        self.assertEqual(
+            build_tools.call_args.kwargs["user_message"],
+            "Company A 和 Company B 有什么关系？",
+        )
 
     def test_run_agent_chat_turn_allows_both_web_and_local_tools(self) -> None:
         settings = SmolagentsModelSettings(
@@ -324,6 +525,32 @@ class SmolagentsRuntimeTests(unittest.TestCase):
                 include_global_knowledge=True,
                 knowledge_scope="conversation-1",
             )
+
+    def test_explicit_uploaded_document_request_with_knowledge_off_fails_before_model(
+        self,
+    ) -> None:
+        result = run_agent_chat_turn_with_debug(
+            user_message=(
+                "我已经上传了一些文档，请你仔细阅读所有文件，"
+                "并基于这些材料帮我完成写作任务。"
+            ),
+            history=[],
+            settings=SmolagentsModelSettings(
+                model_id="any-model",
+                base_url="http://127.0.0.1:8080/v1",
+            ),
+            enable_local_knowledge=False,
+            include_global_knowledge=False,
+        )
+
+        # 原因：仅靠 Prompt 提醒无法阻止无 Tool 模型根据历史或常识编造“文件分析”。
+        # 作用：明确文档意图在没有附件或知识授权时于模型构造前失败。
+        self.assertFalse(result.success)
+        self.assertEqual(result.state, "preflight_rejected")
+        self.assertIn("请开启 Knowledge", result.answer)
+        self.assertIn("Document analysis", result.answer)
+        self.assertIsNone(FakeToolCallingAgent.last_instance)
+        self.assertEqual(result.debug_runs, ())
 
     def test_run_agent_chat_turn_refines_short_local_knowledge_answer(self) -> None:
         settings = SmolagentsModelSettings(
@@ -490,6 +717,27 @@ class SmolagentsRuntimeTests(unittest.TestCase):
         self.assertIn("Do not reduce the answer to a short bullet list", prompt)
         self.assertIn("Local knowledge access is disabled", prompt)
 
+    def test_format_agent_chat_prompt_applies_requested_detail_level(self) -> None:
+        concise = format_agent_chat_prompt(
+            history=[],
+            user_message="Explain this",
+            enable_web_search=False,
+            response_detail="concise",
+        )
+        detailed = format_agent_chat_prompt(
+            history=[],
+            user_message="Explain this",
+            enable_web_search=False,
+            response_detail="detailed",
+        )
+
+        # 原因：只验证 API 接受参数不能证明模型实际收到不同的回答策略。
+        # 作用：锁定简洁档与详细档生成不同 Prompt，且详细档不使用硬性字数。
+        self.assertIn("Keep the final answer concise and direct", concise)
+        self.assertIn("thorough, information-dense final answer", detailed)
+        self.assertIn("practical steps or examples", detailed)
+        self.assertIn("fixed length", detailed)
+
     def test_format_agent_chat_prompt_bounds_history_characters(self) -> None:
         prompt = format_agent_chat_prompt(
             history=[
@@ -590,6 +838,463 @@ class SmolagentsRuntimeTests(unittest.TestCase):
         self.assertEqual(result.answer, "这是最终总结。")
         self.assertNotIn("Observation", result.answer)
 
+    def test_file_analysis_does_not_expose_final_generation_error_as_answer(self) -> None:
+        settings = SmolagentsModelSettings(
+            model_id="any-model",
+            base_url="http://127.0.0.1:8080/v1",
+        )
+        FakeToolCallingAgent.queued_results = [
+            types.SimpleNamespace(
+                output=(
+                    "[{'type': 'text', 'text': "
+                    "'Error in generating final LLM output: Connection error.'}]"
+                ),
+                state="max_steps_error",
+                steps=[
+                    {
+                        "tool_calls": [
+                            {
+                                "function": {
+                                    "name": "document_search",
+                                    "arguments": {"file_name": "notes.txt"},
+                                }
+                            }
+                        ]
+                    }
+                ],
+            )
+        ]
+
+        result = run_smolagents_file_analysis_with_debug(
+            file_names=["notes.txt"],
+            spreadsheet_names=[],
+            user_question="总结",
+            tools=[object()],
+            settings=settings,
+        )
+
+        # 原因：smolagents 的最终生成错误使用普通文本形状，旧代码会把它显示为成功答案。
+        # 作用：业务答案保持为空以触发 fail-closed，原错误仅留在 Debug Console 运行记录。
+        self.assertEqual(result.answer, "")
+        self.assertEqual(result.inspected_file_names, ("notes.txt",))
+        self.assertIn("Connection error", result.debug_runs[0].output)
+
+    def test_file_analysis_retries_when_requested_draft_is_only_a_placeholder(self) -> None:
+        settings = SmolagentsModelSettings(
+            model_id="any-model",
+            base_url="http://127.0.0.1:8080/v1",
+        )
+        tool_step = {
+            "step_number": 1,
+            "tool_calls": [
+                {
+                    "function": {
+                        "name": "document_search",
+                        "arguments": {"file_name": "lesson.txt"},
+                    }
+                }
+            ],
+        }
+        complete_draft = " ".join(f"evidence-{index}" for index in range(340))
+        FakeToolCallingAgent.queued_results = [
+            types.SimpleNamespace(
+                output="## 1. 文档理解\n简单说明。\n\n## 2. 完整报告 Draft\n略。",
+                state="success",
+                steps=[tool_step],
+            ),
+            types.SimpleNamespace(
+                output=(
+                    "## 1. 文档理解\n"
+                    "这里给出足够具体的文档理解、任务拆解、证据和逻辑说明。"
+                    "每一个判断都明确连接回当前课程材料。\n\n"
+                    f"## 2. 完整报告 Draft\n{complete_draft}"
+                ),
+                state="success",
+                steps=[],
+            ),
+        ]
+
+        result = run_smolagents_file_analysis_with_debug(
+            file_names=["lesson.txt"],
+            spreadsheet_names=[],
+            user_question=(
+                "请按以下结构输出：\n"
+                "## 1. 文档理解\n"
+                "## 2. 完整报告 Draft"
+            ),
+            tools=[object()],
+            settings=settings,
+        )
+
+        self.assertIn("evidence-339", result.answer)
+        self.assertIn("Never use placeholders", FakeToolCallingAgent.last_instance.prompt)
+
+    def test_file_analysis_accepts_compact_chinese_section_with_nested_headings(self) -> None:
+        settings = SmolagentsModelSettings(
+            model_id="any-model",
+            base_url="http://127.0.0.1:8080/v1",
+        )
+        FakeToolCallingAgent.queued_results = [
+            types.SimpleNamespace(
+                output=(
+                    "## 1. 文档理解\n"
+                    "材料主题明确，任务需要把核心论点连接到具体证据并解释原因。\n\n"
+                    "## 7. Draft 后分析\n"
+                    "结构合理；严格评分时需补强引文。\n\n"
+                    "### 1. 为什么 opening 有效\n"
+                    "它先建立背景。\n\n"
+                    "### 2. 可能扣分处\n"
+                    "证据格式仍需统一。\n\n"
+                    "## 8. Post-draft analysis\n"
+                    "The opening works, but source citations still need a consistent format "
+                    "and one stricter counterargument."
+                ),
+                state="success",
+                steps=[
+                    {
+                        "tool_calls": [
+                            {
+                                "function": {
+                                    "name": "document_search",
+                                    "arguments": {"file_name": "lesson.txt"},
+                                }
+                            }
+                        ]
+                    }
+                ],
+            )
+        ]
+
+        result = run_smolagents_file_analysis_with_debug(
+            file_names=["lesson.txt"],
+            spreadsheet_names=[],
+            user_question=(
+                "请按以下结构输出：\n"
+                "## 1. 文档理解\n"
+                "## 7. Draft 后分析\n"
+                "## 8. Post-draft analysis"
+            ),
+            tools=[object()],
+            settings=settings,
+        )
+
+        # 原因：第 7 节的简洁中文正文及其 ### 编号子标题曾被误判为顶层缺节。
+        # 作用：锁定语言友好阈值和同级标题边界，避免无意义的整篇重写。
+        self.assertIn("严格评分时需补强引文", result.answer)
+        self.assertIn("one stricter counterargument", result.answer)
+        self.assertEqual(len(result.debug_runs), 1)
+        self.assertEqual(FakeToolCallingAgent.queued_results, [])
+
+    def test_file_analysis_merges_only_deficient_sections(self) -> None:
+        settings = SmolagentsModelSettings(
+            model_id="any-model",
+            base_url="http://127.0.0.1:8080/v1",
+        )
+        accepted_section = (
+            "ACCEPTED-SECTION-MUST-STAY：材料核心概念、关键证据和任务边界"
+            "已经逐项解释清楚，并说明了这些证据为什么支持结论。"
+        )
+        FakeToolCallingAgent.queued_results = [
+            types.SimpleNamespace(
+                output=(
+                    f"## 1. 文档理解\n{accepted_section}\n\n"
+                    "## 7. Draft 后分析\n略。"
+                ),
+                state="success",
+                steps=[
+                    {
+                        "tool_calls": [
+                            {
+                                "function": {
+                                    "name": "document_search",
+                                    "arguments": {"file_name": "lesson.txt"},
+                                }
+                            }
+                        ]
+                    }
+                ],
+            ),
+            types.SimpleNamespace(
+                output=(
+                    "以下是整份答案的新版本，但这段前言不应进入合并结果。\n\n"
+                    "## 1. 文档理解\n模型试图覆盖已经验收的章节。\n\n"
+                    "## 7. Draft 后分析\n"
+                    "结构合理；严格评分时需补强引文，并统一引用格式。\n\n"
+                    "## 1. 文档理解\n这段尾随覆盖也不应进入合并结果。"
+                ),
+                state="success",
+                steps=[],
+            ),
+        ]
+
+        result = run_smolagents_file_analysis_with_debug(
+            file_names=["lesson.txt"],
+            spreadsheet_names=[],
+            user_question=(
+                "请按以下结构输出：\n"
+                "## 1. 文档理解\n"
+                "## 7. Draft 后分析"
+            ),
+            tools=[object()],
+            settings=settings,
+        )
+
+        self.assertIn(accepted_section, result.answer)
+        self.assertNotIn("模型试图覆盖", result.answer)
+        self.assertNotIn("尾随覆盖", result.answer)
+        self.assertNotIn("整份答案的新版本", result.answer)
+        self.assertIn("统一引用格式", result.answer)
+        self.assertEqual(
+            result.debug_runs[1].label,
+            "file_analysis_section_refinement",
+        )
+        self.assertIn("Return ONLY", result.debug_runs[1].prompt)
+        self.assertIn("Do not rewrite", result.debug_runs[1].prompt)
+
+    def test_file_analysis_section_refinement_remains_fail_closed(self) -> None:
+        settings = SmolagentsModelSettings(
+            model_id="any-model",
+            base_url="http://127.0.0.1:8080/v1",
+        )
+        tool_step = {
+            "tool_calls": [
+                {
+                    "function": {
+                        "name": "document_search",
+                        "arguments": {"file_name": "lesson.txt"},
+                    }
+                }
+            ]
+        }
+        FakeToolCallingAgent.queued_results = [
+            types.SimpleNamespace(
+                output=(
+                    "## 1. 文档理解\n"
+                    "材料核心概念、证据和任务边界已经解释清楚。\n\n"
+                    "## 7. Draft 后分析\n略。"
+                ),
+                state="success",
+                steps=[tool_step],
+            ),
+            types.SimpleNamespace(
+                output="## 7. Draft 后分析\n待补充。",
+                state="success",
+                steps=[],
+            ),
+        ]
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "did not complete requested report sections",
+        ):
+            run_smolagents_file_analysis_with_debug(
+                file_names=["lesson.txt"],
+                spreadsheet_names=[],
+                user_question=(
+                    "请按以下结构输出：\n"
+                    "## 1. 文档理解\n"
+                    "## 7. Draft 后分析"
+                ),
+                tools=[object()],
+                settings=settings,
+            )
+
+    def test_file_analysis_repairs_exhaustive_draft_and_grounding_contract(self) -> None:
+        settings = SmolagentsModelSettings(
+            model_id="any-model",
+            base_url="http://127.0.0.1:8080/v1",
+        )
+        file_names = [
+            "bible-method.pdf",
+            "腓立比书查经第二十一课.docx",
+            "腓立比书查经第二十二课.docx",
+        ]
+        collection_observation = (
+            'QWOPUS_SOURCE_COVERAGE=["bible-method.pdf",'
+            '"腓立比书查经第二十一课.docx","腓立比书查经第二十二课.docx"]\n\n'
+            "QWOPUS_EXPLICIT_RUBRIC_FOUND=false\n\n"
+            "# File: bible-method.pdf\n"
+            "SOURCE_FACTS:\n- document_heading: Bible study method\n\n"
+            "# File: 腓立比书查经第二十一课.docx\n"
+            "SOURCE_FACTS:\n"
+            "- document_heading: 腓立比书查经第二十一课\n"
+            "- scripture_line: 经文：腓立比书2章8节\n\n"
+            "# File: 腓立比书查经第二十二课.docx\n"
+            "SOURCE_FACTS:\n"
+            "- document_heading: 腓立比书查经第二十二课\n"
+            "- scripture_line: 经文：腓立比书2章9-11节"
+        )
+        collection_step = {
+            "tool_calls": [
+                {"function": {"name": "document_collection_summary"}}
+            ],
+            "observations": collection_observation,
+        }
+        draft_detail = (
+            "本段依据对应文件解释经文、核心主题、具体例子与生活应用，"
+            "并逐步说明为什么原文证据能够支持结论。"
+        ) * 18
+        FakeToolCallingAgent.queued_results = [
+            types.SimpleNamespace(
+                output=(
+                    "## 1. 文档理解与任务拆解\n"
+                    "只总结腓立比书查经第二十一课，并把总分设为5分。"
+                    "经文写成以弗所书2章8节（腓立比书2章8节）。\n\n"
+                    "## 6. 生成完整报告 Draft\n"
+                    "以下为示例：第二十一课内容。其余章节按同样格式展开。\n\n"
+                    "## 7. Draft 后分析\n"
+                    "开篇有背景，论证顺序清楚，满足5分标准。"
+                ),
+                state="success",
+                steps=[collection_step],
+            ),
+            types.SimpleNamespace(
+                output=(
+                    "## 1. 文档理解与任务拆解\n"
+                    "所有材料均已检查。材料没有提供显式 rubric，因此不虚构分值。\n\n"
+                    "## 6. 生成完整报告 Draft\n"
+                    "### 第21课\n"
+                    f"经文：腓立比书2章8节\n{draft_detail}\n\n"
+                    "### 第22课\n"
+                    f"经文：腓立比书2章9-11节\n{draft_detail}\n\n"
+                    "## 7. Draft 后分析\n"
+                    "开篇先建立材料背景，再按经文、解释、证据和应用推进。"
+                    "材料没有提供显式 rubric；严格评分时仍应检查逐项引证。"
+                ),
+                state="success",
+                steps=[],
+            ),
+        ]
+
+        result = run_smolagents_file_analysis_with_debug(
+            file_names=file_names,
+            spreadsheet_names=[],
+            user_question=(
+                "请逐一阅读所有文件并按以下结构输出：\n"
+                "## 1. 文档理解与任务拆解\n"
+                "## 6. 生成完整报告 Draft\n"
+                "## 7. Draft 后分析"
+            ),
+            tools=[types.SimpleNamespace(name="document_collection_summary")],
+            settings=settings,
+        )
+
+        self.assertIn("bible-method", result.answer)
+        self.assertIn("### 第二十一课", result.answer)
+        self.assertIn("### 第二十二课", result.answer)
+        self.assertNotIn("以弗所书", result.answer)
+        self.assertNotIn("其余章节", result.answer)
+        self.assertNotIn("5分标准", result.answer)
+        self.assertEqual(
+            result.debug_runs[1].label,
+            "file_analysis_section_refinement",
+        )
+        self.assertIn("missing source labels", result.debug_runs[1].prompt)
+        self.assertIn("QWOPUS_EXPLICIT_RUBRIC_FOUND", result.debug_runs[1].prompt)
+
+    def test_file_analysis_rebuilds_unique_ordered_grounded_lesson_slots(self) -> None:
+        settings = SmolagentsModelSettings(
+            model_id="any-model",
+            base_url="http://127.0.0.1:8080/v1",
+        )
+        file_names = [
+            "腓立比书查经第二十三课.docx",
+            "腓立比书查经第二十一课.docx",
+            "腓立比书查经第二十二课.docx",
+        ]
+        collection_observation = (
+            'QWOPUS_SOURCE_COVERAGE=["腓立比书查经第二十三课.docx",'
+            '"腓立比书查经第二十一课.docx","腓立比书查经第二十二课.docx"]\n\n'
+            "QWOPUS_EXPLICIT_RUBRIC_FOUND=false\n\n"
+            "# File: 腓立比书查经第二十三课.docx\n"
+            "SOURCE_FACTS:\n"
+            "- document_heading: 腓立比书查经第二十三课\n"
+            "- scripture_line: 经文：腓立比书2章9-11节\n"
+            "QUERY_RELEVANT_EVIDENCE [chunk_id=23]:\n"
+            "材料说明上帝高举基督，并把荣耀归给父上帝。\n\n"
+            "# File: 腓立比书查经第二十一课.docx\n"
+            "SOURCE_FACTS:\n"
+            "- document_heading: 腓立比书查经第二十一课\n"
+            "- scripture_line: 经文：腓立比书2章8节\n"
+            "QUERY_RELEVANT_EVIDENCE [chunk_id=21]:\n"
+            "材料围绕基督主动卑微、走向低处及其生活应用展开。\n\n"
+            "# File: 腓立比书查经第二十二课.docx\n"
+            "SOURCE_FACTS:\n"
+            "- document_heading: 腓立比书查经第二十二课\n"
+            "- scripture_line: 经文：腓立比书2章8节\n"
+            "QUERY_RELEVANT_EVIDENCE [chunk_id=22]:\n"
+            "材料从关系和自由的角度解释顺服，并提供讨论与应用问题。"
+        )
+        collection_step = {
+            "tool_calls": [
+                {"function": {"name": "document_collection_summary"}}
+            ],
+            "observations": collection_observation,
+        }
+        detail = (
+            "本段逐步观察对应经文，解释材料主题为什么重要，"
+            "并把证据连接到具体生活处境和可执行的回应。"
+        ) * 4
+        accepted_understanding = (
+            "腓立比书查经第二十三课、腓立比书查经第二十一课、"
+            "腓立比书查经第二十二课都已逐一说明。"
+        )
+        FakeToolCallingAgent.queued_results = [
+            types.SimpleNamespace(
+                output=(
+                    f"## 1. 文档理解\n{accepted_understanding}\n\n"
+                    "## 6. 生成完整报告 Draft\n"
+                    "### 第二十三课\n"
+                    f"经文：腓立比书2章9-11节\n{detail}\n\n"
+                    "### 第二十一课\n"
+                    f"经文：腓立比书2章8节\n{detail}"
+                ),
+                state="success",
+                steps=[collection_step],
+            ),
+            types.SimpleNamespace(
+                output=(
+                    "补写内容如下；模型没有遵守顶层 Section 标题格式。\n"
+                    "### 第23课\n"
+                    f"经文：腓立比书2章9-11节\n{detail}\n\n"
+                    "### 第21课\n"
+                    f"经文：以弗所书2章8节\n{detail}\n\n"
+                    "### 第二十三课\n"
+                    f"经文：腓立比书2章9-11节\n{detail}"
+                ),
+                state="success",
+                steps=[],
+            ),
+        ]
+
+        result = run_smolagents_file_analysis_with_debug(
+            file_names=file_names,
+            spreadsheet_names=[],
+            user_question=(
+                "请逐一阅读所有文件并按以下结构输出：\n"
+                "## 1. 文档理解\n"
+                "## 6. 生成完整报告 Draft"
+            ),
+            tools=[types.SimpleNamespace(name="document_collection_summary")],
+            settings=settings,
+        )
+
+        self.assertIn(accepted_understanding, result.answer)
+        self.assertEqual(result.answer.count("### 第二十一课"), 1)
+        self.assertEqual(result.answer.count("### 第二十二课"), 1)
+        self.assertEqual(result.answer.count("### 第二十三课"), 1)
+        self.assertLess(
+            result.answer.index("### 第二十一课"),
+            result.answer.index("### 第二十二课"),
+        )
+        self.assertLess(
+            result.answer.index("### 第二十二课"),
+            result.answer.index("### 第二十三课"),
+        )
+        self.assertNotIn("以弗所书", result.answer)
+        self.assertIn("材料从关系和自由的角度解释顺服", result.answer)
+        self.assertEqual(FakeToolCallingAgent.queued_results, [])
+
     def test_file_analysis_agent_requires_each_uploaded_file_to_be_inspected(self) -> None:
         settings = SmolagentsModelSettings(
             model_id="any-model",
@@ -641,8 +1346,225 @@ class SmolagentsRuntimeTests(unittest.TestCase):
         # 原因：只检查 Tool 名称会把“重复读取同一文件”误判为完成多文件分析。
         # 作用：验证补充轮明确读取遗漏文件后，runtime 才接受最终答案。
         self.assertEqual(result.answer, "Both files were summarized.")
+        self.assertEqual(result.inspected_file_names, ("first.txt", "second.txt"))
         self.assertIn("second.txt", FakeToolCallingAgent.last_instance.prompt)
         self.assertEqual(FakeToolCallingAgent.last_instance.run_kwargs["max_steps"], 3)
+
+    def test_grounded_report_composer_uses_all_sources_without_model(self) -> None:
+        settings = SmolagentsModelSettings(
+            model_id="any-model",
+            base_url="http://127.0.0.1:8080/v1",
+        )
+        file_names = ["method.pdf", "lesson-21.docx", "lesson-22.docx"]
+        collection_tool = types.SimpleNamespace(
+            name="document_collection_summary",
+            forward=lambda: _grounded_collection_observation(),
+        )
+
+        result = run_smolagents_file_analysis_with_debug(
+            file_names=file_names,
+            spreadsheet_names=[],
+            user_question=_grounded_report_prompt(),
+            tools=[collection_tool],
+            settings=settings,
+        )
+
+        self.assertIsNone(FakeToolCallingAgent.last_instance)
+        self.assertEqual(result.generation_mode, "grounded_composer")
+        self.assertEqual(result.tool_calls, ["document_collection_summary"])
+        self.assertEqual(result.inspected_file_names, tuple(file_names))
+        self.assertEqual(result.debug_runs[0].label, "grounded_report_composer")
+        self.assertTrue(all(f"## {number}." in result.answer for number in range(1, 9)))
+        draft = result.answer.split("## 6.", 1)[1].split("## 7.", 1)[0]
+        self.assertEqual(draft.count("### lesson-21"), 1)
+        self.assertEqual(draft.count("### lesson-22"), 1)
+        self.assertLess(draft.index("### lesson-21"), draft.index("### lesson-22"))
+        self.assertIn("### 引言", draft)
+        self.assertIn("### 综合结论", draft)
+        self.assertIn("表面让步、内里压抑", draft)
+        self.assertIn("明知更正确却不愿行动", draft)
+        self.assertNotIn("✅ 已对照材料中的显式 rubric", result.answer)
+        self.assertIn("当前证据包未安全复述细则", result.answer)
+
+    def test_grounded_report_composer_rejects_manifest_mismatch(self) -> None:
+        settings = SmolagentsModelSettings(
+            model_id="any-model",
+            base_url="http://127.0.0.1:8080/v1",
+        )
+        collection_tool = types.SimpleNamespace(
+            name="document_collection_summary",
+            forward=lambda: _grounded_collection_observation(
+                ("method.pdf", "lesson-21.docx"),
+            ),
+        )
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "manifest does not exactly match",
+        ):
+            run_smolagents_file_analysis_with_debug(
+                file_names=["method.pdf", "lesson-21.docx", "lesson-22.docx"],
+                spreadsheet_names=[],
+                user_question=_grounded_report_prompt(),
+                tools=[collection_tool],
+                settings=settings,
+            )
+
+        self.assertIsNone(FakeToolCallingAgent.last_instance)
+
+    def test_grounded_report_composer_rejects_unknown_section_contract(self) -> None:
+        settings = SmolagentsModelSettings(
+            model_id="any-model",
+            base_url="http://127.0.0.1:8080/v1",
+        )
+        collection_tool = types.SimpleNamespace(
+            name="document_collection_summary",
+            forward=lambda: _grounded_collection_observation(),
+        )
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "Unsupported grounded report section: 5",
+        ):
+            run_smolagents_file_analysis_with_debug(
+                file_names=["method.pdf", "lesson-21.docx", "lesson-22.docx"],
+                spreadsheet_names=[],
+                user_question=_grounded_report_prompt("自由发挥"),
+                tools=[collection_tool],
+                settings=settings,
+            )
+
+    def test_collection_summary_requires_a_complete_tool_coverage_manifest(self) -> None:
+        settings = SmolagentsModelSettings(
+            model_id="any-model",
+            base_url="http://127.0.0.1:8080/v1",
+        )
+        collection_tool = types.SimpleNamespace(name="document_collection_summary")
+        FakeToolCallingAgent.queued_results = [
+            types.SimpleNamespace(
+                output="All selected lessons were compared.",
+                state="success",
+                steps=[
+                    {
+                        "tool_calls": [
+                            {"function": {"name": "document_collection_summary"}}
+                        ],
+                        "observations": (
+                            'QWOPUS_SOURCE_COVERAGE=["lesson-21.docx","lesson-22.docx"]\n\n'
+                            "# File: lesson-21.docx\nEvidence A\n\n"
+                            "# File: lesson-22.docx\nEvidence B"
+                        ),
+                    }
+                ],
+            )
+        ]
+
+        result = run_smolagents_file_analysis_with_debug(
+            file_names=["lesson-21.docx", "lesson-22.docx"],
+            spreadsheet_names=[],
+            user_question="Read and compare every file.",
+            tools=[collection_tool],
+            settings=settings,
+        )
+
+        self.assertEqual(
+            result.inspected_file_names,
+            ("lesson-21.docx", "lesson-22.docx"),
+        )
+        self.assertIn("document_collection_summary", result.tool_calls)
+
+    def test_specific_multi_file_question_does_not_require_collection_summary(self) -> None:
+        settings = SmolagentsModelSettings(
+            model_id="any-model",
+            base_url="http://127.0.0.1:8080/v1",
+        )
+        FakeToolCallingAgent.queued_results = [
+            types.SimpleNamespace(
+                output="Alpha and beta provide the requested facts.",
+                state="success",
+                steps=[
+                    {
+                        "tool_calls": [
+                            {
+                                "function": {
+                                    "name": "document_search",
+                                    "arguments": {
+                                        "file_name": "alpha.md",
+                                        "query": "owner",
+                                    },
+                                }
+                            }
+                        ],
+                        "observations": "[Source: alpha.md] Owner is Mira.",
+                    },
+                    {
+                        "tool_calls": [
+                            {
+                                "function": {
+                                    "name": "document_search",
+                                    "arguments": {
+                                        "file_name": "beta.md",
+                                        "query": "budget",
+                                    },
+                                }
+                            }
+                        ],
+                        "observations": "[Source: beta.md] Budget is USD 4.2 million.",
+                    },
+                ],
+            )
+        ]
+
+        result = run_smolagents_file_analysis_with_debug(
+            file_names=["alpha.md", "beta.md"],
+            spreadsheet_names=[],
+            user_question=(
+                "State the owner and budget, cite the source file for each fact, "
+                "and do not cite unrelated material."
+            ),
+            tools=[types.SimpleNamespace(name="document_collection_summary")],
+            settings=settings,
+        )
+
+        # 原因：特定事实提取不需要先生成整个文件集合的平衡摘要。
+        # 作用：证明两份文件均已检查时可直接完成，同时保留全文件任务的 coverage 规则。
+        self.assertNotIn("document_collection_summary", result.tool_calls)
+        self.assertEqual(result.inspected_file_names, ("alpha.md", "beta.md"))
+
+    def test_collection_summary_tool_name_without_manifest_does_not_fake_coverage(self) -> None:
+        settings = SmolagentsModelSettings(
+            model_id="any-model",
+            base_url="http://127.0.0.1:8080/v1",
+        )
+        collection_tool = types.SimpleNamespace(name="document_collection_summary")
+        FakeToolCallingAgent.queued_results = [
+            types.SimpleNamespace(
+                output="Only a generic summary.",
+                state="success",
+                steps=[
+                    {
+                        "tool_calls": [
+                            {"function": {"name": "document_collection_summary"}}
+                        ],
+                        "observations": "# File: lesson-21.docx\nOnly one source.",
+                    }
+                ],
+            ),
+            types.SimpleNamespace(
+                output="Still generic.",
+                state="success",
+                steps=[],
+            ),
+        ]
+
+        with self.assertRaisesRegex(RuntimeError, "did not inspect uploaded files"):
+            run_smolagents_file_analysis_with_debug(
+                file_names=["lesson-21.docx", "lesson-22.docx"],
+                spreadsheet_names=[],
+                user_question="Read every file.",
+                tools=[collection_tool],
+                settings=settings,
+            )
 
     def test_file_analysis_agent_rejects_answer_without_file_inspection(self) -> None:
         settings = SmolagentsModelSettings(
@@ -675,7 +1597,14 @@ class SmolagentsRuntimeTests(unittest.TestCase):
                 steps=[
                     {
                         "step_number": 1,
-                        "tool_calls": [{"function": {"name": "excel_schema"}}],
+                        "tool_calls": [
+                            {
+                                "function": {
+                                    "name": "excel_schema",
+                                    "arguments": {"file_name": "sales.xlsx"},
+                                }
+                            }
+                        ],
                     }
                 ],
             ),
@@ -685,7 +1614,14 @@ class SmolagentsRuntimeTests(unittest.TestCase):
                 steps=[
                     {
                         "step_number": 2,
-                        "tool_calls": [{"function": {"name": "excel_analysis"}}],
+                        "tool_calls": [
+                            {
+                                "function": {
+                                    "name": "excel_analysis",
+                                    "arguments": {"file_name": "sales.xlsx"},
+                                }
+                            }
+                        ],
                     }
                 ],
             ),

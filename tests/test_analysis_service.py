@@ -170,6 +170,7 @@ class AnalysisServiceTests(unittest.TestCase):
                     answer="Final answer uses prior MiniRAG context.",
                     debug_steps=["fake model finished"],
                     tool_calls=["document_search", "rag_search"],
+                    inspected_file_names=("revenue.txt",),
                     debug_runs=(
                         AgentDebugRun(
                             label="file_analysis",
@@ -232,6 +233,7 @@ class AnalysisServiceTests(unittest.TestCase):
             self.assertIn("Current uploaded note", captured["document_result"])
             self.assertIn("Prior MiniRAG note", captured["rag_result"])
             self.assertTrue(outcome.result.metadata["minirag_context_used"])
+            self.assertEqual(outcome.result.metadata["generation_mode"], "model")
             self.assertEqual(
                 outcome.debug_runs[0].steps[0]["observations"],
                 "raw document text",
@@ -278,6 +280,7 @@ class AnalysisServiceTests(unittest.TestCase):
                     answer="East revenue is 40; West revenue is 20.",
                     debug_steps=["fake Agent finished"],
                     tool_calls=["excel_schema", "excel_analysis"],
+                    inspected_file_names=("sales.xlsx",),
                 )
 
             with (
@@ -319,6 +322,153 @@ class AnalysisServiceTests(unittest.TestCase):
             self.assertIn("40", captured["analysis"])
             self.assertTrue(outcome.result.metadata["pandas_sandbox_used"])
             self.assertEqual(outcome.result.llm_analysis, "East revenue is 40; West revenue is 20.")
+
+    def test_local_folder_files_are_analyzed_without_upload_or_minirag(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            first = root / "first.md"
+            second = root / "second.md"
+            first.write_text("# Alpha\nAlpha launch evidence.", encoding="utf-8")
+            second.write_text("# Beta\nBeta budget evidence.", encoding="utf-8")
+            settings = SmolagentsModelSettings(
+                model_id="test-model",
+                base_url="http://127.0.0.1:9999/v1",
+            )
+            captured: dict[str, object] = {}
+
+            def fake_agent(**kwargs):
+                tools = {tool.name: tool for tool in kwargs["tools"]}
+                captured["tool_names"] = list(tools)
+                captured["collection"] = tools["document_collection_summary"].forward()
+                captured["search"] = tools["document_search"].forward(
+                    "first.md",
+                    "Alpha launch",
+                )
+                return DocumentAnalysisRun(
+                    answer="Alpha covers launch; Beta covers budget.",
+                    debug_steps=["direct analysis completed"],
+                    tool_calls=["document_collection_summary", "document_search"],
+                    inspected_file_names=("first.md", "second.md"),
+                )
+
+            with (
+                patch(
+                    "qwopus_agent.services.analysis_service.resolve_model_settings",
+                    side_effect=lambda current: current,
+                ),
+                patch(
+                    "qwopus_agent.services.analysis_service.check_model_connection",
+                    return_value=(True, "online"),
+                ),
+                patch(
+                    "qwopus_agent.services.analysis_service.run_smolagents_file_analysis_with_debug",
+                    side_effect=fake_agent,
+                ),
+                patch(
+                    "qwopus_agent.services.analysis_service.save_uploaded_bytes"
+                ) as save_upload,
+                patch("qwopus_agent.services.analysis_service.DocumentStore") as document_store,
+            ):
+                outcome = analyze_uploaded_files(
+                    uploaded_files=[
+                        UploadedFileInput(name="first.md", local_path=first),
+                        UploadedFileInput(name="second.md", local_path=second),
+                    ],
+                    user_question="Compare both files",
+                    settings=settings,
+                    minirag=None,
+                    analysis_mode="full",
+                )
+
+            # 原因：目录模式的核心契约是“分析原文件”，不能悄悄退回上传或向量入库路径。
+            # 作用：证明两份文件由本地 Tool 覆盖，且 storage 上传/文档持久化均未触发。
+            save_upload.assert_not_called()
+            document_store.assert_not_called()
+            self.assertFalse(outcome.result.metadata["minirag_inserted"])
+            self.assertFalse(outcome.result.metadata["minirag_context_used"])
+            self.assertEqual(outcome.result.metadata["analysis_source"], "local_folder")
+            self.assertNotIn("rag_search", captured["tool_names"])
+            self.assertIn("# File: first.md", captured["collection"])
+            self.assertIn("# File: second.md", captured["collection"])
+            self.assertIn("Alpha launch evidence", captured["search"])
+
+    def test_offline_model_still_runs_grounded_report_composer(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            lesson_21 = root / "lesson-21.md"
+            lesson_22 = root / "lesson-22.md"
+            lesson_21.write_text(
+                "# Lesson 21\n\nTitle: Active humility\n\n"
+                "The source distinguishes humility from self-erasure.",
+                encoding="utf-8",
+            )
+            lesson_22.write_text(
+                "# Lesson 22\n\nTitle: Free obedience\n\n"
+                "The source distinguishes trust from blind compliance.",
+                encoding="utf-8",
+            )
+            settings = SmolagentsModelSettings(
+                model_id="offline-model",
+                base_url="http://127.0.0.1:9999/v1",
+            )
+            called: dict[str, object] = {}
+
+            def fake_composer(**kwargs):
+                called["file_names"] = kwargs["file_names"]
+                return DocumentAnalysisRun(
+                    answer="Grounded report composed while the model was offline.",
+                    debug_steps=["grounded composer finished"],
+                    tool_calls=["document_collection_summary"],
+                    inspected_file_names=("lesson-21.md", "lesson-22.md"),
+                    generation_mode="grounded_composer",
+                )
+
+            question = (
+                "请逐一阅读所有文件并完整输出：\n"
+                "## 1. 文档理解\n"
+                "## 2. 写作整体策略\n"
+                "## 3. 详细写作框架\n"
+                "## 4. 逐段写作指导\n"
+                "## 5. 具体例子\n"
+                "## 6. 生成完整报告 Draft"
+            )
+            with (
+                patch(
+                    "qwopus_agent.services.analysis_service.resolve_model_settings",
+                    side_effect=lambda current: current,
+                ),
+                patch(
+                    "qwopus_agent.services.analysis_service.check_model_connection",
+                    return_value=(False, "offline"),
+                ),
+                patch(
+                    "qwopus_agent.services.analysis_service.run_smolagents_file_analysis_with_debug",
+                    side_effect=fake_composer,
+                ),
+            ):
+                outcome = analyze_uploaded_files(
+                    uploaded_files=[
+                        UploadedFileInput(name="lesson-21.md", local_path=lesson_21),
+                        UploadedFileInput(name="lesson-22.md", local_path=lesson_22),
+                    ],
+                    user_question=question,
+                    settings=settings,
+                    minirag=None,
+                    analysis_mode="full",
+                )
+
+            self.assertEqual(
+                called["file_names"],
+                ["lesson-21.md", "lesson-22.md"],
+            )
+            self.assertEqual(
+                outcome.result.metadata["generation_mode"],
+                "grounded_composer",
+            )
+            self.assertIn("model was offline", outcome.result.llm_analysis)
+            self.assertTrue(
+                any("本地证据合成" in step for step in outcome.debug_steps)
+            )
 
 
 if __name__ == "__main__":

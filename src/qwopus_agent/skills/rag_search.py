@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from qwopus_agent.memory.minirag import MiniRAG
+from qwopus_agent.memory.knowledge_store import KnowledgeStore
 from qwopus_agent.skills.base import BaseSkill, SkillRequest, SkillResponse
 
 
@@ -18,7 +18,9 @@ class RagSearchSkill(BaseSkill):
     # Role: Answers queries by delegating only to MiniRAG.search(query).
     description: str = "Search local knowledge through the MiniRAG interface."
 
-    minirag: MiniRAG | None = None
+    # 原因：Skill 只需要 insert/search 契约，不应依赖 NanoVectorDB 或项目图谱实现。
+    # 作用：MiniRAG 适配器和测试替身都可通过依赖注入使用同一个检索 Skill。
+    minirag: KnowledgeStore | None = None
 
     async def run(self, request: SkillRequest) -> SkillResponse:
         """Search MiniRAG without exposing internal retrieval implementation."""
@@ -29,7 +31,7 @@ class RagSearchSkill(BaseSkill):
             )
 
         min_relevance = float(request.arguments.get("min_relevance", 0.25))
-        max_results = max(1, min(20, int(request.arguments.get("max_results", 5))))
+        max_results = max(1, min(20, int(request.arguments.get("max_results", 12))))
         results = self.minirag.search(
             request.query,
             min_relevance=min_relevance,

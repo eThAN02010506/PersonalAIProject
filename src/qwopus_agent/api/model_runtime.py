@@ -14,6 +14,7 @@ from threading import Lock, RLock
 from typing import BinaryIO, Literal
 from urllib.parse import urlparse, urlunparse
 
+from qwopus_agent.integrations.smolagents_model import probe_model_settings
 from qwopus_agent.integrations.smolagents_runtime import (
     SmolagentsModelSettings,
     check_model_connection,
@@ -22,6 +23,7 @@ from qwopus_agent.integrations.smolagents_runtime import (
 from qwopus_agent.llm import ModelCapabilities
 
 LOCAL_MLX_LOG = Path("logs/local_mlx_server.log")
+MODEL_STATUS_CACHE_SECONDS = 5.0
 
 
 class ModelRuntimeError(RuntimeError):
@@ -56,6 +58,9 @@ class RuntimeModelController:
         self._startup_timeout_seconds = startup_timeout_seconds
         self._state_lock = RLock()
         self._configuration_lock = Lock()
+        self._status_lock = Lock()
+        self._cached_status: RuntimeModelStatus | None = None
+        self._cached_status_at = 0.0
 
     def current_settings(self) -> SmolagentsModelSettings:
         """Return a snapshot with the model id currently reported by the server."""
@@ -67,20 +72,58 @@ class RuntimeModelController:
                 self._settings = resolved
         return resolved
 
-    def status(self) -> RuntimeModelStatus:
+    def status(self, *, force: bool = False) -> RuntimeModelStatus:
         """Probe and describe the currently selected endpoint."""
-        settings = self.current_settings()
-        online, message = check_model_connection(settings)
+        now = time.monotonic()
         with self._state_lock:
-            return RuntimeModelStatus(
-                mode=self._mode,
-                settings=settings,
-                online=online,
-                message=message,
-                local_model_path=(
-                    str(self._local_model_path) if self._local_model_path is not None else None
-                ),
-            )
+            cached = self._cached_status
+            if (
+                not force
+                and cached is not None
+                and now - self._cached_status_at < MODEL_STATUS_CACHE_SECONDS
+            ):
+                return cached
+
+        with self._status_lock:
+            now = time.monotonic()
+            with self._state_lock:
+                cached = self._cached_status
+                if (
+                    not force
+                    and cached is not None
+                    and now - self._cached_status_at < MODEL_STATUS_CACHE_SECONDS
+                ):
+                    return cached
+                settings = self._settings
+            settings, online, message = probe_model_settings(settings)
+            with self._state_lock:
+                if self._settings.base_url == settings.base_url:
+                    self._settings = settings
+                status = RuntimeModelStatus(
+                    mode=self._mode,
+                    settings=settings,
+                    online=online,
+                    message=message,
+                    local_model_path=(
+                        str(self._local_model_path)
+                        if self._local_model_path is not None
+                        else None
+                    ),
+                )
+                # 原因：多个 Debug 标签页会在同一五秒窗口重复探测相同模型地址。
+                # 作用：短 TTL 复用状态并由 _status_lock 合并并发探测，不缓存配置变更。
+                self._cached_status = status
+                self._cached_status_at = now
+                return status
+
+    def require_online_settings(self) -> SmolagentsModelSettings:
+        """Return current settings only when the selected model endpoint is reachable."""
+        status = self.status(force=True)
+        if not status.online:
+            # 原因：模型已离线时启动后台 Agent 只会等待 HTTP 超时并暴露 provider 异常。
+            # 作用：在创建进程和保存用户消息前快速失败，向 API 提供明确的服务不可用原因。
+            raise ModelRuntimeError(status.message)
+        return status.settings
 
     def configure_remote(
         self,
@@ -90,25 +133,26 @@ class RuntimeModelController:
         """Switch to a reachable OpenAI-compatible server."""
         normalized_url = _normalize_base_url(base_url)
         with self._configuration_lock:
+            self._invalidate_status()
             with self._state_lock:
                 candidate = replace(
                     self._settings,
                     base_url=normalized_url,
                     capabilities=capabilities or self._settings.capabilities,
                 )
-            online, message = check_model_connection(candidate)
+            candidate, online, message = probe_model_settings(candidate)
             if not online:
                 raise ModelRuntimeError(message)
 
-            candidate = resolve_model_settings(candidate)
             with self._state_lock:
                 local_process = self._detach_local_process()
                 self._settings = candidate
                 self._mode = "remote"
                 self._local_model_path = None
+                status = self._record_status(candidate, True, message)
             _stop_process(local_process)
             self._close_local_log()
-        return self.status()
+        return status
 
     def configure_local(
         self,
@@ -120,6 +164,7 @@ class RuntimeModelController:
         executable = _find_mlx_server(path)
 
         with self._configuration_lock:
+            self._invalidate_status()
             with self._state_lock:
                 if (
                     self._mode == "local"
@@ -159,7 +204,7 @@ class RuntimeModelController:
                 self._local_model_path = path
                 self._settings = resolve_model_settings(candidate)
                 self._mode = "local"
-        return self.status()
+        return self.status(force=True)
 
     def close(self) -> None:
         """Stop only the local server started by this controller."""
@@ -168,6 +213,36 @@ class RuntimeModelController:
                 process = self._detach_local_process()
             _stop_process(process)
             self._close_local_log()
+            self._invalidate_status()
+
+    def _invalidate_status(self) -> None:
+        with self._state_lock:
+            self._cached_status = None
+            self._cached_status_at = 0.0
+
+    def _record_status(
+        self,
+        settings: SmolagentsModelSettings,
+        online: bool,
+        message: str,
+    ) -> RuntimeModelStatus:
+        """Cache a status while the caller holds the state lock."""
+        status = RuntimeModelStatus(
+            mode=self._mode,
+            settings=settings,
+            online=online,
+            message=message,
+            local_model_path=(
+                str(self._local_model_path)
+                if self._local_model_path is not None
+                else None
+            ),
+        )
+        # 原因：配置切换已经得到可信探测结果，立即再次请求同一端点没有新增信息。
+        # 作用：直接记录切换结果，使远程模型配置只访问一次 /models。
+        self._cached_status = status
+        self._cached_status_at = time.monotonic()
+        return status
 
     def _start_local_process(
         self,

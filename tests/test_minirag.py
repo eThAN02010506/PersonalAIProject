@@ -76,6 +76,38 @@ class MiniRAGTests(unittest.TestCase):
                 ["# Persisted\nLong-term knowledge."],
             )
 
+    def test_existing_instance_refreshes_after_another_instance_writes(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            storage_path = Path(tmpdir) / "documents.jsonl"
+            first = make_test_minirag(storage_path)
+            second = make_test_minirag(storage_path)
+
+            second.insert("# File: shared.md\n\nCross-process knowledge is now available.")
+
+            # 原因：FastAPI worker 与 Agent 子进程可能长期持有同一路径的独立内存快照。
+            # 作用：证明旧实例会在搜索前检测事实库变化，并加载另一个实例刚写入的文档。
+            self.assertIn(
+                "Cross-process knowledge",
+                "\n".join(first.search("cross process knowledge")),
+            )
+            self.assertEqual(first.list_sources(), ["shared.md"])
+
+    def test_reload_preserves_documents_with_unicode_line_separators(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            storage_path = Path(tmpdir) / "documents.jsonl"
+            memory = make_test_minirag(storage_path)
+            memory.insert(
+                "# File: lesson-27.md\n\n"
+                "Life is offered with joy.\u2028This is still the same JSONL record."
+            )
+
+            reloaded = make_test_minirag(storage_path)
+
+            # 原因：真实第 27 课含 U+2028，splitlines() 会把合法 JSON 字符串拆坏并静默漏源。
+            # 作用：锁定 JSONL 只按物理换行读取，Unicode 排版字符不会删除整份文档。
+            self.assertEqual(reloaded.list_sources(), ["lesson-27.md"])
+            self.assertTrue(reloaded.search("offered with joy"))
+
     def test_search_ranks_documents_with_vector_similarity(self) -> None:
         with TemporaryDirectory() as tmpdir:
             memory = make_test_minirag(Path(tmpdir) / "documents.jsonl")
@@ -229,6 +261,54 @@ class MiniRAGTests(unittest.TestCase):
 
             self.assertTrue(results)
             self.assertTrue(all("Source: beta.txt" in result for result in results))
+
+    def test_search_can_match_a_document_by_its_source_filename(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            memory = make_test_minirag(Path(tmpdir) / "documents.jsonl")
+            memory.insert(
+                "# File: lesson-zeta-21.md\n\n"
+                "This body deliberately contains unrelated general notes."
+            )
+
+            results = memory.search("lesson zeta 21")
+
+            # 原因：文件名过去只存在于 metadata，没有进入 embedding，按课次查找会漏文档。
+            # 作用：锁定来源名称参与语义召回，同时结果仍返回可审计的 Source。
+            self.assertTrue(results)
+            self.assertIn("Source: lesson-zeta-21.md", results[0])
+
+    def test_search_can_return_evidence_from_eleven_matching_documents(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            memory = make_test_minirag(Path(tmpdir) / "documents.jsonl")
+            unique_topics = [
+                "revenue forecasting",
+                "customer retention",
+                "supply planning",
+                "product quality",
+                "team hiring",
+                "security controls",
+                "market research",
+                "delivery schedule",
+                "budget review",
+                "risk register",
+                "support workflow",
+            ]
+            for index, topic in enumerate(unique_topics, start=21):
+                memory.insert(
+                    f"# File: lesson-{index}.md\n\n"
+                    f"Portfolio comparison evidence discusses {topic}."
+                )
+
+            results = memory.search("portfolio comparison evidence")
+            sources = {
+                result.split("Source: ", 1)[1].split(" |", 1)[0].split("]", 1)[0]
+                for result in results
+                if "Source: " in result
+            }
+
+            # 原因：旧的 top_k=5 和 Tool max_results=3 不可能覆盖 21-31 共 11 份文档。
+            # 作用：证明检索层至少能把每份匹配文档的最佳 chunk 交给上层 Agent。
+            self.assertEqual(len(sources), 11)
 
     def test_restart_reuses_persisted_vector_index(self) -> None:
         with TemporaryDirectory() as tmpdir:

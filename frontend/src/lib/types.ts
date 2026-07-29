@@ -30,6 +30,15 @@ export type AnalysisResult = {
   trace: Record<string, unknown>[];
   reports: Array<{ kind: string; name: string; url: string }>;
   documents: DocumentOutline[];
+  source_coverage?: SourceCoverage;
+  generation_mode?: string;
+};
+
+export type SourceCoverage = {
+  required_sources: string[];
+  covered_sources: string[];
+  missing_sources: string[];
+  complete: boolean;
 };
 
 export type DocumentSection = {
@@ -56,6 +65,20 @@ export type SavedDocument = {
   section_count: number;
   saved_at: string;
   summary_available: boolean;
+};
+
+export type LocalFolderNode = {
+  name: string;
+  relative_path: string;
+  kind: "directory" | "file";
+  children: LocalFolderNode[];
+};
+
+export type LocalFolderTree = {
+  root: string;
+  file_count: number;
+  max_selection: number;
+  tree: LocalFolderNode;
 };
 
 export type Health = {

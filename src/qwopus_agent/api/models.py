@@ -6,6 +6,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from qwopus_agent.documents.local_folder import MAX_LOCAL_FOLDER_SELECTION
+
 
 class ConversationCreate(BaseModel):
     """Request for a blank conversation."""
@@ -52,6 +54,9 @@ class ChatStartRequest(BaseModel):
     # 作用：只有用户在当前请求显式开启时，Agent 才会收到全局检索 Tool。
     include_global_knowledge: bool = False
     min_source_relevance: float = Field(default=0.55, ge=0.25, le=0.95)
+    # 原因：用户需要控制答案的信息密度，而不是被固定最少字数拖慢每次生成。
+    # 作用：默认请求详细答案，并允许前端按当前问题切换详略。
+    response_detail: Literal["concise", "balanced", "detailed"] = "detailed"
 
     @model_validator(mode="after")
     def validate_global_permission(self) -> ChatStartRequest:
@@ -80,6 +85,15 @@ class RunView(BaseModel):
     error: str | None = None
 
 
+class SourceCoverageView(BaseModel):
+    """Auditable coverage of the exact document set selected for one analysis."""
+
+    required_sources: list[str] = Field(default_factory=list)
+    covered_sources: list[str] = Field(default_factory=list)
+    missing_sources: list[str] = Field(default_factory=list)
+    complete: bool = False
+
+
 class AnalysisView(BaseModel):
     """Final document-analysis response and downloadable artifacts."""
 
@@ -89,6 +103,47 @@ class AnalysisView(BaseModel):
     trace: list[dict[str, Any]] = Field(default_factory=list)
     reports: list[dict[str, str]] = Field(default_factory=list)
     documents: list[DocumentOutlineView] = Field(default_factory=list)
+    source_coverage: SourceCoverageView | None = None
+    generation_mode: str | None = None
+
+
+class LocalFolderScanRequest(BaseModel):
+    """Local path submitted for safe server-side discovery."""
+
+    path: str = Field(min_length=1)
+
+
+class LocalFolderNodeView(BaseModel):
+    """One selectable directory or file in the scanned tree."""
+
+    name: str
+    relative_path: str
+    kind: Literal["directory", "file"]
+    children: list[LocalFolderNodeView] = Field(default_factory=list)
+
+
+class LocalFolderTreeView(BaseModel):
+    """Filtered local-folder tree returned to the frontend."""
+
+    root: str
+    file_count: int
+    max_selection: int
+    tree: LocalFolderNodeView
+
+
+class LocalFolderAnalysisRequest(BaseModel):
+    """Analyze an explicit subset of a previously scanned local folder."""
+
+    conversation_id: str = Field(min_length=1)
+    root: str = Field(min_length=1)
+    selected_files: list[str] = Field(
+        min_length=1,
+        max_length=MAX_LOCAL_FOLDER_SELECTION,
+    )
+    question: str = ""
+    generate_report: bool = False
+    analysis_mode: Literal["question", "section", "full"] = "question"
+    selected_sections: dict[str, tuple[str, ...]] = Field(default_factory=dict)
 
 
 class DocumentSectionView(BaseModel):
@@ -121,6 +176,52 @@ class SavedDocumentView(BaseModel):
     section_count: int
     saved_at: str
     summary_available: bool
+
+
+class SavedDocumentsAttachRequest(BaseModel):
+    """Explicit saved-document selection to index into one private conversation."""
+
+    document_ids: list[str] = Field(min_length=1, max_length=100)
+
+    @model_validator(mode="after")
+    def validate_document_ids(self) -> SavedDocumentsAttachRequest:
+        """Reject ambiguous repeated selections before any MiniRAG mutation."""
+        _validate_selected_document_ids(self.document_ids)
+        return self
+
+
+class SavedDocumentsAttachView(BaseModel):
+    """Documents made available to the selected conversation."""
+
+    conversation_id: str
+    attached_count: int
+    documents: list[SavedDocumentView]
+
+
+class SavedDocumentsAnalysisRequest(BaseModel):
+    """Analyze only the explicitly selected saved originals."""
+
+    conversation_id: str = Field(min_length=1)
+    document_ids: list[str] = Field(min_length=1, max_length=100)
+    question: str = ""
+    generate_report: bool = False
+    min_source_relevance: float = Field(default=0.55, ge=0.25, le=0.95)
+    analysis_mode: Literal["question", "section", "full"] = "question"
+    selected_sections: dict[str, tuple[str, ...]] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_document_ids(self) -> SavedDocumentsAnalysisRequest:
+        """Keep one deterministic analysis input per saved record."""
+        _validate_selected_document_ids(self.document_ids)
+        return self
+
+
+def _validate_selected_document_ids(document_ids: list[str]) -> None:
+    """Apply the shared non-empty and uniqueness rule to saved-document requests."""
+    if any(not document_id.strip() for document_id in document_ids):
+        raise ValueError("Saved document ids must not be blank.")
+    if len(document_ids) != len(set(document_ids)):
+        raise ValueError("Saved document ids must be unique.")
 
 
 class ModelSettingsUpdate(BaseModel):

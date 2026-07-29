@@ -38,7 +38,7 @@ class ModelSettings:
     api_key: str = "sk-optiq-local"
     timeout_seconds: int = 120
     temperature: float = 0.2
-    max_tokens: int = 1024
+    max_tokens: int = 8192
     capabilities: ModelCapabilities = field(default_factory=ModelCapabilities)
 
     def __post_init__(self) -> None:
@@ -67,7 +67,7 @@ class ModelSettings:
             api_key=os.getenv("QWOPUS_SMOLAGENTS_API_KEY", "sk-optiq-local"),
             timeout_seconds=int(os.getenv("QWOPUS_SMOLAGENTS_TIMEOUT_SECONDS", "120")),
             temperature=float(os.getenv("QWOPUS_SMOLAGENTS_TEMPERATURE", "0.2")),
-            max_tokens=int(os.getenv("QWOPUS_SMOLAGENTS_MAX_TOKENS", "1024")),
+            max_tokens=int(os.getenv("QWOPUS_SMOLAGENTS_MAX_TOKENS", "8192")),
             capabilities=ModelCapabilities(
                 context_window_tokens=int(
                     os.getenv("QWOPUS_SMOLAGENTS_CONTEXT_WINDOW_TOKENS", "32768")

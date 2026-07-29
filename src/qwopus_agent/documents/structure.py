@@ -13,8 +13,20 @@ _MARKDOWN_HEADING = re.compile(r"^(#{1,6})\s+(.+?)\s*#*\s*$")
 _PAGE_HEADING = re.compile(r"^(?:Page\s+(\d+)|第\s*(\d+)\s*页)$", re.IGNORECASE)
 _NUMBERED_HEADING = re.compile(
     r"^(?:第[一二三四五六七八九十百千万0-9]+[章节篇部]|"
-    r"[一二三四五六七八九十百千万]+[.、\s]+|"
-    r"\d+(?:\.\d+){0,5}(?:[.\s、]+))\s*\S.{0,100}$"
+    r"[一二三四五六七八九十百千万]+[.．、\s]+|"
+    r"\d+(?:\.\d+){0,5}(?:[.．\s、]+))\s*\S.{0,100}$"
+)
+_STRONG_PLAIN_HEADING = re.compile(
+    r"^(?:"
+    r"第[一二三四五六七八九十百千万0-9]+[章节篇部][：:、.．\s]+\S|"
+    r"[一二三四五六七八九十百千万]+[.．、]\s*\S"
+    r").{0,100}$"
+)
+_SINGLE_ARABIC_HEADING = re.compile(
+    r"^(?P<number>\d{1,3})[.．、]\s*(?P<title>\S.{0,100})$"
+)
+_DECIMAL_ARABIC_HEADING = re.compile(
+    r"^(?P<number>\d+(?:\.\d+)+)(?:[.．、]\s*|\s+)(?P<title>\S.{0,100})$"
 )
 
 
@@ -47,17 +59,24 @@ def build_document_structure(
         else infer_plaintext_headings
     )
     require_bold_numbered = Path(source).suffix.lower() == ".docx"
+    raw_lines = markdown.splitlines()
+    plain_heading_indexes = (
+        _infer_docx_plain_heading_indexes(raw_lines)
+        if infer_plaintext and require_bold_numbered
+        else set()
+    )
     sections: list[_SectionBuilder] = []
     heading_stack: list[_SectionBuilder] = []
     current: _SectionBuilder | None = None
     current_page: int | None = None
 
-    for raw_line in markdown.splitlines():
+    for line_index, raw_line in enumerate(raw_lines):
         line = raw_line.rstrip()
         heading = _heading(
             line,
             infer_plaintext=infer_plaintext,
             require_bold_numbered=require_bold_numbered,
+            allow_plain_numbered=line_index in plain_heading_indexes,
         )
         if heading is not None:
             level, title = heading
@@ -131,20 +150,15 @@ def _heading(
     *,
     infer_plaintext: bool,
     require_bold_numbered: bool,
+    allow_plain_numbered: bool = False,
 ) -> tuple[int, str] | None:
     markdown_match = _MARKDOWN_HEADING.match(line.strip())
     if markdown_match:
         return len(markdown_match.group(1)), markdown_match.group(2).strip()
-    compact = line.strip()
-    is_bold_line = compact.startswith("**") and compact.endswith("**")
-    if is_bold_line:
-        compact = compact[2:-2].strip()
-    # 原因：MinerU 会保留标题前的图标字符，编号本身仍是最稳定的章节信号。
-    # 作用：只在启用编号推断时忽略编号前符号，不影响普通 Markdown 标题正文。
-    compact = re.sub(r"^[^\w一二三四五六七八九十百千万]+", "", compact)
+    compact, is_bold_line = _plain_heading_text(line)
     if (
         infer_plaintext
-        and (is_bold_line or not require_bold_numbered)
+        and (is_bold_line or not require_bold_numbered or allow_plain_numbered)
         and len(compact) <= 120
         and _NUMBERED_HEADING.match(compact)
     ):
@@ -155,8 +169,100 @@ def _heading(
 def _numbered_heading_level(title: str) -> int:
     number = re.match(r"^(\d+(?:\.\d+)*)", title)
     if number:
-        return min(number.group(1).count(".") + 1, 6)
+        # 原因：中文大纲常用“一、主题”作为一级，再用“1. 子题”作为二级；
+        # 旧逻辑把单个阿拉伯数字也定为一级，导致子题与父级互相覆盖。
+        # 作用：单个阿拉伯编号至少为二级，小数点层数继续表达更深层级。
+        return min(max(2, number.group(1).count(".") + 1), 6)
     return 1
+
+
+def _plain_heading_text(line: str) -> tuple[str, bool]:
+    """Normalize one possible visual heading while retaining its bold signal."""
+    compact = line.strip()
+    is_bold_line = compact.startswith("**") and compact.endswith("**")
+    if is_bold_line:
+        compact = compact[2:-2].strip()
+    # 原因：MinerU 会保留标题前的图标字符，编号本身仍是最稳定的章节信号。
+    # 作用：只移除编号前装饰符，不触碰标题正文。
+    compact = re.sub(r"^[^\w一二三四五六七八九十百千万]+", "", compact)
+    return compact, is_bold_line
+
+
+def _infer_docx_plain_heading_indexes(lines: list[str]) -> set[int]:
+    """Conservatively recover unstyled numbered headings from DOCX text.
+
+    Word documents frequently store visual headings as ordinary ``Normal`` paragraphs, and
+    MinerU therefore emits neither ``#`` nor ``**``. Chinese chapter markers are strong enough
+    to accept directly. Ambiguous Arabic markers are accepted only as a sequential outline with
+    substantive body text beneath at least two siblings, which keeps ordinary numbered lists in
+    their parent section.
+    """
+    allowed: set[int] = set()
+    boundaries: list[int] = []
+    for index, line in enumerate(lines):
+        compact, is_bold = _plain_heading_text(line)
+        if (
+            len(compact) <= 120
+            and _NUMBERED_HEADING.match(compact)
+            and (is_bold or _STRONG_PLAIN_HEADING.match(compact))
+        ):
+            boundaries.append(index)
+            if _STRONG_PLAIN_HEADING.match(compact):
+                allowed.add(index)
+
+    for boundary_index, start in enumerate(boundaries):
+        end = (
+            boundaries[boundary_index + 1]
+            if boundary_index + 1 < len(boundaries)
+            else len(lines)
+        )
+        candidates: list[tuple[int, tuple[int, ...]]] = []
+        for index in range(start + 1, end):
+            compact, is_bold = _plain_heading_text(lines[index])
+            if is_bold or len(compact) > 120:
+                continue
+            decimal = _DECIMAL_ARABIC_HEADING.match(compact)
+            if decimal is not None:
+                number_path = tuple(
+                    int(part) for part in decimal.group("number").split(".")
+                )
+                candidates.append((index, number_path))
+                continue
+            single = _SINGLE_ARABIC_HEADING.match(compact)
+            if single is not None:
+                candidates.append((index, (int(single.group("number")),)))
+
+        for number_depth in sorted({len(path) for _, path in candidates}):
+            by_parent: dict[tuple[int, ...], list[tuple[int, tuple[int, ...]]]] = {}
+            for candidate in candidates:
+                index, number_path = candidate
+                if len(number_path) != number_depth:
+                    continue
+                by_parent.setdefault(number_path[:-1], []).append((index, number_path))
+            for siblings in by_parent.values():
+                siblings.sort(key=lambda item: item[0])
+                ordinals = [path[-1] for _, path in siblings]
+                if len(siblings) < 2 or ordinals[0] != 1 or ordinals != list(
+                    range(ordinals[0], ordinals[0] + len(ordinals))
+                ):
+                    continue
+                substantive = 0
+                for sibling_index, (line_index, _) in enumerate(siblings):
+                    body_end = (
+                        siblings[sibling_index + 1][0]
+                        if sibling_index + 1 < len(siblings)
+                        else end
+                    )
+                    if _has_substantive_body(lines, line_index + 1, body_end):
+                        substantive += 1
+                if substantive >= 2:
+                    allowed.update(index for index, _ in siblings)
+    return allowed
+
+
+def _has_substantive_body(lines: list[str], start: int, end: int) -> bool:
+    body = "".join(line.strip() for line in lines[start:end] if line.strip())
+    return len(body) >= 16
 
 
 def _page_number(title: str) -> int | None:

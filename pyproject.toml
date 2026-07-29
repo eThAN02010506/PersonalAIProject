@@ -30,7 +30,9 @@ dependencies = [
   "pypdf>=5.0",
   "python-dotenv>=1.0",
   "python-docx>=1.1",
-  "smolagents>=1.26.0",
+  # 原因：运行时依赖 smolagents 1.x 的 RunResult、ToolCallingAgent 和 CodeAgent 合同。
+  # 作用：允许兼容的 1.x 修复版本，同时避免未来 2.x 被静默安装并破坏 Agent 执行。
+  "smolagents>=1.26.0,<2",
   # 原因：知识检索需要独立于聊天 LLM 的多语言本地 embedding。
   # 作用：Gemma、Qwen 或其他生成模型切换时，已有向量索引和检索接口保持稳定。
   "sentence-transformers>=5.0,<6",

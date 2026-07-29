@@ -6,6 +6,7 @@ import {
   Network,
   Search,
   SlidersHorizontal,
+  TextSelect,
   Wrench,
   X,
 } from "lucide-react";
@@ -36,6 +37,7 @@ const RunInspector = lazy(() =>
 );
 
 type ViewMode = "chat" | "documents";
+type ResponseDetail = "concise" | "balanced" | "detailed";
 
 export default function App() {
   const [conversations, setConversations] = useState<Conversation[]>([]);
@@ -48,6 +50,7 @@ export default function App() {
   const [localKnowledge, setLocalKnowledge] = useState(false);
   const [globalKnowledge, setGlobalKnowledge] = useState(false);
   const [minSourceRelevance, setMinSourceRelevance] = useState(0.55);
+  const [responseDetail, setResponseDetail] = useState<ResponseDetail>("detailed");
   const [showProcess, setShowProcess] = useState(false);
   const [isRunning, setIsRunning] = useState(false);
   const [runId, setRunId] = useState<string | null>(null);
@@ -162,6 +165,7 @@ export default function App() {
           enableLocalKnowledge: localKnowledge,
           includeGlobalKnowledge: globalKnowledge,
           minSourceRelevance,
+          responseDetail,
         });
         setRunId(started.run_id);
         await loadMessages(conversationId);
@@ -190,6 +194,7 @@ export default function App() {
       localKnowledge,
       minSourceRelevance,
       refreshConversations,
+      responseDetail,
       webSearch,
     ],
   );
@@ -243,6 +248,18 @@ export default function App() {
 
           {mode === "chat" && (
             <div className="capability-toggles">
+              <label className="detail-select" title="Control answer depth">
+                <TextSelect size={15} />
+                <select
+                  value={responseDetail}
+                  onChange={(event) => setResponseDetail(event.target.value as ResponseDetail)}
+                  aria-label="Answer detail"
+                >
+                  <option value="concise">Concise</option>
+                  <option value="balanced">Balanced</option>
+                  <option value="detailed">Detailed</option>
+                </select>
+              </label>
               <label title="Allow Tavily web search">
                 <input type="checkbox" checked={webSearch} onChange={(event) => setWebSearch(event.target.checked)} />
                 <Search size={15} /> Web
