@@ -117,8 +117,9 @@ requiring another LLM call.
 
 ## Current Boundaries
 
-- Browser automation has a tested Skill and provider contract, but no production browser provider
-  is wired into the application.
+- Browser automation is wired through an explicitly authorized, read-only Playwright provider.
+  It is limited to public HTTP(S) rendering, blocks private-network targets, and does not reuse a
+  user's personal browser session.
 - Accounts are local to one Qwopus-Agent installation. Sharing grants editor access to one complete
   chat and its attached documents/reports; field-level permissions and external identity providers
   are outside the current runtime.

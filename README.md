@@ -87,7 +87,9 @@ and actions when relevant; it does not impose a fixed word count. Non-JSON outpu
 from a weaker compatible model is converted into a bounded evidence fallback
 instead of being displayed as an intermediate answer.
 
-See [docs/architecture.md](docs/architecture.md) for module-level design notes.
+See [docs/requirements.md](docs/requirements.md) for product roles, use cases,
+status, and acceptance criteria. See
+[docs/architecture.md](docs/architecture.md) for module-level design notes.
 
 ## Requirements
 
@@ -492,7 +494,7 @@ vendor/minirag/   Vendored MiniRAG source used by the local knowledge adapter
 vendor/mineru/    Pinned MinerU Git submodule used for document parsing and OCR
 storage/          Runtime documents, indexes, reports, Skills, cache, and SQLite
 logs/             Runtime logs and bounded Debug records
-docs/             Architecture notes
+docs/             Product requirements and architecture notes
 AGENTS.md         Repository development and verification rules
 ```
 
