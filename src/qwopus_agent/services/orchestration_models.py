@@ -26,6 +26,8 @@ class ConversationTurn(BaseModel):
 
 InterpretationMode = Literal["precise", "contextual", "exploratory"]
 AgentOutputRole = Literal["final", "evidence", "review"]
+DEFAULT_MAX_EVIDENCE_SOURCES = 12
+MAX_EVIDENCE_SOURCES = 20
 TaskType = Literal[
     "answer",
     "explain",
@@ -73,6 +75,17 @@ class AnswerContract(BaseModel):
     required_facets: tuple[str, ...] = ()
 
 
+class AnswerPlanItem(BaseModel):
+    """One question-specific requirement that evidence and review can track."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    item_id: str = Field(pattern=r"^P\d+$")
+    section: str = Field(min_length=1)
+    question: str = Field(min_length=1)
+    evidence_requirement: str = Field(min_length=1)
+
+
 class AnswerPlan(BaseModel):
     """Compact writing plan shared by evidence workers and the final synthesizer."""
 
@@ -85,6 +98,7 @@ class AnswerPlan(BaseModel):
     required_sections: tuple[str, ...] = ()
     depth_questions: tuple[str, ...] = ()
     style_rules: tuple[str, ...] = ()
+    plan_items: tuple[AnswerPlanItem, ...] = Field(default=(), max_length=16)
 
 
 class ResolvedIntent(BaseModel):
@@ -169,6 +183,13 @@ class OrchestrationRequest(BaseModel):
     # 原因：不同问题对召回率和精度的要求不同，不能使用全局可变阈值。
     # 作用：把用户选择固定在单次编排请求中，并限制为索引支持的安全范围。
     min_source_relevance: float = Field(default=0.55, ge=0.25, le=0.95)
+    # 原因：检索来源越多，上下文、延迟和弱模型整合难度越高，固定值不能适配不同任务。
+    # 作用：由用户为当前请求选择来源上限，同时以服务端硬上限保护模型上下文。
+    max_evidence_sources: int = Field(
+        default=DEFAULT_MAX_EVIDENCE_SOURCES,
+        ge=1,
+        le=MAX_EVIDENCE_SOURCES,
+    )
     # 原因：回答详略属于用户本轮偏好，不能靠修改模型全局 token 上限实现。
     # 作用：统一传递简洁、标准和详细三档策略，同时让简单问题仍可快速回答。
     response_detail: Literal["concise", "balanced", "detailed"] = "detailed"
@@ -201,8 +222,9 @@ class EvidenceFact(BaseModel):
 
     claim: str = Field(min_length=1, max_length=1_000)
     support: str = Field(min_length=1, max_length=4_000)
-    sources: tuple[str, ...] = Field(default=(), max_length=12)
+    sources: tuple[str, ...] = Field(default=(), max_length=MAX_EVIDENCE_SOURCES)
     confidence: Literal["low", "medium", "high"] = "medium"
+    plan_item_ids: tuple[str, ...] = Field(default=(), max_length=8)
 
 
 class EvidencePacket(BaseModel):
@@ -227,6 +249,16 @@ class EvidenceLedger(BaseModel):
     limitations: tuple[str, ...] = Field(default=(), max_length=16)
 
 
+class EvidenceCoverage(BaseModel):
+    """Review status for one required answer-plan item."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    plan_item_id: str = Field(pattern=r"^P\d+$")
+    status: Literal["supported", "partial", "missing", "conflicted"]
+    finding: str = Field(min_length=1, max_length=1_000)
+
+
 class EvidenceReview(BaseModel):
     """Reviewer findings used to resolve conflicts and optionally fill gaps."""
 
@@ -237,6 +269,7 @@ class EvidenceReview(BaseModel):
     unsupported_claims: tuple[str, ...] = Field(default=(), max_length=12)
     gaps: tuple[str, ...] = Field(default=(), max_length=8)
     resolution: str = Field(default="", max_length=2_000)
+    coverage: tuple[EvidenceCoverage, ...] = Field(default=(), max_length=16)
 
 
 class ProcessEvent(BaseModel):

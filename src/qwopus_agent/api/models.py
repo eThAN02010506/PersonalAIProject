@@ -7,7 +7,11 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from qwopus_agent.documents.local_folder import MAX_LOCAL_FOLDER_SELECTION
-from qwopus_agent.services.orchestration_models import InterpretationMode
+from qwopus_agent.services.orchestration_models import (
+    DEFAULT_MAX_EVIDENCE_SOURCES,
+    MAX_EVIDENCE_SOURCES,
+    InterpretationMode,
+)
 
 
 class UserView(BaseModel):
@@ -131,6 +135,13 @@ class ChatStartRequest(BaseModel):
     # 作用：只有用户在当前请求显式开启时，Agent 才会收到全局检索 Tool。
     include_global_knowledge: bool = False
     min_source_relevance: float = Field(default=0.55, ge=0.25, le=0.95)
+    # 原因：固定来源数会让简单问题浪费上下文，也会让跨文档任务丢失必要证据。
+    # 作用：正式 API 对用户选择做范围校验，并把限制固定在当前聊天轮次。
+    max_evidence_sources: int = Field(
+        default=DEFAULT_MAX_EVIDENCE_SOURCES,
+        ge=1,
+        le=MAX_EVIDENCE_SOURCES,
+    )
     # 原因：用户需要控制答案的信息密度，而不是被固定最少字数拖慢每次生成。
     # 作用：默认请求详细答案，并允许前端按当前问题切换详略。
     response_detail: Literal["concise", "balanced", "detailed"] = "detailed"

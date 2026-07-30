@@ -1,6 +1,10 @@
 import unittest
 
-from qwopus_agent.services.answer_quality import AnswerQualityEvaluator
+from qwopus_agent.services.answer_pipeline import build_answer_plan
+from qwopus_agent.services.answer_quality import (
+    AnswerQualityEvaluator,
+    strip_unsupported_evidence_lines,
+)
 from qwopus_agent.services.intent_resolver import IntentResolver
 
 
@@ -110,6 +114,97 @@ class AnswerQualityEvaluatorTests(unittest.TestCase):
         report = self.evaluator.evaluate(answer, intent)
 
         self.assertNotIn("fragmented_answer", report.issues)
+
+    def test_detailed_target_scales_with_required_plan_items(self) -> None:
+        intent = self.resolver.resolve(
+            "请详细分析系统的证据、风险、限制和建议",
+            response_detail="detailed",
+        )
+        plan = build_answer_plan(
+            intent.operational_objective,
+            intent.answer_contract,
+        )
+
+        report = self.evaluator.evaluate(
+            "因为证据仍不完整，所以结论需要附带限制条件。",
+            intent,
+            answer_plan=plan,
+        )
+
+        self.assertGreater(report.target_tokens, 150)
+        self.assertIn("insufficient_depth", report.issues)
+
+    def test_long_generic_answer_still_requires_specificity(self) -> None:
+        intent = self.resolver.resolve(
+            "请详细分析这个方案",
+            response_detail="detailed",
+        )
+        answer = (
+            "这个方案整体上值得进一步考虑。它包含多个需要认真关注的方面，"
+            "每个方面都十分重要，也应当得到充分讨论。团队需要保持谨慎，"
+            "持续关注整体情况，并在后续工作中不断完善。"
+        ) * 4
+
+        report = self.evaluator.evaluate(answer, intent)
+
+        self.assertIn("insufficient_specificity", report.issues)
+
+    def test_unsourced_empirical_numbers_require_repair(self) -> None:
+        intent = self.resolver.resolve(
+            "请详细分析这个架构",
+            response_detail="detailed",
+        )
+        answer = (
+            "研究报告显示该架构让任务成功率从 78% 提升到 92%。"
+            "因此可以认为它具有明显优势，同时仍需考虑状态一致性风险和验证条件。"
+        )
+
+        report = self.evaluator.evaluate(answer, intent, has_citations=False)
+
+        self.assertIn("unsupported_empirical_claims", report.issues)
+
+    def test_unsupported_evidence_sanitizer_preserves_safe_analysis(self) -> None:
+        answer = (
+            "职责分离可以让规划和执行分别测试。\n"
+            "研究报告显示成功率提升 20%。\n"
+            "根据 invented.md 第 2 页，该设计已经验证。\n"
+            "应通过失败注入验证状态恢复。"
+        )
+
+        sanitized = strip_unsupported_evidence_lines(answer)
+
+        self.assertIn("职责分离", sanitized)
+        self.assertIn("失败注入", sanitized)
+        self.assertNotIn("20%", sanitized)
+        self.assertNotIn("invented.md", sanitized)
+
+    def test_model_declared_file_without_tool_source_is_rejected(self) -> None:
+        intent = self.resolver.resolve(
+            "请详细分析这个架构",
+            response_detail="detailed",
+        )
+
+        report = self.evaluator.evaluate(
+            "根据 invented.md 第 2 页，该架构已经完成验证。",
+            intent,
+            has_citations=False,
+        )
+
+        self.assertIn("ungrounded_source_reference", report.issues)
+
+    def test_unsourced_case_study_framing_is_rejected(self) -> None:
+        intent = self.resolver.resolve(
+            "请详细分析这个架构",
+            response_detail="detailed",
+        )
+
+        report = self.evaluator.evaluate(
+            "**证据**\n- 经验案例：某 Agent 使用该架构后表现更好。",
+            intent,
+            has_citations=False,
+        )
+
+        self.assertIn("unsupported_evidence_framing", report.issues)
 
 
 if __name__ == "__main__":

@@ -10,8 +10,11 @@ from typing import Literal, TypeVar, cast
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from qwopus_agent.services.orchestration_models import (
+    DEFAULT_MAX_EVIDENCE_SOURCES,
+    MAX_EVIDENCE_SOURCES,
     AnswerContract,
     AnswerPlan,
+    AnswerPlanItem,
     EvidenceFact,
     EvidenceLedger,
     EvidencePacket,
@@ -71,8 +74,11 @@ class _EvidenceFactDraft(BaseModel):
 
     claim: str = Field(min_length=1, max_length=1_000)
     support: str = Field(min_length=1, max_length=4_000)
-    sources: tuple[str, ...] = Field(default=(), max_length=12)
+    # 原因：弱模型可能重复或一次返回超过可信契约上限的来源，草稿解析不应因此整体失败。
+    # 作用：先接收模型输出，再由 parse_evidence_packet 去重并裁剪到 EvidenceFact 的安全上限。
+    sources: tuple[str, ...] = ()
     confidence: str = "medium"
+    plan_item_ids: tuple[str, ...] = Field(default=(), max_length=8)
 
 
 class _EvidencePacketDraft(BaseModel):
@@ -105,6 +111,15 @@ def build_answer_plan(
             "when they materially help.",
             "Add detail through specificity rather than padding or a fixed word count.",
         )
+    plan_items = tuple(
+        AnswerPlanItem(
+            item_id=f"P{index}",
+            section=section,
+            question=_plan_item_question(section, objective),
+            evidence_requirement=_plan_item_evidence_requirement(section),
+        )
+        for index, section in enumerate(sections, start=1)
+    )
     return AnswerPlan(
         objective=objective.strip(),
         task_type=contract.task_type,
@@ -116,6 +131,7 @@ def build_answer_plan(
         required_sections=sections,
         depth_questions=depth_questions,
         style_rules=style_rules,
+        plan_items=plan_items,
     )
 
 
@@ -127,9 +143,12 @@ def parse_evidence_packet(
     citations: Iterable[SourceCitation] = (),
     fallback_confidence: float = 0.5,
     trust_declared_sources: bool = True,
+    fallback_plan_item_ids: Iterable[str] = (),
+    max_sources: int = DEFAULT_MAX_EVIDENCE_SOURCES,
 ) -> EvidencePacket:
     """Parse strict worker JSON and retain a bounded fallback for weaker models."""
-    citation_sources = _unique(_citation_label(item) for item in citations)
+    _validate_source_limit(max_sources)
+    citation_sources = _unique(_citation_label(item) for item in citations)[:max_sources]
     draft = _parse_json_model(content, _EvidencePacketDraft)
     if draft is not None:
         facts = tuple(
@@ -137,7 +156,7 @@ def parse_evidence_packet(
                 claim=fact.claim,
                 support=fact.support,
                 sources=(
-                    _unique((*fact.sources, *citation_sources))
+                    _unique((*fact.sources, *citation_sources))[:max_sources]
                     if trust_declared_sources
                     else citation_sources
                 ),
@@ -146,6 +165,7 @@ def parse_evidence_packet(
                     has_runtime_sources=bool(citation_sources),
                     trust_declared_sources=trust_declared_sources,
                 ),
+                plan_item_ids=_valid_plan_item_ids(fact.plan_item_ids),
             )
             for fact in draft.facts
         )
@@ -160,6 +180,7 @@ def parse_evidence_packet(
                 support=compact,
                 sources=citation_sources,
                 confidence=_confidence_label("", fallback_confidence),
+                plan_item_ids=_valid_plan_item_ids(fallback_plan_item_ids),
             ),
         )
         limitations = ("Worker output required deterministic evidence fallback.",)
@@ -180,8 +201,11 @@ def parse_evidence_packet(
 
 def build_evidence_ledger(
     packets: Iterable[EvidencePacket],
+    *,
+    max_sources: int = DEFAULT_MAX_EVIDENCE_SOURCES,
 ) -> EvidenceLedger:
     """Merge evidence packets by semantic text identity while preserving sources."""
+    _validate_source_limit(max_sources)
     merged: dict[str, EvidenceFact] = {}
     limitations: list[str] = []
     for packet in packets:
@@ -194,10 +218,17 @@ def build_evidence_ledger(
                 continue
             merged[key] = previous.model_copy(
                 update={
-                    "sources": _unique((*previous.sources, *fact.sources)),
+                    # 原因：两个各自合法的证据包合并后仍可能超过 EvidenceFact 的 12 个来源上限。
+                    # 作用：按首次出现顺序保留有界来源，避免 Ledger 构建因 Pydantic 校验中断。
+                    "sources": _unique((*previous.sources, *fact.sources))[
+                        :max_sources
+                    ],
                     "confidence": _stronger_confidence(
                         previous.confidence,
                         fact.confidence,
+                    ),
+                    "plan_item_ids": _unique(
+                        (*previous.plan_item_ids, *fact.plan_item_ids)
                     ),
                 }
             )
@@ -208,6 +239,19 @@ def build_evidence_ledger(
             -len(item.sources),
         ),
     )
+    allowed_sources = set(
+        _unique(source for fact in facts for source in fact.sources)[:max_sources]
+    )
+    facts = [
+        fact.model_copy(
+            update={
+                "sources": tuple(
+                    source for source in fact.sources if source in allowed_sources
+                )
+            }
+        )
+        for fact in facts
+    ]
     return EvidenceLedger(
         facts=tuple(facts[:32]),
         limitations=_unique(limitations)[:16],
@@ -218,7 +262,16 @@ def parse_evidence_review(content: str) -> EvidenceReview:
     """Accept one strict review object and degrade to an explicit neutral review."""
     review = _parse_json_model(content, EvidenceReview)
     if review is not None:
-        return review
+        # 原因：部分模型会正确返回 coverage，却忘记把 missing/conflicted 项复制到 gaps。
+        # 作用：定向补证只消费结构化缺口，且同一缺口最多进入一次补证调用。
+        coverage_gaps = tuple(
+            f"{item.plan_item_id}: {item.finding}"
+            for item in review.coverage
+            if item.status in {"missing", "conflicted"}
+        )
+        return review.model_copy(
+            update={"gaps": _unique((*review.gaps, *coverage_gaps))[:8]}
+        )
     compact = " ".join(content.split())[:2_000]
     return EvidenceReview(
         resolution=compact,
@@ -326,8 +379,42 @@ def _grounded_confidence(
     return confidence
 
 
+def _validate_source_limit(max_sources: int) -> None:
+    """Keep direct service calls inside the same limits as the HTTP contract."""
+    if not 1 <= max_sources <= MAX_EVIDENCE_SOURCES:
+        raise ValueError(
+            f"max_sources must be between 1 and {MAX_EVIDENCE_SOURCES}."
+        )
+
+
 def _fact_key(fact: EvidenceFact) -> str:
     return re.sub(r"\W+", "", f"{fact.claim} {fact.support}".casefold())[:2_000]
+
+
+def _plan_item_question(section: str, objective: str) -> str:
+    """Bind every generic facet to the concrete objective being answered."""
+    compact_objective = " ".join(objective.split())
+    if section == "direct answer":
+        return f"What direct conclusion resolves this objective: {compact_objective}?"
+    return (
+        f"What specific {section} must the answer establish for this objective: "
+        f"{compact_objective}?"
+    )
+
+
+def _plan_item_evidence_requirement(section: str) -> str:
+    """Tell workers what qualifies as useful support instead of requesting prose."""
+    if section == "direct answer":
+        return "A direct conclusion tied to the strongest available evidence or reasoning."
+    return (
+        f"Concrete support for {section}, preserving source, scope, conditions, and "
+        "uncertainty when available."
+    )
+
+
+def _valid_plan_item_ids(values: Iterable[str]) -> tuple[str, ...]:
+    """Discard malformed model-declared IDs before they enter the trusted ledger."""
+    return _unique(value for value in values if re.fullmatch(r"P\d+", value.strip()))
 
 
 def _first_sentence(content: str) -> str:

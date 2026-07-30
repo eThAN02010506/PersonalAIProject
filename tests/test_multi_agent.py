@@ -193,6 +193,44 @@ class MultiAgentSupervisorTests(unittest.TestCase):
         self.assertIn("dependencies failed", result.runs[1].error or "")
         self.assertEqual(writer.calls, [])
 
+    def test_failed_dependency_propagates_across_multiple_levels(self) -> None:
+        @dataclass
+        class FailingAgent:
+            async def run(
+                self,
+                question: str,
+                context: dict[str, Any] | None = None,
+            ) -> str:
+                raise RuntimeError("source unavailable")
+
+        plan = DelegationPlan(
+            objective="compose",
+            tasks=(
+                DelegatedTask("knowledge", "collect", "knowledge"),
+                DelegatedTask("review", "review", "review", ("knowledge",)),
+                DelegatedTask("gap_fill", "fill", "gap_fill", ("review",)),
+                DelegatedTask("synthesis", "write", "writer", ("gap_fill",)),
+            ),
+        )
+        idle_agents = {
+            "review": FakeAgent("review"),
+            "gap_fill": FakeAgent("gap_fill"),
+            "writer": FakeAgent("writer"),
+        }
+        supervisor = MultiAgentSupervisor(
+            agents={"knowledge": FailingAgent(), **idle_agents},
+            delegator=StaticDelegator(plan),
+            debate_rounds=0,
+        )
+
+        result = asyncio.run(supervisor.run("compose"))
+
+        # 原因：一次上游失败会在后续循环逐层传播，不能被误判为依赖环。
+        # 作用：证明所有下游任务被明确跳过，而且没有调用任何无效 Agent。
+        self.assertEqual(len(result.runs), 4)
+        self.assertTrue(all(not run.success for run in result.runs))
+        self.assertTrue(all(agent.calls == [] for agent in idle_agents.values()))
+
     def test_dependency_cycle_is_rejected(self) -> None:
         plan = DelegationPlan(
             objective="cycle",

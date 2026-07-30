@@ -296,6 +296,7 @@ export const api = {
       enableLocalKnowledge: boolean;
       includeGlobalKnowledge: boolean;
       minSourceRelevance: number;
+      maxEvidenceSources: number;
       responseDetail: "concise" | "balanced" | "detailed";
       interpretationMode: InterpretationMode;
     },
@@ -312,6 +313,7 @@ export const api = {
           enable_local_knowledge: options.enableLocalKnowledge,
           include_global_knowledge: options.includeGlobalKnowledge,
           min_source_relevance: options.minSourceRelevance,
+          max_evidence_sources: options.maxEvidenceSources,
           response_detail: options.responseDetail,
           interpretation_mode: options.interpretationMode,
         }),

@@ -32,15 +32,22 @@ class LocalKnowledgeTools(list[Any]):
 
 def build_tavily_search_tool(
     progress_callback: Callable[[str], None] | None = None,
+    max_results: int = 5,
 ) -> Any:
     """Load the Tavily Tool only when web search is enabled."""
     # 原因：普通聊天不需要 Excel、文档或 MiniRAG Tool 依赖。
     # 作用：关闭联网时避免加载完整工具模块，同时保留可测试的工厂注入点。
     from qwopus_agent.integrations.smolagents_tools import (
+        TavilySearchConfig,
+    )
+    from qwopus_agent.integrations.smolagents_tools import (
         build_tavily_search_tool as create_tool,
     )
 
-    return create_tool(progress_callback=progress_callback)
+    return create_tool(
+        config=TavilySearchConfig(max_results=max_results),
+        progress_callback=progress_callback,
+    )
 
 
 def build_browser_open_tool(
@@ -63,6 +70,7 @@ def build_local_knowledge_tools(
     user_message: str = "",
     progress_callback: Callable[[str], None] | None = None,
     min_source_relevance: float = 0.55,
+    max_results: int = 12,
     knowledge_root: Path = DEFAULT_CONVERSATION_KNOWLEDGE_ROOT,
     global_knowledge_path: Path | None = None,
     include_global_knowledge: bool = False,
@@ -97,12 +105,14 @@ def build_local_knowledge_tools(
                 build_minirag_search_tool(
                     private_minirag,
                     min_relevance=min_source_relevance,
+                    max_results=max_results,
                     source_hints=private_source_hints,
                     progress_callback=progress_callback,
                     budget_manager=budget,
                 ),
                 build_graph_search_tool(
                     private_minirag.graph_index,
+                    max_results=max_results,
                     progress_callback=progress_callback,
                     budget_manager=budget,
                 ),
@@ -127,6 +137,7 @@ def build_local_knowledge_tools(
                     build_minirag_search_tool(
                         global_minirag,
                         min_relevance=min_source_relevance,
+                        max_results=max_results,
                         source_hints=global_source_hints,
                         progress_callback=progress_callback,
                         budget_manager=budget,
@@ -138,6 +149,7 @@ def build_local_knowledge_tools(
                     ),
                     build_graph_search_tool(
                         global_minirag.graph_index,
+                        max_results=max_results,
                         progress_callback=progress_callback,
                         budget_manager=budget,
                         tool_name="global_graph_search",
@@ -157,6 +169,7 @@ def build_local_knowledge_tools(
                     build_minirag_search_tool(
                         global_minirag,
                         min_relevance=min_source_relevance,
+                        max_results=max_results,
                         source_hints=global_source_hints,
                         progress_callback=progress_callback,
                         budget_manager=budget,
@@ -169,6 +182,7 @@ def build_local_knowledge_tools(
                     ),
                     build_graph_search_tool(
                         global_minirag.graph_index,
+                        max_results=max_results,
                         progress_callback=progress_callback,
                         budget_manager=budget,
                         tool_name="graph_search",

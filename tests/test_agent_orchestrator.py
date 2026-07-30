@@ -271,6 +271,8 @@ class AgentOrchestratorTests(unittest.TestCase):
         self.assertEqual(output_roles[-2:], ["review", "final"])
         self.assertIn("Evidence ledger", synthesis_materials[0])
         self.assertIn("Evidence review", synthesis_materials[0])
+        self.assertIn("provide the specific support", synthesis_materials[0])
+        self.assertIn("practical implication", synthesis_materials[0])
         self.assertNotIn("Agent evidence:", synthesis_materials[0])
 
     def test_review_failure_cannot_publish_worker_content_or_citations(self) -> None:

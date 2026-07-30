@@ -2,6 +2,7 @@ import {
   FileSearch,
   Globe2,
   Layers3,
+  ListFilter,
   Menu,
   MessageCircle,
   Monitor,
@@ -82,6 +83,7 @@ export default function App() {
   const [localKnowledge, setLocalKnowledge] = useState(false);
   const [globalKnowledge, setGlobalKnowledge] = useState(false);
   const [minSourceRelevance, setMinSourceRelevance] = useState(0.55);
+  const [maxEvidenceSources, setMaxEvidenceSources] = useState(12);
   const [responseDetail, setResponseDetail] = useState<ResponseDetail>("detailed");
   const [interpretationMode, setInterpretationMode] =
     useState<InterpretationMode>("contextual");
@@ -230,6 +232,7 @@ export default function App() {
           enableLocalKnowledge: localKnowledge,
           includeGlobalKnowledge: globalKnowledge,
           minSourceRelevance,
+          maxEvidenceSources,
           responseDetail,
           interpretationMode,
         });
@@ -260,6 +263,7 @@ export default function App() {
       interpretationMode,
       loadMessages,
       localKnowledge,
+      maxEvidenceSources,
       minSourceRelevance,
       refreshConversations,
       responseDetail,
@@ -341,199 +345,234 @@ export default function App() {
 
       <main className="main-area">
         <header className="topbar">
-          <button className="icon-button mobile-only" onClick={() => setSidebarOpen(true)} title="Menu">
-            <Menu size={19} />
-          </button>
-          <div className="mode-switch" role="tablist" aria-label="Workspace">
-            <HoverHelp
-              title="Chat"
-              description="Open the conversation workspace. Messages run through the Agent orchestrator and can use only the capabilities enabled for that turn."
-            >
-              <button className={mode === "chat" ? "active" : ""} onClick={() => setMode("chat")}>
-                <MessageCircle size={16} /> Chat
-              </button>
-            </HoverHelp>
-            <HoverHelp
-              title="Documents"
-              description="Upload, inspect, attach, and analyze saved documents. Attached files become available only to the active conversation and its shared members."
-            >
-              <button
-                className={mode === "documents" ? "active" : ""}
-                onClick={() => setMode("documents")}
-              >
-                <FileSearch size={16} /> Documents
-              </button>
-            </HoverHelp>
-            {user.role === "admin" && (
+          <div className="topbar-primary">
+            <button className="icon-button mobile-only" onClick={() => setSidebarOpen(true)} title="Menu">
+              <Menu size={19} />
+            </button>
+            <div className="mode-switch" role="tablist" aria-label="Workspace">
               <HoverHelp
-                title="Skills"
-                description="Inspect discovered Skills and manage candidate promotion or rollback. This administrative workspace changes reusable Agent capabilities."
+                title="Chat"
+                description="Open the conversation workspace. Messages run through the Agent orchestrator and can use only the capabilities enabled for that turn."
+              >
+                <button className={mode === "chat" ? "active" : ""} onClick={() => setMode("chat")}>
+                  <MessageCircle size={16} /> Chat
+                </button>
+              </HoverHelp>
+              <HoverHelp
+                title="Documents"
+                description="Upload, inspect, attach, and analyze saved documents. Attached files become available only to the active conversation and its shared members."
               >
                 <button
-                  className={mode === "skills" ? "active" : ""}
-                  onClick={() => setMode("skills")}
+                  className={mode === "documents" ? "active" : ""}
+                  onClick={() => setMode("documents")}
                 >
-                  <Layers3 size={16} /> Skills
+                  <FileSearch size={16} /> Documents
+                </button>
+              </HoverHelp>
+              {user.role === "admin" && (
+                <HoverHelp
+                  title="Skills"
+                  description="Inspect discovered Skills and manage candidate promotion or rollback. This administrative workspace changes reusable Agent capabilities."
+                >
+                  <button
+                    className={mode === "skills" ? "active" : ""}
+                    onClick={() => setMode("skills")}
+                  >
+                    <Layers3 size={16} /> Skills
+                  </button>
+                </HoverHelp>
+              )}
+            </div>
+
+            {activeConversation?.is_owner && (
+              <HoverHelp
+                className="topbar-share"
+                title="Share chat"
+                description="Give another local account access to this chat and its attached documents and reports. Only the owner can add or remove members."
+              >
+                <button
+                  className="secondary-button share-chat-button"
+                  onClick={() => setShareOpen(true)}
+                  type="button"
+                >
+                  <Share2 size={15} />
+                  Share
+                  {activeConversation.shared_count > 0 && (
+                    <span>{activeConversation.shared_count}</span>
+                  )}
                 </button>
               </HoverHelp>
             )}
+            {activeConversation && !activeConversation.is_owner && (
+              <span className="shared-chat-label">
+                <Share2 size={14} />
+                Shared by {activeConversation.owner_username}
+              </span>
+            )}
           </div>
 
-          {activeConversation?.is_owner && (
-            <HoverHelp
-              title="Share chat"
-              description="Give another local account access to this chat and its attached documents and reports. Only the owner can add or remove members."
-            >
-              <button
-                className="secondary-button share-chat-button"
-                onClick={() => setShareOpen(true)}
-                type="button"
-              >
-                <Share2 size={15} />
-                Share
-                {activeConversation.shared_count > 0 && (
-                  <span>{activeConversation.shared_count}</span>
-                )}
-              </button>
-            </HoverHelp>
-          )}
-          {activeConversation && !activeConversation.is_owner && (
-            <span className="shared-chat-label">
-              <Share2 size={14} />
-              Shared by {activeConversation.owner_username}
-            </span>
-          )}
-
-          {mode === "chat" && (
-            <div className="capability-toggles">
-              <HoverHelp
-                title="Answer detail"
-                description="Choose the target depth of the final answer. Detailed asks for fuller explanation and evidence; it does not impose an artificial minimum length."
-              >
-                <label className="detail-select">
-                  <TextSelect size={15} />
-                  <select
-                    value={responseDetail}
-                    onChange={(event) => setResponseDetail(event.target.value as ResponseDetail)}
-                    aria-label="Answer detail"
+          {(mode === "chat" || mode === "documents") && (
+            <div className="topbar-controls">
+              {mode === "chat" && (
+                <div className="capability-toggles">
+                  <HoverHelp
+                    title="Answer detail"
+                    description="Choose the target depth of the final answer. Detailed asks for fuller explanation and evidence; it does not impose an artificial minimum length."
                   >
-                    <option value="concise">Concise</option>
-                    <option value="balanced">Balanced</option>
-                    <option value="detailed">Detailed</option>
-                  </select>
-                </label>
-              </HoverHelp>
-              <HoverHelp
-                title="Interpretation range"
-                description="Precise stays close to the literal request, Context uses nearby conversation and document context, and Explore considers broader implications and useful extensions."
-              >
-                <label className="detail-select">
-                  <ScanText size={15} />
-                  <select
-                    value={interpretationMode}
-                    onChange={(event) =>
-                      setInterpretationMode(event.target.value as InterpretationMode)
-                    }
-                    aria-label="Interpretation range"
+                    <label className="detail-select">
+                      <TextSelect size={15} />
+                      <select
+                        value={responseDetail}
+                        onChange={(event) =>
+                          setResponseDetail(event.target.value as ResponseDetail)
+                        }
+                        aria-label="Answer detail"
+                      >
+                        <option value="concise">Concise</option>
+                        <option value="balanced">Balanced</option>
+                        <option value="detailed">Detailed</option>
+                      </select>
+                    </label>
+                  </HoverHelp>
+                  <HoverHelp
+                    title="Interpretation range"
+                    description="Precise stays close to the literal request, Context uses nearby conversation and document context, and Explore considers broader implications and useful extensions."
                   >
-                    <option value="precise">Precise</option>
-                    <option value="contextual">Context</option>
-                    <option value="exploratory">Explore</option>
-                  </select>
-                </label>
-              </HoverHelp>
-              <HoverHelp
-                title="Web search"
-                description="Allow Tavily to discover current internet sources, including titles, summaries, and links. Use this when the answer may depend on recent or external information."
-              >
-                <label>
-                  <input
-                    type="checkbox"
-                    checked={webSearch}
-                    onChange={(event) => setWebSearch(event.target.checked)}
-                  />
-                  <Search size={15} /> Web
-                </label>
-              </HoverHelp>
-              <HoverHelp
-                title="Browser"
-                description="Allow the Agent to open selected public URLs in an isolated Playwright browser and read rendered page content. It is slower than search and does not use your personal browser session."
-              >
-                <label>
-                  <input
-                    type="checkbox"
-                    checked={browserAccess}
-                    onChange={(event) => setBrowserAccess(event.target.checked)}
-                  />
-                  <Monitor size={15} /> Browser
-                </label>
-              </HoverHelp>
-              <HoverHelp
-                title="Conversation knowledge"
-                description="Search this chat's MiniRAG index and knowledge graph for evidence from attached documents. It remains isolated from other conversations by default."
-              >
-                <label>
-                  <input
-                    type="checkbox"
-                    checked={localKnowledge}
-                    onChange={(event) => {
-                      setLocalKnowledge(event.target.checked);
-                      if (!event.target.checked) setGlobalKnowledge(false);
-                    }}
-                  />
-                  <Network size={15} /> Knowledge
-                </label>
-              </HoverHelp>
-              <HoverHelp
-                title="Account-wide knowledge"
-                description="Extend retrieval to documents indexed by your account in other conversations. It requires Knowledge and never searches another account's private store."
-              >
-                <label>
-                  <input
-                    type="checkbox"
-                    checked={globalKnowledge}
-                    disabled={!localKnowledge}
-                    onChange={(event) => setGlobalKnowledge(event.target.checked)}
-                  />
-                  <Globe2 size={15} /> Global
-                </label>
-              </HoverHelp>
-              <HoverHelp
-                title="Agent process"
-                description="Show the safe execution progress available with the answer. Complete prompts, tool observations, parsing details, and raw traces remain in the host-only Debug Console."
-              >
-                <label>
-                  <input
-                    type="checkbox"
-                    checked={showProcess}
-                    onChange={(event) => setShowProcess(event.target.checked)}
-                  />
-                  <Wrench size={15} /> Process
-                </label>
-              </HoverHelp>
+                    <label className="detail-select">
+                      <ScanText size={15} />
+                      <select
+                        value={interpretationMode}
+                        onChange={(event) =>
+                          setInterpretationMode(event.target.value as InterpretationMode)
+                        }
+                        aria-label="Interpretation range"
+                      >
+                        <option value="precise">Precise</option>
+                        <option value="contextual">Context</option>
+                        <option value="exploratory">Explore</option>
+                      </select>
+                    </label>
+                  </HoverHelp>
+                  <HoverHelp
+                    title="Web search"
+                    description="Allow Tavily to discover current internet sources, including titles, summaries, and links. Use this when the answer may depend on recent or external information."
+                  >
+                    <label>
+                      <input
+                        type="checkbox"
+                        checked={webSearch}
+                        onChange={(event) => setWebSearch(event.target.checked)}
+                      />
+                      <Search size={15} /> Web
+                    </label>
+                  </HoverHelp>
+                  <HoverHelp
+                    title="Browser"
+                    description="Allow the Agent to open selected public URLs in an isolated Playwright browser and read rendered page content. It is slower than search and does not use your personal browser session."
+                  >
+                    <label>
+                      <input
+                        type="checkbox"
+                        checked={browserAccess}
+                        onChange={(event) => setBrowserAccess(event.target.checked)}
+                      />
+                      <Monitor size={15} /> Browser
+                    </label>
+                  </HoverHelp>
+                  <HoverHelp
+                    title="Conversation knowledge"
+                    description="Search this chat's MiniRAG index and knowledge graph for evidence from attached documents. It remains isolated from other conversations by default."
+                  >
+                    <label>
+                      <input
+                        type="checkbox"
+                        checked={localKnowledge}
+                        onChange={(event) => {
+                          setLocalKnowledge(event.target.checked);
+                          if (!event.target.checked) setGlobalKnowledge(false);
+                        }}
+                      />
+                      <Network size={15} /> Knowledge
+                    </label>
+                  </HoverHelp>
+                  <HoverHelp
+                    title="Account-wide knowledge"
+                    description="Extend retrieval to documents indexed by your account in other conversations. It requires Knowledge and never searches another account's private store."
+                  >
+                    <label>
+                      <input
+                        type="checkbox"
+                        checked={globalKnowledge}
+                        disabled={!localKnowledge}
+                        onChange={(event) => setGlobalKnowledge(event.target.checked)}
+                      />
+                      <Globe2 size={15} /> Global
+                    </label>
+                  </HoverHelp>
+                  <HoverHelp
+                    title="Agent process"
+                    description="Show the safe execution progress available with the answer. Complete prompts, tool observations, parsing details, and raw traces remain in the host-only Debug Console."
+                  >
+                    <label>
+                      <input
+                        type="checkbox"
+                        checked={showProcess}
+                        onChange={(event) => setShowProcess(event.target.checked)}
+                      />
+                      <Wrench size={15} /> Process
+                    </label>
+                  </HoverHelp>
+                </div>
+              )}
+              {(mode === "documents" || localKnowledge) && (
+                <HoverHelp
+                  className="source-help"
+                  title="Source relevance"
+                  description="Set the minimum semantic similarity for local evidence. A higher value reduces unrelated sources but can miss indirect evidence; a lower value increases recall."
+                >
+                  <label className="source-relevance">
+                    <SlidersHorizontal size={15} />
+                    <span>Relevance</span>
+                    <input
+                      type="range"
+                      min="25"
+                      max="95"
+                      step="5"
+                      value={Math.round(minSourceRelevance * 100)}
+                      onChange={(event) =>
+                        setMinSourceRelevance(Number(event.target.value) / 100)
+                      }
+                      aria-label="Minimum local source relevance"
+                    />
+                    <output>{Math.round(minSourceRelevance * 100)}%</output>
+                  </label>
+                </HoverHelp>
+              )}
+              {mode === "chat" && (webSearch || browserAccess || localKnowledge) && (
+                <HoverHelp
+                  className="source-help"
+                  title="Source limit"
+                  description="Set the maximum distinct sources retrieved and retained for Agent review. Higher values improve broad comparisons but use more context and can slow weaker models."
+                >
+                  <label className="source-relevance source-limit">
+                    <ListFilter size={15} />
+                    <span>Limit</span>
+                    <input
+                      type="range"
+                      min="1"
+                      max="20"
+                      step="1"
+                      value={maxEvidenceSources}
+                      onChange={(event) =>
+                        setMaxEvidenceSources(Number(event.target.value))
+                      }
+                      aria-label="Maximum evidence sources"
+                    />
+                    <output>{maxEvidenceSources}</output>
+                  </label>
+                </HoverHelp>
+              )}
             </div>
-          )}
-          {(mode === "documents" || localKnowledge) && (
-            <HoverHelp
-              className="source-help"
-              title="Source relevance"
-              description="Set the minimum semantic similarity for local evidence. A higher value reduces unrelated sources but can miss indirect evidence; a lower value increases recall."
-            >
-              <label className="source-relevance">
-                <SlidersHorizontal size={15} />
-                <span>Sources</span>
-                <input
-                  type="range"
-                  min="25"
-                  max="95"
-                  step="5"
-                  value={Math.round(minSourceRelevance * 100)}
-                  onChange={(event) => setMinSourceRelevance(Number(event.target.value) / 100)}
-                  aria-label="Minimum local source relevance"
-                />
-                <output>{Math.round(minSourceRelevance * 100)}%</output>
-              </label>
-            </HoverHelp>
           )}
         </header>
 

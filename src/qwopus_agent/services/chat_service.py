@@ -21,7 +21,7 @@ from qwopus_agent.services.orchestration_models import (
 from qwopus_agent.skills import WorkflowSpec
 
 ChatTaskStatus = Literal["completed", "failed"]
-CHAT_WORKER_REQUEST_SCHEMA_VERSION = 5
+CHAT_WORKER_REQUEST_SCHEMA_VERSION = 6
 
 
 @dataclass(frozen=True)
@@ -38,6 +38,7 @@ class ChatWorkerRequest:
     enable_local_knowledge: bool = False
     include_global_knowledge: bool = False
     min_source_relevance: float = 0.55
+    max_evidence_sources: int = 12
     response_detail: Literal["concise", "balanced", "detailed"] = "detailed"
     knowledge_root: Path = DEFAULT_CONVERSATION_KNOWLEDGE_ROOT
     global_knowledge_path: Path | None = None
@@ -155,6 +156,7 @@ def start_chat_task(
     enable_local_knowledge: bool = False,
     include_global_knowledge: bool = False,
     min_source_relevance: float = 0.55,
+    max_evidence_sources: int = 12,
     response_detail: Literal["concise", "balanced", "detailed"] = "detailed",
     knowledge_root: Path = DEFAULT_CONVERSATION_KNOWLEDGE_ROOT,
     global_knowledge_path: Path | None = None,
@@ -182,6 +184,7 @@ def start_chat_task(
         enable_local_knowledge=enable_local_knowledge,
         include_global_knowledge=include_global_knowledge,
         min_source_relevance=min_source_relevance,
+        max_evidence_sources=max_evidence_sources,
         response_detail=response_detail,
         knowledge_root=Path(knowledge_root),
         global_knowledge_path=(
@@ -251,6 +254,7 @@ def _run_chat_task(
                 enable_local_knowledge=request.enable_local_knowledge,
                 include_global_knowledge=request.include_global_knowledge,
                 min_source_relevance=request.min_source_relevance,
+                max_evidence_sources=request.max_evidence_sources,
                 response_detail=request.response_detail,
             ),
             progress_callback=report_progress,

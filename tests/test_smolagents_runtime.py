@@ -564,15 +564,17 @@ class SmolagentsRuntimeTests(unittest.TestCase):
         with patch(
             "qwopus_agent.integrations.smolagents_runtime.build_tavily_search_tool",
             return_value=fake_tool,
-        ):
+        ) as build_web_tool:
             run_agent_chat_turn(
                 user_message="查一下米饭怎么做",
                 history=[],
                 settings=settings,
                 enable_web_search=True,
+                max_evidence_sources=17,
             )
 
         self.assertEqual(FakeToolCallingAgent.last_instance.tools, [fake_tool])
+        self.assertEqual(build_web_tool.call_args.kwargs["max_results"], 17)
         self.assertIn("Use tavily_search", FakeToolCallingAgent.last_instance.prompt)
         self.assertEqual(FakeToolCallingAgent.last_instance.run_kwargs["max_steps"], 2)
 
@@ -593,6 +595,7 @@ class SmolagentsRuntimeTests(unittest.TestCase):
                 settings=settings,
                 enable_local_knowledge=True,
                 knowledge_scope="conversation-1",
+                max_evidence_sources=17,
             )
 
         # 原因：Streamlit 开关只负责授权，工具选择必须继续由 smolagents 驱动。
@@ -607,6 +610,7 @@ class SmolagentsRuntimeTests(unittest.TestCase):
             build_tools.call_args.kwargs["user_message"],
             "Company A 和 Company B 有什么关系？",
         )
+        self.assertEqual(build_tools.call_args.kwargs["max_results"], 17)
 
     def test_run_agent_chat_turn_allows_both_web_and_local_tools(self) -> None:
         settings = SmolagentsModelSettings(
@@ -959,10 +963,13 @@ class SmolagentsRuntimeTests(unittest.TestCase):
         # 作用：锁定 Worker/Reviewer 只返回内部 JSON，用户语言与详细写作规则仅属于最终综合器。
         self.assertIn("evidence worker, not the final answer writer", evidence)
         self.assertIn('"facts"', evidence)
+        self.assertIn('"plan_item_ids"', evidence)
         self.assertIn("ANSWER PLAN", evidence)
         self.assertNotIn("thorough, information-dense final answer", evidence)
         self.assertIn("evidence reviewer, not the final answer writer", review)
         self.assertIn('"unsupported_claims"', review)
+        self.assertIn('"coverage"', review)
+        self.assertIn("one coverage row for every ANSWER PLAN item", review)
         self.assertIn("without Tool-grounded sources as unsupported", review)
         self.assertNotIn("Now produce the complete final answer", review)
 
@@ -1040,8 +1047,169 @@ class SmolagentsRuntimeTests(unittest.TestCase):
         self.assertEqual(len(result.debug_runs), 2)
         self.assertEqual(result.debug_runs[0].max_steps, 2)
         self.assertIn("insufficient_depth", result.debug_runs[1].prompt)
+        self.assertIn(
+            "develop every relevant requirement",
+            result.debug_runs[1].prompt,
+        )
         self.assertIn("Previous draft", result.debug_runs[1].prompt)
         self.assertIn("职责边界", result.answer)
+
+    def test_unsourced_empirical_claim_gets_explicit_removal_instruction(self) -> None:
+        contract = AnswerContract(
+            task_type="analyze",
+            complexity="complex",
+            response_detail="detailed",
+        )
+        FakeToolCallingAgent.queued_results = [
+            types.SimpleNamespace(
+                output="研究报告显示任务成功率提升了 20%，因此方案很好。",
+                state="success",
+                steps=[],
+            ),
+            types.SimpleNamespace(
+                output=(
+                    "该方案的价值来自职责隔离，因为规划逻辑与执行副作用可以分别验证。"
+                    "当前没有来源支持量化收益，应通过固定任务集、失败注入和延迟记录"
+                    "建立本项目自己的基线。"
+                ),
+                state="success",
+                steps=[],
+            ),
+        ]
+
+        result = run_agent_chat_turn_with_debug(
+            user_message="请详细分析这个方案",
+            history=[],
+            settings=SmolagentsModelSettings(
+                model_id="any-model",
+                base_url="http://127.0.0.1:8080/v1",
+            ),
+            answer_contract=contract,
+            output_role="final",
+        )
+
+        self.assertEqual(len(result.debug_runs), 2)
+        self.assertIn("unsupported_empirical_claims", result.debug_runs[1].prompt)
+        self.assertIn("remove every percentage", result.debug_runs[1].prompt)
+        self.assertNotIn("20%", result.answer)
+
+    def test_retry_cannot_publish_fabricated_source_or_measurement(self) -> None:
+        contract = AnswerContract(
+            task_type="analyze",
+            complexity="complex",
+            response_detail="detailed",
+        )
+        FakeToolCallingAgent.queued_results = [
+            types.SimpleNamespace(
+                output="结论：这个方案可行。",
+                state="success",
+                steps=[],
+            ),
+            types.SimpleNamespace(
+                output=(
+                    "职责分离可以让规划逻辑和执行副作用分别测试。\n"
+                    "研究报告显示成功率提升 20%。\n"
+                    "根据 invented.md 第 2 页，该方案已完成验证。\n"
+                    "主要风险是状态漂移，因此应通过失败注入验证恢复边界。"
+                ),
+                state="success",
+                steps=[],
+            ),
+        ]
+
+        result = run_agent_chat_turn_with_debug(
+            user_message="请详细分析这个方案",
+            history=[],
+            settings=SmolagentsModelSettings(
+                model_id="any-model",
+                base_url="http://127.0.0.1:8080/v1",
+            ),
+            answer_contract=contract,
+            output_role="final",
+        )
+
+        self.assertIn("职责分离", result.answer)
+        self.assertIn("失败注入", result.answer)
+        self.assertNotIn("20%", result.answer)
+        self.assertNotIn("invented.md", result.answer)
+
+    def test_retry_cannot_publish_fabricated_source_without_numbers(self) -> None:
+        contract = AnswerContract(
+            task_type="analyze",
+            complexity="complex",
+            response_detail="detailed",
+        )
+        FakeToolCallingAgent.queued_results = [
+            types.SimpleNamespace(
+                output="结论：这个方案可行。",
+                state="success",
+                steps=[],
+            ),
+            types.SimpleNamespace(
+                output=(
+                    "职责分离可以让规划逻辑和执行副作用分别测试。\n"
+                    "根据 draft.txt 第 1 页，该方案已经完成验证。\n"
+                    "主要风险是状态漂移，因此应通过失败注入验证恢复边界。"
+                ),
+                state="success",
+                steps=[],
+            ),
+        ]
+
+        result = run_agent_chat_turn_with_debug(
+            user_message="请详细分析这个方案",
+            history=[],
+            settings=SmolagentsModelSettings(
+                model_id="any-model",
+                base_url="http://127.0.0.1:8080/v1",
+            ),
+            answer_contract=contract,
+            output_role="final",
+        )
+
+        self.assertIn("职责分离", result.answer)
+        self.assertIn("失败注入", result.answer)
+        self.assertNotIn("draft.txt", result.answer)
+
+    def test_retry_cannot_publish_unsourced_case_study_framing(self) -> None:
+        contract = AnswerContract(
+            task_type="analyze",
+            complexity="complex",
+            response_detail="detailed",
+        )
+        FakeToolCallingAgent.queued_results = [
+            types.SimpleNamespace(
+                output="结论：这个方案可行。",
+                state="success",
+                steps=[],
+            ),
+            types.SimpleNamespace(
+                output=(
+                    "职责分离可以让规划逻辑和执行副作用分别测试。\n"
+                    "**证据**\n"
+                    "- 经验案例：某 Agent 使用该架构后表现更好。\n"
+                    "主要风险是状态漂移，因此应通过失败注入验证恢复边界。"
+                ),
+                state="success",
+                steps=[],
+            ),
+        ]
+
+        result = run_agent_chat_turn_with_debug(
+            user_message="请详细分析这个方案",
+            history=[],
+            settings=SmolagentsModelSettings(
+                model_id="any-model",
+                base_url="http://127.0.0.1:8080/v1",
+            ),
+            answer_contract=contract,
+            output_role="final",
+        )
+
+        self.assertIn("职责分离", result.answer)
+        self.assertIn("失败注入", result.answer)
+        self.assertNotIn("证据", result.answer)
+        self.assertNotIn("经验案例", result.answer)
 
     def test_format_agent_chat_prompt_separates_language_source_and_resolved_task(
         self,

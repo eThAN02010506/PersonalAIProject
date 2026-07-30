@@ -25,7 +25,10 @@ from qwopus_agent.memory import DEFAULT_CONVERSATION_KNOWLEDGE_ROOT
 from qwopus_agent.prompts import smolagents as smolagents_prompts
 from qwopus_agent.reports import contract as report_contract
 from qwopus_agent.reports import grounded
-from qwopus_agent.services.answer_quality import AnswerQualityEvaluator
+from qwopus_agent.services.answer_quality import (
+    AnswerQualityEvaluator,
+    strip_unsupported_evidence_lines,
+)
 from qwopus_agent.services.orchestration_models import (
     AgentOutputRole,
     AnswerContract,
@@ -69,6 +72,38 @@ _has_usable_knowledge_evidence = smolagents_prompts.has_usable_knowledge_evidenc
 _LOCAL_KNOWLEDGE_TOOLS = smolagents_prompts.LOCAL_KNOWLEDGE_TOOLS
 _no_knowledge_evidence_answer = smolagents_prompts.no_knowledge_evidence_answer
 _requires_document_evidence = smolagents_prompts.requires_document_evidence
+_QUALITY_REPAIR_INSTRUCTIONS = {
+    "insufficient_depth": (
+        "develop every relevant requirement with distinct supporting detail"
+    ),
+    "insufficient_specificity": (
+        "replace generic claims with concrete evidence, causal explanation, examples, "
+        "conditions, verification, or limitations"
+    ),
+    "missing_ordered_steps": "add ordered, verifiable steps and failure recovery",
+    "missing_comparison": (
+        "compare the options under shared criteria and state when each should be chosen"
+    ),
+    "missing_analysis_structure": (
+        "separate the main finding, supporting analysis, risks, and implications"
+    ),
+    "fragmented_answer": (
+        "connect the evidence into a coherent argument instead of a bullet stack"
+    ),
+    "missing_source_attribution": "cite only the supplied source names, pages, or URLs",
+    "ungrounded_source_reference": (
+        "remove every file name or URL that does not appear in supplied tool evidence"
+    ),
+    "unsupported_evidence_framing": (
+        "remove evidence headings, case studies, and claims that documents prove something "
+        "when no tool evidence was supplied; present only design reasoning"
+    ),
+    "unsupported_empirical_claims": (
+        "remove every percentage, benchmark, study, experiment, report, publication, and "
+        "measured-improvement claim that has no supplied source; replace it with design "
+        "reasoning or a future verification method"
+    ),
+}
 _apply_grounded_report_fallbacks = (
     report_contract._apply_grounded_report_fallbacks
 )
@@ -267,6 +302,7 @@ def run_agent_chat_turn(
     enable_local_knowledge: bool = False,
     include_global_knowledge: bool = False,
     min_source_relevance: float = 0.55,
+    max_evidence_sources: int = 12,
     response_detail: Literal["concise", "balanced", "detailed"] = "detailed",
     knowledge_scope: str | None = None,
     knowledge_root: Path = DEFAULT_CONVERSATION_KNOWLEDGE_ROOT,
@@ -290,6 +326,7 @@ def run_agent_chat_turn(
         enable_local_knowledge=enable_local_knowledge,
         include_global_knowledge=include_global_knowledge,
         min_source_relevance=min_source_relevance,
+        max_evidence_sources=max_evidence_sources,
         response_detail=response_detail,
         knowledge_scope=knowledge_scope,
         knowledge_root=knowledge_root,
@@ -314,6 +351,7 @@ def run_agent_chat_turn_with_debug(
     enable_local_knowledge: bool = False,
     include_global_knowledge: bool = False,
     min_source_relevance: float = 0.55,
+    max_evidence_sources: int = 12,
     response_detail: Literal["concise", "balanced", "detailed"] = "detailed",
     knowledge_scope: str | None = None,
     knowledge_root: Path = DEFAULT_CONVERSATION_KNOWLEDGE_ROOT,
@@ -344,7 +382,12 @@ def run_agent_chat_turn_with_debug(
     if include_global_knowledge and not enable_local_knowledge:
         raise ValueError("Global knowledge requires local knowledge permission.")
     if enable_web_search:
-        tools.append(build_tavily_search_tool(progress_callback=progress_callback))
+        tools.append(
+            build_tavily_search_tool(
+                progress_callback=progress_callback,
+                max_results=max_evidence_sources,
+            )
+        )
     if enable_browser:
         tools.append(
             build_browser_open_tool(
@@ -363,6 +406,7 @@ def run_agent_chat_turn_with_debug(
             user_message=user_message,
             progress_callback=progress_callback,
             min_source_relevance=min_source_relevance,
+            max_results=max_evidence_sources,
             knowledge_root=knowledge_root,
             global_knowledge_path=global_knowledge_path,
             include_global_knowledge=include_global_knowledge,
@@ -482,8 +526,14 @@ def run_agent_chat_turn_with_debug(
     tool_calls = _extract_agent_tool_calls(steps)
     observations = _extract_agent_observations(steps)
     final_answer = _extract_final_answer(answer)
+    has_grounded_sources = _answer_has_grounded_source(final_answer, observations)
     quality_issues = (
-        _answer_quality_issues(final_answer, answer_contract)
+        _answer_quality_issues(
+            final_answer,
+            answer_contract,
+            answer_plan,
+            has_citations=has_grounded_sources,
+        )
         if output_role == "final"
         else ()
     )
@@ -559,6 +609,26 @@ def run_agent_chat_turn_with_debug(
         observations.extend(_extract_agent_observations(retry_steps))
         state = retry_state or state
         final_answer = _extract_final_answer(retry_answer)
+        if output_role == "final":
+            has_grounded_sources = _answer_has_grounded_source(
+                final_answer,
+                observations,
+            )
+            remaining_issues = _answer_quality_issues(
+                final_answer,
+                answer_contract,
+                answer_plan,
+                has_citations=has_grounded_sources,
+            )
+            if (
+                {
+                    "unsupported_empirical_claims",
+                    "unsupported_evidence_framing",
+                    "ungrounded_source_reference",
+                }.intersection(remaining_issues)
+                and not has_grounded_sources
+            ):
+                final_answer = strip_unsupported_evidence_lines(final_answer)
 
     if progress_callback is not None:
         progress_callback("completed")
@@ -592,20 +662,26 @@ def _role_refinement_prompt(
         return common + (
             "Convert only this evidence into one JSON object and return it through final_answer. "
             'Use exactly: {"facts":[{"claim":"...","support":"...","sources":["..."],'
-            '"confidence":"low|medium|high"}],"limitations":["..."]}. '
+            '"confidence":"low|medium|high","plan_item_ids":["P1"]}],'
+            '"limitations":["..."]}. '
             "Do not write a user-facing answer or expose Observation, Thought, logs, or drafts."
         )
     if output_role == "review":
         return common + (
             "Review only this evidence and return one JSON object through final_answer. Use "
             'exactly: {"agreements":["..."],"conflicts":["..."],'
-            '"unsupported_claims":["..."],"gaps":["..."],"resolution":"..."}. '
+            '"unsupported_claims":["..."],"gaps":["..."],"resolution":"...",'
+            '"coverage":[{"plan_item_id":"P1","status":"supported|partial|missing|conflicted",'
+            '"finding":"..."}]}. '
             "Do not write a user-facing answer or expose Thought or drafts."
         )
     issue_instruction = (
-        "Correct these detected answer defects exactly once: "
-        + ", ".join(quality_issues)
-        + ". "
+        "Correct these detected answer defects exactly once:\n"
+        + "\n".join(
+            f"- {issue}: {_QUALITY_REPAIR_INSTRUCTIONS.get(issue, 'correct this defect')}"
+            for issue in quality_issues
+        )
+        + "\n\n"
         if quality_issues
         else ""
     )
@@ -652,6 +728,9 @@ def _build_answer_quality_checks(
 def _answer_quality_issues(
     answer: str,
     contract: AnswerContract | None,
+    answer_plan: AnswerPlan | None = None,
+    *,
+    has_citations: bool | None = None,
 ) -> tuple[str, ...]:
     if (
         not answer
@@ -663,7 +742,12 @@ def _answer_quality_issues(
     return AnswerQualityEvaluator().evaluate(
         answer,
         contract,
-        has_citations=_answer_contains_source(answer),
+        has_citations=(
+            _answer_contains_source(answer)
+            if has_citations is None
+            else has_citations
+        ),
+        answer_plan=answer_plan,
     ).issues
 
 
@@ -676,6 +760,28 @@ def _answer_contains_source(answer: str) -> bool:
             re.I,
         )
     )
+
+
+def _answer_has_grounded_source(
+    answer: str,
+    observations: list[str],
+) -> bool:
+    """Require a source token to appear in both the answer and Tool evidence."""
+    answer_sources = _source_tokens(answer)
+    observation_sources = _source_tokens("\n".join(observations))
+    return bool(answer_sources.intersection(observation_sources))
+
+
+def _source_tokens(content: str) -> set[str]:
+    return {
+        match.casefold()
+        for match in re.findall(
+            r"https?://[^\s)\]>`\"']+|"
+            r"\b[^\s/\\]+\.(?:pdf|docx|md|txt|png|jpe?g|csv|xlsx?|xls)\b",
+            content,
+            re.I,
+        )
+    }
 
 
 def run_smolagents_file_analysis_with_debug(

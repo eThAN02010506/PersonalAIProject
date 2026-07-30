@@ -326,6 +326,7 @@ class AgentOrchestrator:
                     trace,
                     lambda: self._document_capability(
                         request,
+                        answer_plan,
                         trace,
                         progress_callback,
                         evidence_mode=evidence_mode,
@@ -430,6 +431,7 @@ class AgentOrchestrator:
                     request.include_global_knowledge if local else False
                 ),
                 min_source_relevance=request.min_source_relevance,
+                max_evidence_sources=request.max_evidence_sources,
                 response_detail=request.response_detail,
                 knowledge_scope=request.conversation_id,
                 knowledge_root=self.knowledge_root,
@@ -487,6 +489,7 @@ class AgentOrchestrator:
                 citations=citations,
                 fallback_confidence=confidence,
                 trust_declared_sources=False,
+                max_sources=request.max_evidence_sources,
             )
             if output_role == "evidence" and run.success
             else None
@@ -530,6 +533,7 @@ class AgentOrchestrator:
     async def _document_capability(
         self,
         request: OrchestrationRequest,
+        answer_plan: AnswerPlan,
         trace: list[ProcessEvent],
         progress_callback: ProgressCallback | None,
         *,
@@ -635,6 +639,10 @@ class AgentOrchestrator:
                     citations=citations,
                     fallback_confidence=0.8,
                     trust_declared_sources=False,
+                    fallback_plan_item_ids=(
+                        item.item_id for item in answer_plan.plan_items
+                    ),
+                    max_sources=request.max_evidence_sources,
                 )
                 if evidence_mode
                 else None
@@ -651,7 +659,10 @@ class AgentOrchestrator:
         progress_callback: ProgressCallback | None,
     ) -> _CapabilityResult:
         """Review independent evidence without reopening any Tool."""
-        ledger = _evidence_ledger_from_context(context)
+        ledger = _evidence_ledger_from_context(
+            context,
+            max_sources=request.max_evidence_sources,
+        )
         budget = TokenBudgetManager(
             context_window=self.settings.context_window_tokens,
             output_reserve=min(self.settings.max_tokens, 1200),
@@ -666,9 +677,11 @@ class AgentOrchestrator:
                     f"Original request: {question}\n\n"
                     f"Answer plan:\n{render_answer_plan(answer_plan)}\n\n"
                     f"Independent evidence ledger:\n{evidence}\n\n"
-                    "Audit this evidence for the final answering agent. Identify agreements, "
-                    "factual conflicts, unsupported claims, material gaps, and the safest "
-                    "resolution."
+                    "Audit this evidence against every plan item for the final answering agent. "
+                    "Return one coverage row per plan item, then identify agreements, factual "
+                    "conflicts, unsupported claims, material gaps, and the safest resolution. "
+                    "Use supported only when mapped evidence directly establishes the item; use "
+                    "partial when useful evidence exists but an important condition is absent."
                 ),
                 "history": (),
                 "enable_web_search": False,
@@ -788,7 +801,10 @@ class AgentOrchestrator:
         trace: list[ProcessEvent],
         progress_callback: ProgressCallback | None,
     ) -> _CapabilityResult:
-        ledger = _evidence_ledger_from_context(context)
+        ledger = _evidence_ledger_from_context(
+            context,
+            max_sources=request.max_evidence_sources,
+        )
         review = _evidence_review_from_context(context)
         budget = TokenBudgetManager(
             context_window=self.settings.context_window_tokens,
@@ -807,12 +823,17 @@ class AgentOrchestrator:
                 "objective": (
                     f"Original request: {question}\n\n"
                     f"Internal synthesis material:\n{evidence}\n\n"
-                    "Write one coherent final answer around the plan's central goal. Resolve "
-                    "reviewed conflicts, distinguish supported facts from uncertainty, preserve "
-                    "only citations present in the Evidence Ledger, and do not mention internal "
-                    "agents or execution steps. Empty-source facts are architectural reasoning, "
-                    "not verified studies; never invent publications, percentages, or benchmark "
-                    "measurements."
+                    "Write one coherent final answer around the plan's central goal. For every "
+                    "supported or partial plan item, state the conclusion, provide the specific "
+                    "support, explain why that support establishes the conclusion, and give its "
+                    "practical implication, condition, example, or limitation when relevant. "
+                    "Disclose material missing or conflicted items instead of filling them with "
+                    "general knowledge. Resolve reviewed conflicts, distinguish supported facts "
+                    "from uncertainty, preserve only citations present in the Evidence Ledger, "
+                    "and do not mention internal agents or execution steps. Empty-source facts "
+                    "are architectural reasoning, not verified studies; never invent "
+                    "publications, percentages, or benchmark measurements. Headings, generic "
+                    "advice, and repeated conclusions do not count as detail."
                 ),
                 "history": (),
                 "enable_web_search": False,
@@ -823,7 +844,10 @@ class AgentOrchestrator:
                 "resolved_intent": None,
             }
         )
-        trusted_citations = _trusted_citations_from_context(context)
+        trusted_citations = _trusted_citations_from_context(
+            context,
+            max_sources=request.max_evidence_sources,
+        )
         try:
             result = await self._chat_capability(
                 "synthesis_agent",
@@ -982,7 +1006,9 @@ def _dependency_capability_results(
 ) -> tuple[_CapabilityResult, ...]:
     """Read typed dependency artifacts without copying user-facing transcripts."""
     multi_agent = context.get("multi_agent", {})
-    dependency_ids = set(multi_agent.get("dependency_results", {}))
+    # 原因：set 会随机改变并行 Worker 的结果顺序，使引用和 Debug 输出偶发重排。
+    # 作用：沿用 Supervisor 记录的依赖顺序，让相同输入产生稳定的 Ledger 与引用顺序。
+    dependency_ids = tuple(multi_agent.get("dependency_results", {}))
     contributions = multi_agent.get("shared_state", {}).get("contributions", {})
     results: list[_CapabilityResult] = []
     for task_id in dependency_ids:
@@ -993,7 +1019,11 @@ def _dependency_capability_results(
     return tuple(results)
 
 
-def _evidence_ledger_from_context(context: dict[str, Any]) -> EvidenceLedger:
+def _evidence_ledger_from_context(
+    context: dict[str, Any],
+    *,
+    max_sources: int,
+) -> EvidenceLedger:
     # 原因：完整 Worker 文本会重复占用上下文，并让最终模型继承不同写作风格。
     # 作用：Reviewer 和 Synthesizer 只接收已验证、去重且有长度边界的事实集合。
     packets = tuple(
@@ -1001,7 +1031,7 @@ def _evidence_ledger_from_context(context: dict[str, Any]) -> EvidenceLedger:
         for result in _dependency_capability_results(context)
         if result.evidence_packet is not None
     )
-    return build_evidence_ledger(packets)
+    return build_evidence_ledger(packets, max_sources=max_sources)
 
 
 def _evidence_review_from_context(context: dict[str, Any]) -> EvidenceReview:
@@ -1015,6 +1045,8 @@ def _evidence_review_from_context(context: dict[str, Any]) -> EvidenceReview:
 
 def _trusted_citations_from_context(
     context: dict[str, Any],
+    *,
+    max_sources: int,
 ) -> tuple[SourceCitation, ...]:
     """Collect only citations attached to successful typed dependencies."""
     citations = [
@@ -1022,7 +1054,7 @@ def _trusted_citations_from_context(
         for result in _dependency_capability_results(context)
         for citation in result.citations
     ]
-    return _deduplicate_citations(citations)
+    return _deduplicate_citations(citations)[:max_sources]
 
 
 def _citations_from_chat(run: ChatAgentRun) -> tuple[SourceCitation, ...]:

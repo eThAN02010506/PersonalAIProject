@@ -22,7 +22,7 @@ chat owner can explicitly share that chat and its attached files.
 | Web research | Optional Tavily search plus separately authorized, isolated Playwright page rendering |
 | Reports | Unified Markdown, Excel, PNG/SVG chart, and complete paginated Unicode PDF artifacts |
 | Skills | Automatic discovery, declarative Workflow Skills, semantic versions, promotion, rollback, and model-assisted candidate authoring |
-| Interfaces | React 19 with assistant-ui, FastAPI, account-scoped SQLite history, CLI entry points, and a host-only React Debug Console |
+| Interfaces | Responsive React 19 workspace with assistant-ui, FastAPI, account-scoped SQLite history, CLI entry points, and a host-only React Debug Console |
 
 ## Architecture
 
@@ -231,6 +231,27 @@ pnpm run dev
 Vite serves the frontend on `http://127.0.0.1:5173` and proxies `/api` to
 FastAPI.
 
+## Main Workspace
+
+The production interface separates stable navigation from per-run Agent
+authorization:
+
+- the upper toolbar switches between **Chat**, **Documents**, and administrator
+  **Skills**, and exposes chat sharing when the current account owns the chat
+- the second toolbar controls answer depth, interpretation range, Web, Browser,
+  conversation Knowledge, account-wide Global knowledge, and optional process
+  progress for the next turn
+- **Relevance** sets the minimum local semantic match; raising it removes weak
+  matches, while lowering it improves recall
+- **Limit** sets the maximum number of distinct evidence sources retained for a
+  turn from `1` to `20`; it is applied to search, retrieval, evidence validation,
+  and synthesis rather than only hiding citations in the UI
+
+Long answers, Markdown tables, code blocks, document workspaces, dialogs, and
+the conversation sidebar are responsive down to mobile widths. Raw prompts,
+Tool Observations, and model diagnostics are intentionally absent from the main
+workspace and remain available only in the host-only Debug Console.
+
 ## Accounts And Sharing
 
 Qwopus-Agent does not create a default username or password. When the database
@@ -364,7 +385,9 @@ If an expected file is missing from an answer, check in this order:
 1. Confirm the file is attached to the active conversation.
 2. Enable Global only when the file belongs to another conversation.
 3. Lower the source relevance control only after the scope is correct.
-4. Inspect the Debug Console for retrieved chunks, graph paths, and Tool
+4. Raise the source limit when a broad comparison genuinely needs more distinct
+   evidence.
+5. Inspect the Debug Console for retrieved chunks, graph paths, and Tool
    Observations.
 
 ## Skill System

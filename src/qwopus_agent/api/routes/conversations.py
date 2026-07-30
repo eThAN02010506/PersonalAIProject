@@ -269,6 +269,7 @@ class _ConversationEndpoints:
             enable_local_knowledge=payload.enable_local_knowledge,
             include_global_knowledge=payload.include_global_knowledge,
             min_source_relevance=payload.min_source_relevance,
+            max_evidence_sources=payload.max_evidence_sources,
             response_detail=payload.response_detail,
             interpretation_mode=payload.interpretation_mode,
             prepared=prepared,

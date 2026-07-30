@@ -148,6 +148,11 @@ class MultiAgentSupervisor:
                 failed.add(task.task_id)
                 remaining.pop(task.task_id)
 
+            if blocked:
+                # 原因：本轮新增的失败任务可能继续阻塞下一层依赖，旧状态下直接判环会误报。
+                # 作用：逐层传播失败后重新计算 ready，真实依赖环仍会在无 blocked 时被检测。
+                continue
+
             ready = [
                 task
                 for task in remaining.values()

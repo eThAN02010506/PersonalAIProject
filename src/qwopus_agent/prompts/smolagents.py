@@ -171,6 +171,16 @@ def format_agent_chat_prompt(
             [
                 "ANSWER PLAN (internal; never mention it to the user):",
                 answer_plan.model_dump_json(indent=2),
+                (
+                    "QUALITY EXAMPLE: weak='This approach has risks.' "
+                    "strong='Risk: concurrent writes can lose updates when two workers save the "
+                    "same record; use a transaction and verify with a collision test.'"
+                ),
+                (
+                    "If no sources are supplied, do not create an evidence section or describe "
+                    "completed studies and measurements. Use design reasoning and propose future "
+                    "verification."
+                ),
             ]
         )
     if enable_web_search:
@@ -241,11 +251,14 @@ def _output_role_instructions(output_role: AgentOutputRole) -> list[str]:
             "final_answer. Do not write a user-facing answer, introduction, conclusion, "
             "Markdown, Thought, Observation, or drafts.",
             'Required schema: {"facts":[{"claim":"...","support":"...","sources":["..."],'
-            '"confidence":"low|medium|high"}],"limitations":["..."]}.',
+            '"confidence":"low|medium|high","plan_item_ids":["P1"]}],'
+            '"limitations":["..."]}.',
             "Include only evidence relevant to the objective. Preserve source names, page "
             "numbers, and URLs from actual Tool Observations in sources. If no Tool supplied a "
             "source, use an empty sources list. Distinguish source evidence from inference and "
-            "never invent citations, measurements, or missing facts.",
+            "never invent citations, measurements, or missing facts. Assign every fact to each "
+            "ANSWER PLAN item it actually supports; use an empty plan_item_ids list when none "
+            "applies.",
         ]
     if output_role == "review":
         return [
@@ -254,19 +267,24 @@ def _output_role_instructions(output_role: AgentOutputRole) -> list[str]:
             "material gaps. Return only one JSON object through final_answer. Do not write the "
             "user-facing answer, use tools, or expose Thought, Observation, and drafts.",
             'Required schema: {"agreements":["..."],"conflicts":["..."],'
-            '"unsupported_claims":["..."],"gaps":["..."],"resolution":"..."}.',
+            '"unsupported_claims":["..."],"gaps":["..."],"resolution":"...",'
+            '"coverage":[{"plan_item_id":"P1","status":"supported|partial|missing|conflicted",'
+            '"finding":"..."}]}.',
             "A gap must name specific missing evidence that could change the answer. Keep gaps "
             "empty when the available evidence is sufficient. Treat empirical claims, named "
             "studies, measurements, or percentages without Tool-grounded sources as unsupported; "
-            "source-free architectural reasoning is allowed only when identified as inference.",
+            "source-free architectural reasoning is allowed only when identified as inference. "
+            "Return exactly one coverage row for every ANSWER PLAN item.",
         ]
     return [
         "You are Qwopus-Agent's final answer synthesizer.",
         "Return only the complete user-facing final answer. Do not expose Tool logs, "
         "Observation, Thought, internal plans, evidence JSON, review JSON, or drafts.",
-        "Cite only sources present in the supplied evidence. Treat facts with empty sources as "
-        "architectural reasoning, not verified studies or measurements; never invent citations, "
-        "percentages, benchmark results, or publication details.",
+        "Cite only supplied sources. Facts without sources are unverified reasoning; never invent "
+        "citations, percentages, benchmarks, or publications. For each supported ANSWER PLAN "
+        "item, give its conclusion and concrete support, explain why it matters, and add a "
+        "relevant implication, example, condition, or limitation. Headings and repetition are "
+        "not detail.",
     ]
 
 
