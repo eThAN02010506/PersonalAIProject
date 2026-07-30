@@ -18,7 +18,11 @@ from qwopus_agent.api.models import (
     SavedDocumentView,
 )
 from qwopus_agent.api.repository import ConversationRepository
-from qwopus_agent.api.routes.analysis import analysis_view, register_analysis_access
+from qwopus_agent.api.routes.analysis import (
+    analysis_view,
+    register_analysis_access,
+    resolve_analysis_objective,
+)
 from qwopus_agent.documents import (
     CorruptStoredDocumentError,
     DocumentStore,
@@ -117,13 +121,20 @@ def build_document_router(
         user = current_user(request)
         if repository.get_conversation_for_user(payload.conversation_id, user.id) is None:
             raise HTTPException(status_code=404, detail="Conversation not found.")
+        objective = resolve_analysis_objective(
+            payload.question,
+            payload.analysis_mode,
+            payload.selected_sections,
+        )
         selected = _load_selected_documents(
             document_store,
             payload.document_ids,
             allowed_ids=repository.accessible_document_ids(user.id),
         )
+        if payload.analysis_mode == "section":
+            _validate_saved_section_scope(selected, payload.selected_sections)
         orchestration_request = OrchestrationRequest(
-            objective=payload.question,
+            objective=objective,
             conversation_id=payload.conversation_id,
             uploaded_files=tuple(
                 OrchestrationFile(
@@ -140,6 +151,7 @@ def build_document_router(
             ),
             generate_report=payload.generate_report,
             min_source_relevance=payload.min_source_relevance,
+            response_detail=payload.response_detail,
             analysis_mode=payload.analysis_mode,
             selected_sections=payload.selected_sections,
             report_title="Qwopus Saved Documents Analysis",
@@ -213,3 +225,26 @@ def _load_selected_documents(
             detail="Selected saved documents must have unique source names.",
         )
     return selected
+
+
+def _validate_saved_section_scope(
+    selected: list[StoredDocumentContent],
+    selected_sections: dict[str, tuple[str, ...]],
+) -> None:
+    """Reject section ids that do not belong to the selected saved documents."""
+    available = {
+        saved.structure.document_id: {section.id for section in saved.structure.sections}
+        for saved in selected
+    }
+    for document_id, section_ids in selected_sections.items():
+        if not section_ids:
+            continue
+        if document_id not in available or any(
+            section_id not in available[document_id] for section_id in section_ids
+        ):
+            # 原因：旧分析结果中的章节可能不属于本次勾选的 Saved Documents。
+            # 作用：在创建 Agent 前拒绝越界或过期章节，避免 Planner 处理无效任务范围。
+            raise HTTPException(
+                status_code=422,
+                detail="Selected sections must belong to the selected saved documents.",
+            )

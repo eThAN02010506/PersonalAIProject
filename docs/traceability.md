@@ -27,12 +27,13 @@
 | FR-KNW-01 | `memory/minirag.py`、`memory/knowledge_store.py` | `test_minirag.py` | 已验证 | 使用 MiniRAG 的 NanoVectorDB，不调用完整上游 query pipeline |
 | FR-KNW-02 | `memory/conversation_knowledge.py`、`api/repository.py` | `test_conversation_knowledge.py`、`test_accounts.py`、`test_saved_documents_api.py` | 已验证 | Global 仅聚合当前账号的聊天知识 |
 | FR-KNW-03 | `memory/knowledge_graph.py`、`memory/graph_backend.py`、`memory/graph_extraction.py` | `test_knowledge_graph.py`、`test_graph_backend.py`、`test_graph_extraction.py`、`test_graph_multiformat_realcase.py` | 已验证 | 弱模型抽取失败时退回规则抽取，普通自然语言关系可能缺失 |
-| FR-WEB-01 | `integrations/tavily.py`、`skills/web_search.py` | `test_web_search_skill.py`、`test_smolagents_tools.py` | 已验证 | 真实搜索需要有效 Tavily key 和网络 |
+| FR-WEB-01 | `integrations/tavily.py`、`integrations/tavily_credentials.py`、`api/routes/web_search_settings.py`、`skills/web_search.py` | `test_tavily_credentials.py`、`test_api.py`、`test_web_search_skill.py`、`test_smolagents_tools.py` | 已验证 | 新安装默认无 Key；管理员可在 UI 中保存、测试和轮换，真实搜索仍需要有效 Tavily Key 和网络 |
 | FR-WEB-02 | `integrations/playwright_browser.py`、`skills/browser.py` | `test_playwright_browser.py`、`test_browser_skill.py` | 已验证 | 只读公开 HTTP(S)，不复用个人浏览器会话 |
 | FR-RPT-01 | `reports/generator.py`、`reports/charts.py` | `test_reports.py` | 已验证 | PDF 为基础排版，不是出版级编辑器 |
 | FR-AUTH-01 | `api/auth.py`、`api/repository.py`、`api/routes/auth.py` | `test_accounts.py`、`test_lan_auth.py` | 已验证 | 本地账号，不含外部身份提供商 |
 | FR-AUTH-02 | `api/repository.py`、`api/routes/conversations.py`、`api/routes/documents.py`、`api/routes/reports.py` | `test_accounts.py`、`test_api.py`、`test_saved_documents_api.py` | 已验证 | 共享粒度是完整聊天及其附件 |
 | FR-DBG-01 | `api/routes/debug.py`、`utils/debug_store.py`、`frontend/src/components/DebugConsole.tsx` | `test_debug_store.py`、`test_api.py` | 已验证 | 仅回环地址和管理员可访问；不能读取模型隐藏思维链 |
+| FR-CODE-01 | `code_workspace/`、`integrations/smolagents_code_workspace.py`、`services/code_workspace_service.py`、`api/routes/code_workspaces.py`、`frontend/src/components/CodeWorkspace.tsx` | `test_code_workspace.py`、`test_api.py`、临时仓库真实修改 Oracle | 已验证 | 仅本机管理员；smolagents 只调用已注册的只读代码 Skill；测试/调用方可作为只读上下文，模型仅能修改管理员授权文件；Diff 审批后写入，可测试和回滚 |
 | FR-UI-01 | `frontend/src/App.tsx`、`frontend/src/components/` | TypeScript build、ESLint、Python API tests | 已验证 | 当前没有独立端到端浏览器 CI |
 
 ## 非功能需求

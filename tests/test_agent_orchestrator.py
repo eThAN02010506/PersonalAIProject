@@ -5,6 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pandas as pd
+from pydantic import ValidationError
 
 from qwopus_agent.agents.multi_agent import MultiAgentRun, NamedAgentRun
 from qwopus_agent.analysis import AnalysisResult
@@ -34,6 +35,15 @@ class AgentOrchestratorTests(unittest.TestCase):
             model_id="test-model",
             base_url="http://127.0.0.1:9999/v1",
         )
+
+    def test_orchestration_request_normalizes_and_rejects_blank_objectives(
+        self,
+    ) -> None:
+        request = OrchestrationRequest(objective="  Analyze the documents.  ")
+
+        self.assertEqual(request.objective, "Analyze the documents.")
+        with self.assertRaisesRegex(ValidationError, "must not be blank"):
+            OrchestrationRequest(objective="   ")
 
     def test_plain_chat_uses_single_agent_fast_path(self) -> None:
         calls: list[dict[str, object]] = []

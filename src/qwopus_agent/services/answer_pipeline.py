@@ -95,6 +95,11 @@ def build_answer_plan(
     contract: AnswerContract,
 ) -> AnswerPlan:
     """Create one stable content plan without spending another model call."""
+    normalized_objective = objective.strip()
+    if not normalized_objective:
+        # 原因：AnswerPlan 的 Pydantic 错误太靠近实现细节，不能替代清晰的规划前置条件。
+        # 作用：直接调用者也会在构造计划前收到明确错误，同时保留模型的非空不变量。
+        raise ValueError("Answer planning objective must not be blank.")
     sections = _unique(("direct answer", *contract.required_facets))
     detailed = contract.response_detail == "detailed"
     # 原因：固定最低字数会制造重复，而用户需要的是更深的事实、机制和边界。
@@ -107,21 +112,21 @@ def build_answer_plan(
     )
     if detailed:
         style_rules += (
-            "Use concrete evidence, examples, edge cases, and actionable implications "
-            "when they materially help.",
+            "Fully develop each central point with its meaning, reasoning or evidence, and a "
+            "relevant example, implication, condition, or limitation.",
             "Add detail through specificity rather than padding or a fixed word count.",
         )
     plan_items = tuple(
         AnswerPlanItem(
             item_id=f"P{index}",
             section=section,
-            question=_plan_item_question(section, objective),
+            question=_plan_item_question(section, normalized_objective),
             evidence_requirement=_plan_item_evidence_requirement(section),
         )
         for index, section in enumerate(sections, start=1)
     )
     return AnswerPlan(
-        objective=objective.strip(),
+        objective=normalized_objective,
         task_type=contract.task_type,
         response_detail=contract.response_detail,
         central_goal=(

@@ -13,6 +13,7 @@ from typing import Any
 import pandas as pd
 
 from qwopus_agent.analysis.excel_processing import read_spreadsheet
+from qwopus_agent.analysis.markdown_tables import dataframe_to_markdown
 from qwopus_agent.documents import (
     DocumentStructure,
     build_document_structure,
@@ -240,7 +241,9 @@ def _spreadsheet_analysis_context(
     for table_name, dataframe in ordered_tables:
         # 原因：Excel 分析不能把整表塞给 LLM。
         # 作用：先列出所有 schema，再提供样本和统计，避免前几个样本挤掉后续工作表结构。
-        sections.append(f"## {table_name}\n\n{dataframe.head(8).to_string(index=False)}")
+        sections.append(
+            f"## {table_name}\n\n{dataframe_to_markdown(dataframe.head(8))}"
+        )
     return "\n\n".join(sections)
 
 

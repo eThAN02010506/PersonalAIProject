@@ -222,6 +222,9 @@ class SmolagentsRuntimeTests(unittest.TestCase):
             "## 风险与限制\n\n仍需验证并发完成顺序、模型断线恢复和持久化迁移。"
             "对高风险工具还应增加权限校验与人工确认，避免文档中的指令改变工具行为。"
             "完成这些验证后，方案才适合进入稳定部署。"
+            "例如，两个任务同时更新同一会话时，应以版本号拒绝旧写入，并用一次"
+            "并发碰撞测试确认成功结果没有被迟到任务覆盖。模型断线测试还应分别检查"
+            "连接错误、任务状态和恢复后的上下文，避免只验证页面是否显示错误提示。"
         )
         self.assertTrue(checks[0](detailed, None, agent=None))
 
@@ -913,7 +916,7 @@ class SmolagentsRuntimeTests(unittest.TestCase):
         # 原因：历史对话语言不能覆盖当前搜索输入，且默认回答不应被压成短要点。
         # 作用：锁定多语言跟随与详细回答这两个 Prompt 行为约束。
         self.assertIn("Do not default to Chinese or English", prompt)
-        self.assertIn("Do not reduce the answer to a short bullet list", prompt)
+        self.assertIn("Do not compress the answer into a summary-like bullet list", prompt)
         self.assertIn("Local knowledge access is disabled", prompt)
 
     def test_format_agent_chat_prompt_applies_requested_detail_level(self) -> None:
@@ -933,8 +936,9 @@ class SmolagentsRuntimeTests(unittest.TestCase):
         # 原因：只验证 API 接受参数不能证明模型实际收到不同的回答策略。
         # 作用：锁定简洁档与详细档生成不同 Prompt，且详细档不使用硬性字数。
         self.assertIn("Keep the final answer concise and direct", concise)
-        self.assertIn("thorough, information-dense final answer", detailed)
-        self.assertIn("practical steps or examples", detailed)
+        self.assertIn("thorough, fully developed final answer", detailed)
+        self.assertIn("Develop every central point", detailed)
+        self.assertIn("concrete support or an example", detailed)
         self.assertIn("fixed length", detailed)
 
     def test_role_prompts_keep_evidence_and_review_out_of_final_writing(self) -> None:
@@ -1051,7 +1055,7 @@ class SmolagentsRuntimeTests(unittest.TestCase):
         self.assertEqual(result.debug_runs[0].max_steps, 2)
         self.assertIn("insufficient_depth", result.debug_runs[1].prompt)
         self.assertIn(
-            "develop every relevant requirement",
+            "fully develop every relevant answer-plan item",
             result.debug_runs[1].prompt,
         )
         self.assertIn("Previous draft", result.debug_runs[1].prompt)
@@ -2107,7 +2111,13 @@ class SmolagentsRuntimeTests(unittest.TestCase):
                 ],
             ),
             types.SimpleNamespace(
-                output="本地计算结果：East 为 40，West 为 20。",
+                output=(
+                    "本地计算结果：\n\n"
+                    "| region | revenue |\n"
+                    "| --- | --- |\n"
+                    "| East | 40 |\n"
+                    "| West | 20 |"
+                ),
                 state="success",
                 steps=[
                     {
@@ -2136,7 +2146,8 @@ class SmolagentsRuntimeTests(unittest.TestCase):
         # 原因：schema sample 可能刚好包含全部小表，模型会跳过真实 pandas 计算。
         # 作用：验证 runtime 必须补调 excel_analysis 后才接受最终答案。
         self.assertEqual(result.tool_calls, ["excel_schema", "excel_analysis"])
-        self.assertIn("East 为 40", result.answer)
+        self.assertIn("| East | 40 |", result.answer)
+        self.assertIn("| region | revenue |", result.answer)
         self.assertTrue(any("excel_analysis" in step for step in result.debug_steps))
 
     def test_format_file_analysis_prompt_explains_excel_tool_order(self) -> None:
@@ -2148,7 +2159,91 @@ class SmolagentsRuntimeTests(unittest.TestCase):
 
         self.assertIn("excel_schema first", prompt)
         self.assertIn("excel_analysis", prompt)
+        self.assertIn("already loaded in dfs", prompt)
+        self.assertIn("Do not import, read files", prompt)
+        self.assertIn("Markdown table", prompt)
+        self.assertIn("count, mean, standard deviation", prompt)
         self.assertIn("按地区汇总收入", prompt)
+
+    def test_file_analysis_preserves_computed_table_when_model_omits_it(self) -> None:
+        settings = SmolagentsModelSettings(
+            model_id="any-model",
+            base_url="http://127.0.0.1:8080/v1",
+        )
+        computed_table = (
+            "| region | average_revenue |\n"
+            "| --- | --- |\n"
+            "| East | 20.0 |\n"
+            "| West | 20.0 |"
+        )
+        tool_steps = [
+            {
+                "step_number": 1,
+                "tool_calls": [
+                    {
+                        "function": {
+                            "name": "excel_schema",
+                            "arguments": {"file_name": "sales.xlsx"},
+                        }
+                    }
+                ],
+            },
+            {
+                "step_number": 2,
+                "tool_calls": [
+                    {
+                        "function": {
+                            "name": "excel_analysis",
+                            "arguments": {"file_name": "sales.xlsx"},
+                        }
+                    }
+                ],
+                "observations": computed_table,
+            },
+        ]
+        FakeToolCallingAgent.queued_results = [
+            types.SimpleNamespace(
+                output="East and West have the same average.",
+                state="success",
+                steps=tool_steps,
+            ),
+            types.SimpleNamespace(
+                output="East and West have the same average.",
+                state="success",
+                steps=[],
+            ),
+        ]
+
+        result = run_smolagents_file_analysis_with_debug(
+            file_names=["sales.xlsx"],
+            spreadsheet_names=["sales.xlsx"],
+            user_question="Compare average revenue by region.",
+            tools=[object(), object()],
+            settings=settings,
+        )
+
+        self.assertIn("## Computed spreadsheet results", result.answer)
+        self.assertIn(computed_table, result.answer)
+
+    def test_file_analysis_prompt_applies_requested_detail_level(self) -> None:
+        concise = format_file_analysis_agent_prompt(
+            file_names=["lesson.pdf"],
+            spreadsheet_names=[],
+            user_question="总结这份课程",
+            response_detail="concise",
+        )
+        detailed = format_file_analysis_agent_prompt(
+            file_names=["lesson.pdf"],
+            spreadsheet_names=[],
+            user_question="总结这份课程",
+            response_detail="detailed",
+        )
+
+        # 原因：文档分析曾忽略聊天页的 Detailed 选择，导致相同设置产生概述式短答。
+        # 作用：证明文件 Agent 与聊天 Agent 使用同一套详略语义。
+        self.assertIn("Keep the final answer concise and direct", concise)
+        self.assertIn("Develop every central point", detailed)
+        self.assertNotEqual(concise, detailed)
 
     def test_format_file_analysis_prompt_routes_full_summary_to_hierarchy(self) -> None:
         prompt = format_file_analysis_agent_prompt(

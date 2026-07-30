@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 if TYPE_CHECKING:
     from qwopus_agent.agents.multi_agent import MultiAgentRun
@@ -164,7 +164,7 @@ class OrchestrationRequest(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    objective: str
+    objective: str = Field(min_length=1)
     # 原因：原始文字和经上下文解析的执行目标必须同时保留，不能由 Prompt 临时改写。
     # 作用：Planner 使用稳定的操作目标，最终回答仍可遵循用户原话和语言。
     resolved_intent: ResolvedIntent | None = None
@@ -202,6 +202,19 @@ class OrchestrationRequest(BaseModel):
     generate_report: bool = False
     report_title: str = "Qwopus Agent Report"
     report_basename: str = "qwopus_agent_report"
+
+    @field_validator("objective", mode="before")
+    @classmethod
+    def normalize_objective(cls, value: object) -> object:
+        """Normalize the shared orchestration objective before planning."""
+        if isinstance(value, str):
+            # 原因：Pydantic min_length 会把只含空格的字符串视为非空。
+            # 作用：所有 API、CLI 和测试入口共享同一个无空白目标的不变量。
+            normalized = value.strip()
+            if not normalized:
+                raise ValueError("Orchestration objective must not be blank.")
+            return normalized
+        return value
 
 
 class SourceCitation(BaseModel):

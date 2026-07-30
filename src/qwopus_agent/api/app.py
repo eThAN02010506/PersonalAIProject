@@ -20,6 +20,7 @@ from qwopus_agent.api.auth import AccountAuthMiddleware, AuthService
 from qwopus_agent.api.routes import (
     build_analysis_router,
     build_auth_router,
+    build_code_workspace_router,
     build_conversation_router,
     build_debug_router,
     build_document_router,
@@ -28,10 +29,17 @@ from qwopus_agent.api.routes import (
     build_report_router,
     build_skill_authoring_router,
     build_skill_router,
+    build_web_search_settings_router,
 )
+from qwopus_agent.code_workspace.repository import CodeChangeRepository
 from qwopus_agent.documents import DocumentStore
+from qwopus_agent.integrations.smolagents_code_workspace import (
+    run_smolagents_code_workspace_chat,
+)
+from qwopus_agent.integrations.tavily_credentials import TavilyCredentialStore
 from qwopus_agent.llm import LLMRegistry, create_default_llm_registry
 from qwopus_agent.memory import ConversationKnowledgeManager
+from qwopus_agent.services.code_workspace_service import CodeWorkspaceService
 from qwopus_agent.services.skill_authoring_service import SkillAuthoringService
 from qwopus_agent.services.skill_growth_service import SkillGrowthService
 from qwopus_agent.skills import SkillCatalog, SkillRegistry
@@ -84,6 +92,8 @@ def create_app(
     document_store: DocumentStore | None = None,
     report_directory: Path | None = None,
     lan_auth: LanAuthConfig | None = None,
+    tavily_credentials: TavilyCredentialStore | None = None,
+    code_workspace_service: CodeWorkspaceService | None = None,
 ) -> FastAPI:
     """Build an independently testable API application."""
     repo = repository or ConversationRepository()
@@ -114,6 +124,7 @@ def create_app(
             runtime.require_online_settings()
         ),
     )
+    documents = document_store or DocumentStore()
     runs = ChatRunRegistry(
         repo,
         debug_directory=debug_path,
@@ -121,10 +132,30 @@ def create_app(
         knowledge_manager=knowledge,
         skill_catalog=skill_catalog,
         skill_growth=skill_growth,
+        document_store=documents,
     )
-    documents = document_store or DocumentStore()
     reports = report_directory or REPORT_DIRECTORY
     auth = AuthService(repo)
+    web_search_credentials = tavily_credentials or TavilyCredentialStore()
+    code_workspace = code_workspace_service or CodeWorkspaceService(
+        CodeChangeRepository(repo.database_path.parent / "code_changes"),
+        # 原因：源码提案必须跟随管理员当前选择的模型，不能缓存启动时模型名称。
+        # 作用：Gemma、Qwen、Qwopus 或其他 OpenAI Compatible 模型可直接生成同一合同。
+        llm_factory=lambda: llm_registry.create_from_settings(
+            runtime.require_online_settings()
+        ),
+        # 原因：Code Workspace 原先绕过 smolagents，抽象需求只能经过固定两段 Prompt。
+        # 作用：每轮使用当前在线模型执行受控 code_search/code_read 循环，写入仍留在审批服务。
+        code_chat_runner=lambda root, transcript, eligible_paths, selected_files: (
+            run_smolagents_code_workspace_chat(
+                root,
+                transcript,
+                eligible_paths,
+                selected_files,
+                settings=runtime.require_online_settings(),
+            )
+        ),
+    )
     started_at = time.monotonic()
 
     @asynccontextmanager
@@ -154,6 +185,8 @@ def create_app(
     api.state.skill_growth = skill_growth
     api.state.skill_authoring = skill_authoring
     api.state.auth = auth
+    api.state.tavily_credentials = web_search_credentials
+    api.state.code_workspace = code_workspace
     api.add_middleware(
         CORSMiddleware,
         allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
@@ -183,7 +216,18 @@ def create_app(
         )
     )
     api.include_router(build_model_router(runtime))
-    api.include_router(build_conversation_router(repo, runs, runtime, knowledge))
+    api.include_router(
+        build_conversation_router(
+            repo,
+            runs,
+            runtime,
+            knowledge,
+            web_search_credentials,
+        )
+    )
+    api.include_router(
+        build_web_search_settings_router(web_search_credentials)
+    )
     api.include_router(
         build_analysis_router(
             runtime,
@@ -203,6 +247,7 @@ def create_app(
         )
     )
     api.include_router(build_local_folder_router(runtime, repo, debug_path))
+    api.include_router(build_code_workspace_router(code_workspace, debug_path))
     api.include_router(build_report_router(reports, repo))
     api.include_router(build_skill_router(skill_growth))
     api.include_router(

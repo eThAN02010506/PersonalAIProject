@@ -16,6 +16,8 @@ from qwopus_agent.analysis.workbook_profile import (
 )
 
 MAX_ANALYSIS_REGIONS_PER_SHEET = 12
+MAX_FRAGMENTED_REGIONS_PER_SHEET = 24
+MAX_FRAGMENTED_ANALYSIS_REGIONS_PER_SHEET = 4
 
 
 @dataclass(frozen=True)
@@ -39,6 +41,11 @@ class SpreadsheetReadResult:
             return frames
         for sheet_profile in self.profile.sheets:
             sheet_frames = self.region_sheets.get(sheet_profile.name, {})
+            region_limit = (
+                MAX_FRAGMENTED_ANALYSIS_REGIONS_PER_SHEET
+                if len(sheet_profile.table_regions) > MAX_FRAGMENTED_REGIONS_PER_SHEET
+                else MAX_ANALYSIS_REGIONS_PER_SHEET
+            )
             secondary_regions = sorted(
                 (
                     region
@@ -56,7 +63,7 @@ class SpreadsheetReadResult:
                     region.confidence,
                 ),
                 reverse=True,
-            )[:MAX_ANALYSIS_REGIONS_PER_SHEET]
+            )[:region_limit]
             for region in secondary_regions:
                 # 原因：一个工作表可能包含多张独立表，只暴露主区域会让 Agent 永远看不到其他数据。
                 # 作用：保留主表名，并以 Sheet::table_N 暴露有数据的高信息次级区域，过滤说明碎片。
@@ -104,9 +111,13 @@ def _read_xlsx_with_profiles(path: Path) -> SpreadsheetReadResult:
         }
         primary = sheet_profile.primary_region()
         dataframe = (
-            frames[primary.region_id]
-            if primary is not None
-            else _generic_dataframe(raw)
+            _generic_dataframe(raw)
+            if len(sheet_profile.table_regions) > MAX_FRAGMENTED_REGIONS_PER_SHEET
+            else (
+                frames[primary.region_id]
+                if primary is not None
+                else _generic_dataframe(raw)
+            )
         )
         sheets[sheet_profile.name] = dataframe
         region_sheets[sheet_profile.name] = frames
@@ -120,6 +131,11 @@ def _read_xlsx_with_profiles(path: Path) -> SpreadsheetReadResult:
             ),
             "header_rows": list(primary.header_rows) if primary is not None else [],
             "header_detection": "workbook_profile",
+            "primary_strategy": (
+                "full_sheet_fallback"
+                if len(sheet_profile.table_regions) > MAX_FRAGMENTED_REGIONS_PER_SHEET
+                else "detected_region"
+            ),
             "sheet_kind": sheet_profile.kind,
             "form_pairs": int(len(form_summary)),
             "table_regions": profile_data["table_regions"],

@@ -132,7 +132,11 @@ class AgentOrchestrator:
                 request.resolved_intent.operational_objective
                 if request.resolved_intent is not None
                 else request.objective
-            )
+            ).strip()
+            if not planning_objective:
+                # 原因：ResolvedIntent 可能由未来入口构造，不能只依赖 request.objective 校验。
+                # 作用：空目标永远不会进入 AnswerPlan、Planner 或任何文档 Tool。
+                raise ValueError("Planning objective must not be blank.")
             answer_contract = _answer_contract(request)
             answer_plan = build_answer_plan(planning_objective, answer_contract)
             plan = await self.planner.plan(
@@ -571,6 +575,7 @@ class AgentOrchestrator:
             "min_source_relevance": request.min_source_relevance,
             "selected_sections": request.selected_sections,
             "analysis_mode": request.analysis_mode,
+            "response_detail": request.response_detail,
         }
         if self.document_store is not None:
             analysis_options["document_store"] = self.document_store

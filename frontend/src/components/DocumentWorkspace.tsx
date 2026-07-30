@@ -17,6 +17,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
 import { api } from "../lib/api";
+import { getAnalysisInputError } from "../lib/analysisValidation";
 import type {
   AnalysisResult,
   LocalFolderNode,
@@ -28,12 +29,14 @@ type DocumentWorkspaceProps = {
   conversationId: string | null;
   minSourceRelevance: number;
   canUseLocalFolder: boolean;
+  responseDetail: "concise" | "balanced" | "detailed";
 };
 
 export function DocumentWorkspace({
   conversationId,
   minSourceRelevance,
   canUseLocalFolder,
+  responseDetail,
 }: DocumentWorkspaceProps) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [sourceMode, setSourceMode] = useState<"upload" | "folder">("upload");
@@ -57,6 +60,11 @@ export function DocumentWorkspace({
   const [isAttachingSaved, setIsAttachingSaved] = useState(false);
   const [savedNotice, setSavedNotice] = useState<string | null>(null);
   const [savedError, setSavedError] = useState<string | null>(null);
+  const analysisInputError = getAnalysisInputError(
+    analysisMode,
+    question,
+    selectedSections,
+  );
 
   const loadSavedDocuments = useCallback(async () => {
     setIsLoadingSaved(true);
@@ -202,7 +210,12 @@ export function DocumentWorkspace({
   };
 
   const analyzeSavedDocuments = async () => {
-    if (!conversationId || !selectedSavedDocuments.size || isRunning) return;
+    if (
+      !conversationId
+      || !selectedSavedDocuments.size
+      || isRunning
+      || analysisInputError
+    ) return;
     setIsRunning(true);
     setError(null);
     setSavedError(null);
@@ -214,6 +227,7 @@ export function DocumentWorkspace({
         question,
         generateReport,
         minSourceRelevance,
+        responseDetail,
         analysisMode,
         selectedSections,
       });
@@ -228,7 +242,7 @@ export function DocumentWorkspace({
   const analyze = async () => {
     const hasInput =
       sourceMode === "upload" ? files.length > 0 : selectedLocalFiles.size > 0;
-    if (!conversationId || !hasInput || isRunning) return;
+    if (!conversationId || !hasInput || isRunning || analysisInputError) return;
     setIsRunning(true);
     setError(null);
     try {
@@ -242,6 +256,7 @@ export function DocumentWorkspace({
               question,
               generateReport,
               minSourceRelevance,
+              responseDetail,
               analysisMode,
               selectedSections,
             )
@@ -251,6 +266,7 @@ export function DocumentWorkspace({
               selectedFiles: Array.from(selectedLocalFiles),
               question,
               generateReport,
+              responseDetail,
               analysisMode,
               selectedSections,
             });
@@ -330,6 +346,7 @@ export function DocumentWorkspace({
                   || !selectedSavedDocuments.size
                   || isRunning
                   || isAttachingSaved
+                  || Boolean(analysisInputError)
                 }
                 onClick={() => void analyzeSavedDocuments()}
                 type="button"
@@ -493,6 +510,9 @@ export function DocumentWorkspace({
           }
           rows={4}
         />
+        {analysisInputError && (
+          <div className="error-banner" role="status">{analysisInputError}</div>
+        )}
         <div className="analysis-actions">
           <label className="toggle-label">
             <input
@@ -508,6 +528,7 @@ export function DocumentWorkspace({
             disabled={
               !conversationId
               || isRunning
+              || Boolean(analysisInputError)
               || (sourceMode === "upload" ? !files.length : !selectedLocalFiles.size)
             }
             onClick={analyze}

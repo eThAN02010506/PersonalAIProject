@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
 
 from qwopus_agent.documents.local_folder import MAX_LOCAL_FOLDER_SELECTION
 from qwopus_agent.services.orchestration_models import (
@@ -397,6 +397,7 @@ class LocalFolderAnalysisRequest(BaseModel):
     )
     question: str = ""
     generate_report: bool = False
+    response_detail: Literal["concise", "balanced", "detailed"] = "detailed"
     analysis_mode: Literal["question", "section", "full"] = "question"
     selected_sections: dict[str, tuple[str, ...]] = Field(default_factory=dict)
 
@@ -461,6 +462,7 @@ class SavedDocumentsAnalysisRequest(BaseModel):
     question: str = ""
     generate_report: bool = False
     min_source_relevance: float = Field(default=0.55, ge=0.25, le=0.95)
+    response_detail: Literal["concise", "balanced", "detailed"] = "detailed"
     analysis_mode: Literal["question", "section", "full"] = "question"
     selected_sections: dict[str, tuple[str, ...]] = Field(default_factory=dict)
 
@@ -518,6 +520,35 @@ class ModelSettingsView(BaseModel):
     request_timeout_seconds: int
     max_retries: int
     run_timeout_seconds: int
+
+
+class TavilyKeyUpdate(BaseModel):
+    """Administrator-only Tavily key replacement."""
+
+    api_key: SecretStr
+
+
+class TavilyKeyTestRequest(BaseModel):
+    """Test an unsaved key or the currently resolved host credential."""
+
+    api_key: SecretStr | None = None
+
+
+class WebSearchSettingsView(BaseModel):
+    """Credential state that never exposes a complete Tavily key."""
+
+    configured: bool
+    source: Literal["managed", "legacy_local", "environment", "none"] | None
+    masked_key: str | None = None
+    can_manage: bool
+    message: str
+
+
+class TavilyConnectionTestView(BaseModel):
+    """Safe result of one bounded Tavily connectivity check."""
+
+    success: bool
+    message: str
 
 
 class DebugRuntimeLogView(BaseModel):

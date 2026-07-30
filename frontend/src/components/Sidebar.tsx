@@ -1,6 +1,7 @@
 import {
   Bot,
   Bug,
+  KeyRound,
   LogOut,
   MessageSquare,
   Plus,
@@ -11,19 +12,26 @@ import {
   X,
 } from "lucide-react";
 
-import type { Conversation, Health, UserAccount } from "../lib/types";
+import type {
+  Conversation,
+  Health,
+  UserAccount,
+  WebSearchSettings,
+} from "../lib/types";
 
 type SidebarProps = {
   conversations: Conversation[];
   activeId: string | null;
   health: Health | null;
   user: UserAccount;
+  webSearchSettings: WebSearchSettings | null;
   open: boolean;
   onClose: () => void;
   onCreate: () => void;
   onSelect: (id: string) => void;
   onDelete: (id: string) => void;
   onConfigureModel: () => void;
+  onConfigureWebSearch: () => void;
   onOpenAccount: () => void;
   onLogout: () => void;
 };
@@ -33,12 +41,14 @@ export function Sidebar({
   activeId,
   health,
   user,
+  webSearchSettings,
   open,
   onClose,
   onCreate,
   onSelect,
   onDelete,
   onConfigureModel,
+  onConfigureWebSearch,
   onOpenAccount,
   onLogout,
 }: SidebarProps) {
@@ -109,6 +119,29 @@ export function Sidebar({
             </button>
           )}
         </div>
+        {user.role === "admin" && (
+          <div className="model-status-row">
+            <div
+              className="model-status"
+              title={webSearchSettings?.message ?? "Checking Tavily"}
+            >
+              <span
+                className={`status-dot ${webSearchSettings?.configured ? "online" : ""}`}
+              />
+              <span>
+                {webSearchSettings?.configured ? "Tavily search" : "Tavily not configured"}
+              </span>
+            </div>
+            <button
+              className="icon-button model-settings-button"
+              type="button"
+              onClick={onConfigureWebSearch}
+              title="Web search settings"
+            >
+              <KeyRound size={15} />
+            </button>
+          </div>
+        )}
         {user.role === "admin" && (
           <a
             className="debug-link"

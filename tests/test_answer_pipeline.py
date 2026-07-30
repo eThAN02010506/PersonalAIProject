@@ -11,6 +11,13 @@ from qwopus_agent.services.orchestration_models import AnswerContract, SourceCit
 
 
 class AnswerPipelineTests(unittest.TestCase):
+    def test_answer_plan_rejects_blank_objective_before_model_validation(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError,
+            "Answer planning objective must not be blank",
+        ):
+            build_answer_plan("   ", AnswerContract())
+
     def test_detailed_plan_adds_task_specific_depth_without_word_target(self) -> None:
         plan = build_answer_plan(
             "Analyze the architecture.",

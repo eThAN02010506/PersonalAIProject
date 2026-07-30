@@ -38,6 +38,46 @@ MAX_UPLOAD_FILE_BYTES = 100 * 1024 * 1024
 MAX_UPLOAD_TOTAL_BYTES = 256 * 1024 * 1024
 UPLOAD_READ_CHUNK_BYTES = 1024 * 1024
 SUPPORTED_UPLOAD_EXTENSIONS = SUPPORTED_DOCUMENT_EXTENSIONS | {".csv", ".xlsx", ".xls"}
+FULL_ANALYSIS_OBJECTIVE = (
+    "Analyze and summarize every selected document, including its central arguments, "
+    "evidence, relationships, and limitations."
+)
+SECTION_ANALYSIS_OBJECTIVE = (
+    "Analyze and summarize the selected document sections, including their central "
+    "arguments, evidence, relationships, and limitations."
+)
+
+
+def resolve_analysis_objective(
+    question: str,
+    analysis_mode: Literal["question", "section", "full"],
+    selected_sections: dict[str, tuple[str, ...]],
+) -> str:
+    """Resolve one mode-aware objective before constructing an orchestration request."""
+    # 原因：question 必须由用户定义目标，但 full/section 允许使用确定性的默认目标。
+    # 作用：在读取文档或启动 Agent 前统一模式语义，保证编排请求永远收到明确任务。
+    objective = question.strip()
+    if analysis_mode == "question":
+        if not objective:
+            raise HTTPException(
+                status_code=422,
+                detail="Enter a question for question-based analysis.",
+            )
+        return objective
+    if analysis_mode == "full":
+        return objective or FULL_ANALYSIS_OBJECTIVE
+
+    has_selected_section = False
+    for document_id, section_ids in selected_sections.items():
+        if not document_id.strip() or any(not section_id.strip() for section_id in section_ids):
+            raise HTTPException(status_code=422, detail="Invalid selected sections.")
+        has_selected_section = has_selected_section or bool(section_ids)
+    if not has_selected_section:
+        raise HTTPException(
+            status_code=422,
+            detail="Select at least one document section for section analysis.",
+        )
+    return objective or SECTION_ANALYSIS_OBJECTIVE
 
 
 def build_analysis_router(
@@ -58,6 +98,10 @@ def build_analysis_router(
         question: Annotated[str, Form()] = "",
         generate_report: Annotated[bool, Form()] = False,
         min_source_relevance: Annotated[float, Form(ge=0.25, le=0.95)] = 0.55,
+        response_detail: Annotated[
+            Literal["concise", "balanced", "detailed"],
+            Form(),
+        ] = "detailed",
         analysis_mode: Annotated[
             Literal["question", "section", "full"],
             Form(),
@@ -71,15 +115,21 @@ def build_analysis_router(
             scoped_sections = _parse_selected_sections(selected_sections)
         except (json.JSONDecodeError, TypeError, ValueError) as exc:
             raise HTTPException(status_code=422, detail="Invalid selected sections.") from exc
+        objective = resolve_analysis_objective(
+            question,
+            analysis_mode,
+            scoped_sections,
+        )
 
         uploads = await _read_uploads(files)
 
         orchestration_request = OrchestrationRequest(
-            objective=question,
+            objective=objective,
             conversation_id=conversation_id,
             uploaded_files=uploads,
             generate_report=generate_report,
             min_source_relevance=min_source_relevance,
+            response_detail=response_detail,
             analysis_mode=analysis_mode,
             selected_sections=scoped_sections,
             report_title="Qwopus Analysis Report",
@@ -207,14 +257,17 @@ def _parse_selected_sections(payload: str) -> dict[str, tuple[str, ...]]:
     for document_id, section_ids in raw.items():
         if (
             not isinstance(document_id, str)
-            or not document_id
+            or not document_id.strip()
             or not isinstance(section_ids, list)
-            or any(not isinstance(section_id, str) or not section_id for section_id in section_ids)
+            or any(
+                not isinstance(section_id, str) or not section_id.strip()
+                for section_id in section_ids
+            )
         ):
             # 原因：字符串也是可迭代对象，宽松转换会把一个 section id 拆成单个字符。
             # 作用：API 仅接受 {document_id: [section_id, ...]}，拒绝形状错误的数据。
             raise TypeError("selected sections contain invalid ids")
-        parsed[document_id] = tuple(section_ids)
+        parsed[document_id.strip()] = tuple(section_id.strip() for section_id in section_ids)
     return parsed
 
 

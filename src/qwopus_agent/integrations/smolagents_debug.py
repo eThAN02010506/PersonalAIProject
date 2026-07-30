@@ -95,6 +95,23 @@ def extract_agent_observations(steps: list[dict[str, Any]]) -> list[str]:
     return observations
 
 
+def extract_tool_observations(
+    steps: list[dict[str, Any]],
+    tool_name: str,
+) -> list[str]:
+    """Return observations produced by one named Tool."""
+    observations: list[str] = []
+    for step in steps:
+        if (
+            isinstance(step, dict)
+            and tool_name in extract_agent_tool_calls([step])
+            and isinstance(step.get("observations"), str)
+            and step["observations"].strip()
+        ):
+            observations.append(step["observations"].strip())
+    return observations
+
+
 def extract_inspected_file_names(steps: list[dict[str, Any]]) -> set[str]:
     """Return files passed to a content-bearing current-document Tool."""
     inspected: set[str] = set()

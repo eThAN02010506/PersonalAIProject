@@ -19,7 +19,11 @@ from qwopus_agent.api.models import (
     LocalFolderTreeView,
 )
 from qwopus_agent.api.repository import ConversationRepository
-from qwopus_agent.api.routes.analysis import analysis_view, register_analysis_access
+from qwopus_agent.api.routes.analysis import (
+    analysis_view,
+    register_analysis_access,
+    resolve_analysis_objective,
+)
 from qwopus_agent.documents.local_folder import (
     MAX_LOCAL_FOLDER_SELECTION,
     LocalFolderError,
@@ -76,6 +80,11 @@ def build_local_folder_router(
         require_debug_client(request)
         if repository.get_conversation_for_user(payload.conversation_id, user.id) is None:
             raise HTTPException(status_code=404, detail="Conversation not found.")
+        objective = resolve_analysis_objective(
+            payload.question,
+            payload.analysis_mode,
+            payload.selected_sections,
+        )
         try:
             files = resolve_selected_files(payload.root, payload.selected_files)
         except LocalFolderError as exc:
@@ -85,7 +94,7 @@ def build_local_folder_router(
         # 原因：目录模式必须读取用户勾选的原文件，不能复制上传或隐式扩大到未勾选文件。
         # 作用：Orchestrator 只收到根目录内已验证的路径，并使用相对路径区分同名文件。
         orchestration_request = OrchestrationRequest(
-            objective=payload.question,
+            objective=objective,
             conversation_id=payload.conversation_id,
             uploaded_files=tuple(
                 OrchestrationFile(
@@ -95,6 +104,7 @@ def build_local_folder_router(
                 for file_path in files
             ),
             generate_report=payload.generate_report,
+            response_detail=payload.response_detail,
             analysis_mode=payload.analysis_mode,
             selected_sections=payload.selected_sections,
             report_title="Qwopus Local Folder Analysis",

@@ -159,7 +159,7 @@ def format_agent_chat_prompt(
                     "mixed-language input, use its dominant language unless the user explicitly "
                     "requests another language."
                 ),
-                _response_detail_instruction(response_detail),
+                response_detail_instruction(response_detail),
             ]
         )
     if answer_contract is not None:
@@ -304,7 +304,7 @@ def _role_final_instruction(output_role: AgentOutputRole) -> str:
     return "Now produce the complete final answer in that same language."
 
 
-def _response_detail_instruction(
+def response_detail_instruction(
     response_detail: Literal["concise", "balanced", "detailed"],
 ) -> str:
     """Translate one UI preference into an adaptive, non-numeric answer contract."""
@@ -318,15 +318,15 @@ def _response_detail_instruction(
             "Provide a balanced answer with a direct conclusion, the main supporting explanation, "
             "and practical caveats when relevant. Match the structure to the question."
         )
-    # 原因：硬性最低字数会让简单问题变慢，也会诱导模型重复内容。
-    # 作用：详细档要求覆盖关键维度和可执行细节，但仍按问题复杂度自然收束。
+    # 原因：弱模型会把“信息密集”理解为压缩摘要，而硬性最低字数又会诱导重复。
+    # 作用：详细档改为要求逐个展开核心观点，仍按问题复杂度自然收束。
     return (
-        "Provide a thorough, information-dense final answer unless the user explicitly asks for "
-        "brevity. Start with the direct answer, then cover the reasoning or evidence, important "
-        "details, practical steps or examples, limitations and caveats, and available sources "
-        "when relevant. Use meaningful sections for complex questions and connected prose where "
-        "it reads better. Do not reduce the answer to a short bullet list, repeat points, "
-        "or pad it to a fixed length."
+        "Provide a thorough, fully developed final answer unless the user asks for brevity. "
+        "Develop every central point: state it, explain why or how it follows, give concrete "
+        "support or an example, and add a relevant implication, condition, or limitation. "
+        "Connect related points and use sections for complex questions. "
+        "Do not compress the answer into a summary-like bullet list, repeat points, or pad it "
+        "to a fixed length."
     )
 
 

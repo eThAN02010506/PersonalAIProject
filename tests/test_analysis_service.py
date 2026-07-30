@@ -161,6 +161,7 @@ class AnalysisServiceTests(unittest.TestCase):
 
             def fake_llm(**kwargs):
                 tools = kwargs["tools"]
+                captured["response_detail"] = kwargs["response_detail"]
                 captured["tool_names"] = [tool.name for tool in tools]
                 document_tool = next(tool for tool in tools if tool.name == "document_search")
                 captured["document_result"] = document_tool.forward("revenue.txt", "revenue")
@@ -213,12 +214,14 @@ class AnalysisServiceTests(unittest.TestCase):
                     settings=settings,
                     minirag=minirag,
                     min_source_relevance=0.25,
+                    response_detail="concise",
                 )
 
             self.assertEqual(
                 outcome.result.llm_analysis, "Final answer uses prior MiniRAG context."
             )
             self.assertEqual(outcome.result.metadata["minirag_search_hits"], 1)
+            self.assertEqual(captured["response_detail"], "concise")
             self.assertTrue(outcome.result.metadata["minirag_inserted"])
             self.assertEqual(
                 captured["tool_names"],

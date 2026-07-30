@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
+from qwopus_agent.analysis.pandas_sandbox import PANDAS_SANDBOX_CODE_GUIDANCE
 from qwopus_agent.integrations import (
     smolagents_debug,
     smolagents_knowledge,
@@ -59,6 +60,7 @@ _extract_collection_covered_file_names = (
     smolagents_debug.extract_collection_covered_file_names
 )
 _extract_agent_observations = smolagents_debug.extract_agent_observations
+_extract_tool_observations = smolagents_debug.extract_tool_observations
 _extract_agent_tool_calls = smolagents_debug.extract_agent_tool_calls
 _extract_final_answer = smolagents_debug.extract_final_answer
 _extract_inspected_file_names = smolagents_debug.extract_inspected_file_names
@@ -74,7 +76,9 @@ _no_knowledge_evidence_answer = smolagents_prompts.no_knowledge_evidence_answer
 _requires_document_evidence = smolagents_prompts.requires_document_evidence
 _QUALITY_REPAIR_INSTRUCTIONS = {
     "insufficient_depth": (
-        "develop every relevant requirement with distinct supporting detail"
+        "fully develop every relevant answer-plan item with its conclusion, why or how it "
+        "follows, concrete support or an example, and a useful implication, condition, or "
+        "limitation; do not merely add headings or restate the draft"
     ),
     "insufficient_specificity": (
         "replace generic claims with concrete evidence, causal explanation, examples, "
@@ -235,6 +239,7 @@ def build_smolagents_code_agent(
     settings: SmolagentsModelSettings | None = None,
     tools: list[Any] | None = None,
     final_answer_checks: list[Callable[..., bool]] | None = None,
+    planning_interval: int | None = None,
 ) -> Any:
     try:
         from smolagents import CodeAgent
@@ -251,6 +256,7 @@ def build_smolagents_code_agent(
         # 作用：Code 兼容模式只能组合已注册 Tool，数据计算继续使用独立 pandas 沙箱。
         additional_authorized_imports=[],
         final_answer_checks=final_answer_checks,
+        planning_interval=planning_interval,
     )
 
 
@@ -258,6 +264,7 @@ def build_smolagents_tool_calling_agent(
     settings: SmolagentsModelSettings | None = None,
     tools: list[Any] | None = None,
     final_answer_checks: list[Callable[..., bool]] | None = None,
+    planning_interval: int | None = None,
 ) -> Any:
     """Build the smolagents Agent runtime used as Qwopus' chat driver."""
     try:
@@ -272,6 +279,7 @@ def build_smolagents_tool_calling_agent(
             settings=settings,
             tools=tools,
             final_answer_checks=final_answer_checks,
+            planning_interval=planning_interval,
         )
 
     model = build_smolagents_model(settings)
@@ -281,6 +289,7 @@ def build_smolagents_tool_calling_agent(
         tools=tools or [],
         model=model,
         final_answer_checks=final_answer_checks,
+        planning_interval=planning_interval,
     )
 
 
@@ -794,6 +803,7 @@ def run_smolagents_file_analysis_with_debug(
     tools: list[Any],
     settings: SmolagentsModelSettings | None = None,
     analysis_mode: str = "question",
+    response_detail: Literal["concise", "balanced", "detailed"] = "detailed",
 ) -> DocumentAnalysisRun:
     """Run uploaded-file analysis through the smolagents ToolCallingAgent."""
     if not file_names:
@@ -828,6 +838,7 @@ def run_smolagents_file_analysis_with_debug(
         user_question=user_question,
         analysis_mode=analysis_mode,
         has_collection_summary=has_collection_summary,
+        response_detail=response_detail,
     )
     collection_tool = collection_tools[0] if collection_tools else None
     use_grounded_report_composer = should_use_grounded_report_composer(
@@ -935,6 +946,9 @@ def run_smolagents_file_analysis_with_debug(
     missing_files = set(file_names).difference(inspected_files)
 
     final_answer = _extract_final_answer(answer)
+    spreadsheet_table_missing = bool(
+        spreadsheet_names and not _contains_markdown_table(final_answer)
+    )
     if _is_model_generation_failure_output(final_answer):
         # 原因：smolagents 在最终模型请求失败时会把错误包装成普通 text content。
         # 作用：保留完整 debug run 和已检查来源，但不让 transport error 成为用户答案。
@@ -973,6 +987,7 @@ def run_smolagents_file_analysis_with_debug(
         or missing_tools
         or missing_files
         or refinement_sections
+        or spreadsheet_table_missing
     ):
         # 原因：少数模型会把最后一次 Tool Observation 当作回答，或者在步数内没有调用 final_answer。
         # 作用：保留同一个 Agent memory 再收敛一轮，禁止原始工具输出进入 Streamlit 主结果。
@@ -1042,6 +1057,9 @@ def run_smolagents_file_analysis_with_debug(
                 f"{missing_file_instruction}. "
                 "For each missing spreadsheet, call excel_schema and excel_analysis with that "
                 "file name; generate restricted pandas code from its schema observation. "
+                f"{PANDAS_SANDBOX_CODE_GUIDANCE} "
+                "The final answer for spreadsheet work must include at least one GitHub-Flavored "
+                "Markdown table containing the locally computed metrics or item details. "
                 "Rewrite the complete answer and fully deliver every requested numbered section; "
                 f"missing or underdeveloped sections: {missing_section_instruction}. "
                 "Correct every grounded-deliverable defect listed here: "
@@ -1167,6 +1185,20 @@ def run_smolagents_file_analysis_with_debug(
             "smolagents did not satisfy the grounded report contract: "
             f"{issue_names}."
         )
+    if spreadsheet_names and not _contains_markdown_table(final_answer):
+        computed_tables = _spreadsheet_result_tables(all_steps)
+        if not computed_tables:
+            raise RuntimeError(
+                "smolagents did not include a computed spreadsheet table in the final answer."
+            )
+        # 原因：较弱模型可能正确调用 pandas，却在最终改写时漏掉可核对的表格。
+        # 作用：仅复用 excel_analysis 的受限 GFM 表格，不暴露代码、Thought 或完整 Observation。
+        rendered_tables = "\n\n".join(computed_tables)
+        final_answer = (
+            f"{final_answer.rstrip()}\n\n"
+            "## Computed spreadsheet results\n\n"
+            f"{rendered_tables}"
+        )
     if not final_answer or _looks_like_tool_observation(final_answer):
         raise RuntimeError("smolagents did not produce a final answer after tool execution.")
 
@@ -1187,6 +1219,7 @@ def format_file_analysis_agent_prompt(
     user_question: str,
     analysis_mode: str = "question",
     has_collection_summary: bool = False,
+    response_detail: Literal["concise", "balanced", "detailed"] = "detailed",
 ) -> str:
     """Build the task prompt for the smolagents uploaded-file driver."""
     question = user_question.strip() or "Summarize the uploaded files."
@@ -1205,10 +1238,7 @@ def format_file_analysis_agent_prompt(
             "The final answer must follow the language of the user's question; "
             "if unclear, follow the files' main language."
         ),
-        (
-            "Give a complete natural-language answer with enough detail for the request, "
-            "not a fixed short bullet list."
-        ),
+        smolagents_prompts.response_detail_instruction(response_detail),
         "Use rag_search only when previously indexed local knowledge is relevant.",
         (
             "For current documents, use document_search for a specific question. Use "
@@ -1267,8 +1297,20 @@ def format_file_analysis_agent_prompt(
                     "then call excel_analysis."
                 ),
                 (
-                    "Use restricted pandas code with dfs and pd, and assign the final value "
-                    "to result."
+                    PANDAS_SANDBOX_CODE_GUIDANCE
+                ),
+                (
+                    "Every spreadsheet final answer must contain at least one GitHub-Flavored "
+                    "Markdown table based on excel_analysis output."
+                ),
+                (
+                    "For a general or full analysis, calculate a per-numeric-column table with "
+                    "count, mean, standard deviation, minimum, quartiles, median, maximum, and "
+                    "missing values; include relevant categorical item counts."
+                ),
+                (
+                    "For a group or item question, return one row per requested group or item "
+                    "with its count and relevant computed aggregates."
                 ),
                 "Never request or reproduce the entire spreadsheet.",
             ]
@@ -1282,6 +1324,56 @@ def format_file_analysis_agent_prompt(
         ]
     )
     return "\n".join(lines)
+
+
+def _contains_markdown_table(content: str) -> bool:
+    """Return whether text contains a valid GFM-style header and delimiter row."""
+    lines = content.splitlines()
+    return any(
+        line.strip().startswith("|")
+        and line.strip().endswith("|")
+        and _is_markdown_table_delimiter(lines[index + 1])
+        for index, line in enumerate(lines[:-1])
+    )
+
+
+def _spreadsheet_result_tables(steps: list[dict[str, Any]]) -> list[str]:
+    """Extract only bounded Markdown tables returned by excel_analysis."""
+    tables: list[str] = []
+    for observation in _extract_tool_observations(steps, "excel_analysis"):
+        tables.extend(_extract_markdown_tables(observation))
+    return list(dict.fromkeys(tables))
+
+
+def _extract_markdown_tables(content: str) -> list[str]:
+    """Extract contiguous GFM table blocks without returning surrounding Tool text."""
+    lines = content.splitlines()
+    tables: list[str] = []
+    index = 0
+    while index + 1 < len(lines):
+        if (
+            lines[index].strip().startswith("|")
+            and lines[index].strip().endswith("|")
+            and _is_markdown_table_delimiter(lines[index + 1])
+        ):
+            end = index + 2
+            while (
+                end < len(lines)
+                and lines[end].strip().startswith("|")
+                and lines[end].strip().endswith("|")
+            ):
+                end += 1
+            tables.append("\n".join(line.strip() for line in lines[index:end]))
+            index = end
+            continue
+        index += 1
+    return tables
+
+
+def _is_markdown_table_delimiter(line: str) -> bool:
+    """Validate the GFM delimiter row used to distinguish tables from prose."""
+    cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+    return bool(cells) and all(re.fullmatch(r":?-{3,}:?", cell) for cell in cells)
 
 
 def _requires_collection_summary(

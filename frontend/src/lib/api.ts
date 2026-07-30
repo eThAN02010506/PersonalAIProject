@@ -2,6 +2,14 @@ import type {
   AnalysisResult,
   AuthStatus,
   ChatMessage,
+  CodeChatReply,
+  CodeChange,
+  CodeCommand,
+  CodeFile,
+  CodeSearchMatch,
+  CodeTestResult,
+  CodeWorkspaceTree,
+  CodeWorkspaceMessage,
   Conversation,
   ConversationMember,
   DebugOverview,
@@ -17,7 +25,9 @@ import type {
   SkillSourceConversation,
   SkillSourceRun,
   SkillVersion,
+  TavilyConnectionTest,
   UserAccount,
+  WebSearchSettings,
 } from "./types";
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -116,6 +126,28 @@ export const api = {
     }),
 
   health: () => request<Health>("/api/health"),
+
+  webSearchSettings: () =>
+    request<WebSearchSettings>("/api/web-search-settings"),
+
+  updateWebSearchSettings: (apiKey: string) =>
+    request<WebSearchSettings>("/api/web-search-settings", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ api_key: apiKey }),
+    }),
+
+  deleteWebSearchSettings: () =>
+    request<WebSearchSettings>("/api/web-search-settings", {
+      method: "DELETE",
+    }),
+
+  testWebSearchSettings: (apiKey?: string) =>
+    request<TavilyConnectionTest>("/api/web-search-settings/test", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ api_key: apiKey || null }),
+    }),
 
   debugOverview: (limit = 100, logLines = 500) =>
     request<DebugOverview>(`/api/debug?limit=${limit}&log_lines=${logLines}`),
@@ -266,6 +298,7 @@ export const api = {
     question: string;
     generateReport: boolean;
     minSourceRelevance: number;
+    responseDetail: "concise" | "balanced" | "detailed";
     analysisMode: "question" | "section" | "full";
     selectedSections: Record<string, string[]>;
   }) =>
@@ -278,6 +311,7 @@ export const api = {
         question: payload.question,
         generate_report: payload.generateReport,
         min_source_relevance: payload.minSourceRelevance,
+        response_detail: payload.responseDetail,
         analysis_mode: payload.analysisMode,
         selected_sections: payload.selectedSections,
       }),
@@ -289,6 +323,89 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ path }),
     }),
+
+  scanCodeWorkspace: (path: string) =>
+    request<CodeWorkspaceTree>("/api/code-workspaces/scan", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path }),
+    }),
+
+  readCodeFile: (root: string, path: string) =>
+    request<CodeFile>("/api/code-workspaces/read", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ root, path, start_line: 1, end_line: 600 }),
+    }),
+
+  searchCodeWorkspace: (root: string, query: string) =>
+    request<CodeSearchMatch[]>("/api/code-workspaces/search", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ root, query, limit: 100 }),
+    }),
+
+  listCodeCommands: (root: string) =>
+    request<CodeCommand[]>("/api/code-workspaces/commands", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ root }),
+    }),
+
+  chatAboutCode: (payload: {
+    root: string;
+    message: string;
+    history: CodeWorkspaceMessage[];
+    selectedFiles: string[];
+  }) =>
+    request<CodeChatReply>("/api/code-workspaces/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        root: payload.root,
+        message: payload.message,
+        history: payload.history.slice(-20),
+        selected_files: payload.selectedFiles,
+      }),
+    }),
+
+  listCodeChanges: () => request<CodeChange[]>("/api/code-changes"),
+
+  proposeCodeChange: (payload: {
+    root: string;
+    objective: string;
+    selectedFiles: string[];
+    contextFiles: string[];
+  }) =>
+    request<CodeChange>("/api/code-changes/propose", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        root: payload.root,
+        objective: payload.objective,
+        selected_files: payload.selectedFiles,
+        context_files: payload.contextFiles,
+      }),
+    }),
+
+  updateCodeChange: (
+    changeId: string,
+    action: "apply" | "reject" | "rollback",
+  ) =>
+    request<CodeChange>(
+      `/api/code-changes/${encodeURIComponent(changeId)}/${action}`,
+      { method: "POST" },
+    ),
+
+  testCodeChange: (changeId: string, commandId: string) =>
+    request<CodeTestResult>(
+      `/api/code-changes/${encodeURIComponent(changeId)}/test`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ command_id: commandId }),
+      },
+    ),
 
   startRun: (
     conversationId: string,
@@ -334,6 +451,7 @@ export const api = {
     question: string,
     generateReport: boolean,
     minSourceRelevance: number,
+    responseDetail: "concise" | "balanced" | "detailed",
     analysisMode: "question" | "section" | "full",
     selectedSections: Record<string, string[]>,
   ) => {
@@ -345,6 +463,7 @@ export const api = {
     form.append("question", question);
     form.append("generate_report", String(generateReport));
     form.append("min_source_relevance", String(minSourceRelevance));
+    form.append("response_detail", responseDetail);
     form.append("analysis_mode", analysisMode);
     form.append("selected_sections", JSON.stringify(selectedSections));
     return request<AnalysisResult>("/api/analysis", { method: "POST", body: form });
@@ -356,6 +475,7 @@ export const api = {
     selectedFiles: string[];
     question: string;
     generateReport: boolean;
+    responseDetail: "concise" | "balanced" | "detailed";
     analysisMode: "question" | "section" | "full";
     selectedSections: Record<string, string[]>;
   }) =>
@@ -368,6 +488,7 @@ export const api = {
         selected_files: payload.selectedFiles,
         question: payload.question,
         generate_report: payload.generateReport,
+        response_detail: payload.responseDetail,
         analysis_mode: payload.analysisMode,
         selected_sections: payload.selectedSections,
       }),

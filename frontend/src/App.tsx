@@ -1,6 +1,8 @@
 import {
   FileSearch,
+  Code2,
   Globe2,
+  KeyRound,
   Layers3,
   ListFilter,
   Menu,
@@ -30,6 +32,7 @@ import type {
   InterpretationMode,
   RunView,
   UserAccount,
+  WebSearchSettings,
 } from "./lib/types";
 
 // 原因：文档、过程和模型设置不是默认聊天首屏的必需代码。
@@ -37,6 +40,11 @@ import type {
 const DocumentWorkspace = lazy(() =>
   import("./components/DocumentWorkspace").then((module) => ({
     default: module.DocumentWorkspace,
+  })),
+);
+const CodeWorkspace = lazy(() =>
+  import("./components/CodeWorkspace").then((module) => ({
+    default: module.CodeWorkspace,
   })),
 );
 const ModelSettingsDialog = lazy(() =>
@@ -64,8 +72,13 @@ const ShareDialog = lazy(() =>
     default: module.ShareDialog,
   })),
 );
+const WebSearchSettingsDialog = lazy(() =>
+  import("./components/WebSearchSettingsDialog").then((module) => ({
+    default: module.WebSearchSettingsDialog,
+  })),
+);
 
-type ViewMode = "chat" | "documents" | "skills";
+type ViewMode = "chat" | "documents" | "skills" | "code";
 type ResponseDetail = "concise" | "balanced" | "detailed";
 
 export default function App() {
@@ -76,6 +89,8 @@ export default function App() {
   const [activeId, setActiveId] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [health, setHealth] = useState<Health | null>(null);
+  const [webSearchSettings, setWebSearchSettings] =
+    useState<WebSearchSettings | null>(null);
   const [mode, setMode] = useState<ViewMode>("chat");
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [webSearch, setWebSearch] = useState(false);
@@ -94,6 +109,7 @@ export default function App() {
   const [phase, setPhase] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [modelSettingsOpen, setModelSettingsOpen] = useState(false);
+  const [webSearchSettingsOpen, setWebSearchSettingsOpen] = useState(false);
   const [accountOpen, setAccountOpen] = useState(false);
   const [shareOpen, setShareOpen] = useState(false);
 
@@ -114,6 +130,8 @@ export default function App() {
       setConversations([]);
       setActiveId(null);
       setMessages([]);
+      setWebSearch(false);
+      setWebSearchSettings(null);
     };
     window.addEventListener("qwopus:auth-required", requireAuthentication);
     void api.authStatus()
@@ -151,6 +169,15 @@ export default function App() {
       }
     })();
     void api.health().then(setHealth).catch(() => setHealth(null));
+    void api.webSearchSettings()
+      .then((settings) => {
+        if (!active) return;
+        setWebSearchSettings(settings);
+        if (!settings.configured) setWebSearch(false);
+      })
+      .catch((reason) => {
+        if (active) setError(toMessage(reason));
+      });
     return () => {
       active = false;
     };
@@ -291,6 +318,9 @@ export default function App() {
       setMode("chat");
       setAccountOpen(false);
       setShareOpen(false);
+      setWebSearch(false);
+      setWebSearchSettings(null);
+      setWebSearchSettingsOpen(false);
       setGlobalKnowledge(false);
     }
   }, []);
@@ -326,6 +356,7 @@ export default function App() {
         activeId={activeId}
         health={health}
         user={user}
+        webSearchSettings={webSearchSettings}
         open={sidebarOpen}
         onClose={() => setSidebarOpen(false)}
         onCreate={() => void createConversation()}
@@ -338,6 +369,7 @@ export default function App() {
         }}
         onDelete={(id) => void deleteConversation(id)}
         onConfigureModel={() => setModelSettingsOpen(true)}
+        onConfigureWebSearch={() => setWebSearchSettingsOpen(true)}
         onOpenAccount={() => setAccountOpen(true)}
         onLogout={() => void logout()}
       />
@@ -370,17 +402,30 @@ export default function App() {
                 </button>
               </HoverHelp>
               {user.role === "admin" && (
-                <HoverHelp
-                  title="Skills"
-                  description="Inspect discovered Skills and manage candidate promotion or rollback. This administrative workspace changes reusable Agent capabilities."
-                >
-                  <button
-                    className={mode === "skills" ? "active" : ""}
-                    onClick={() => setMode("skills")}
+                <>
+                  <HoverHelp
+                    title="Skills"
+                    description="Inspect discovered Skills and manage candidate promotion or rollback. This administrative workspace changes reusable Agent capabilities."
                   >
-                    <Layers3 size={16} /> Skills
-                  </button>
-                </HoverHelp>
+                    <button
+                      className={mode === "skills" ? "active" : ""}
+                      onClick={() => setMode("skills")}
+                    >
+                      <Layers3 size={16} /> Skills
+                    </button>
+                  </HoverHelp>
+                  <HoverHelp
+                    title="Code Workspace"
+                    description="Inspect a local Git repository and ask the current model for exact edits. No file changes until you review and explicitly approve the diff."
+                  >
+                    <button
+                      className={mode === "code" ? "active" : ""}
+                      onClick={() => setMode("code")}
+                    >
+                      <Code2 size={16} /> Code
+                    </button>
+                  </HoverHelp>
+                </>
               )}
             </div>
 
@@ -455,12 +500,19 @@ export default function App() {
                   </HoverHelp>
                   <HoverHelp
                     title="Web search"
-                    description="Allow Tavily to discover current internet sources, including titles, summaries, and links. Use this when the answer may depend on recent or external information."
+                    description={
+                      webSearchSettings?.configured
+                        ? "Allow Tavily to discover current internet sources, including titles, summaries, and links. Use this when the answer may depend on recent or external information."
+                        : user.role === "admin"
+                          ? "Tavily is not configured. Open Web search settings in the sidebar to add an API key."
+                          : "Web search is unavailable until the host administrator configures Tavily."
+                    }
                   >
                     <label>
                       <input
                         type="checkbox"
                         checked={webSearch}
+                        disabled={!webSearchSettings?.configured}
                         onChange={(event) => setWebSearch(event.target.checked)}
                       />
                       <Search size={15} /> Web
@@ -576,6 +628,25 @@ export default function App() {
           )}
         </header>
 
+        {webSearchSettings && !webSearchSettings.configured && user.role === "admin" && (
+          <div className="setup-banner">
+            <KeyRound size={18} />
+            <div>
+              <strong>Set up web search</strong>
+              <span>
+                Add your own Tavily API key to enable the Web capability for this host.
+              </span>
+            </div>
+            <button
+              className="secondary-button"
+              type="button"
+              onClick={() => setWebSearchSettingsOpen(true)}
+            >
+              Configure
+            </button>
+          </div>
+        )}
+
         {error && (
           <div className="error-banner global-error">
             <span>{error}</span>
@@ -609,11 +680,16 @@ export default function App() {
               conversationId={activeId}
               minSourceRelevance={minSourceRelevance}
               canUseLocalFolder={user.role === "admin"}
+              responseDetail={responseDetail}
             />
           </Suspense>
-        ) : (
+        ) : mode === "skills" ? (
           <Suspense fallback={<div className="workspace-loading">Loading Skills...</div>}>
             <SkillWorkspace />
+          </Suspense>
+        ) : (
+          <Suspense fallback={<div className="workspace-loading">Loading code workspace...</div>}>
+            <CodeWorkspace />
           </Suspense>
         )}
       </main>
@@ -624,6 +700,19 @@ export default function App() {
             health={health}
             onClose={() => setModelSettingsOpen(false)}
             onSaved={setHealth}
+          />
+        </Suspense>
+      )}
+      {webSearchSettingsOpen && webSearchSettings?.can_manage && (
+        <Suspense fallback={null}>
+          <WebSearchSettingsDialog
+            open
+            settings={webSearchSettings}
+            onClose={() => setWebSearchSettingsOpen(false)}
+            onChanged={(settings) => {
+              setWebSearchSettings(settings);
+              if (!settings.configured) setWebSearch(false);
+            }}
           />
         </Suspense>
       )}

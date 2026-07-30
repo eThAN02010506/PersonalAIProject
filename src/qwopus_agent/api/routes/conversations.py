@@ -19,6 +19,7 @@ from qwopus_agent.api.models import (
 )
 from qwopus_agent.api.repository import ConversationRecord, ConversationRepository
 from qwopus_agent.api.runs import ChatRunRegistry
+from qwopus_agent.integrations.tavily_credentials import TavilyCredentialStore
 from qwopus_agent.memory import ConversationKnowledgeManager
 
 
@@ -27,10 +28,17 @@ def build_conversation_router(
     runs: ChatRunRegistry,
     runtime: RuntimeModelController,
     knowledge: ConversationKnowledgeManager,
+    web_search_credentials: TavilyCredentialStore,
 ) -> APIRouter:
     """Build routes around one injected conversation repository and run registry."""
     router = APIRouter()
-    endpoints = _ConversationEndpoints(repository, runs, runtime, knowledge)
+    endpoints = _ConversationEndpoints(
+        repository,
+        runs,
+        runtime,
+        knowledge,
+        web_search_credentials,
+    )
     router.add_api_route(
         "/api/conversations",
         endpoints.conversations,
@@ -111,11 +119,13 @@ class _ConversationEndpoints:
         runs: ChatRunRegistry,
         runtime: RuntimeModelController,
         knowledge: ConversationKnowledgeManager,
+        web_search_credentials: TavilyCredentialStore,
     ) -> None:
         self.repository = repository
         self.runs = runs
         self.runtime = runtime
         self.knowledge = knowledge
+        self.web_search_credentials = web_search_credentials
 
     def conversations(self, request: Request) -> list[ConversationView]:
         user = current_user(request)
@@ -229,6 +239,13 @@ class _ConversationEndpoints:
     ) -> RunStarted:
         user = current_user(request)
         conversation = self._accessible_conversation(conversation_id, user.id)
+        if payload.enable_web_search and not self.web_search_credentials.status().configured:
+            # 原因：未配置 Key 时启动 worker 只会在 Tool 阶段晚失败，用户无法知道如何修复。
+            # 作用：在消耗模型资源前返回明确错误，前端也可保持 Web 开关禁用。
+            raise HTTPException(
+                status_code=409,
+                detail="Web search is unavailable until an administrator configures Tavily.",
+            )
         if conversation.is_owner and conversation.title in {"New chat", "新对话"}:
             self.repository.rename_conversation(
                 conversation_id,

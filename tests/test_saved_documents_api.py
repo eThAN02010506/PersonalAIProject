@@ -17,6 +17,7 @@ from qwopus_agent.documents import (
 from qwopus_agent.integrations.smolagents_runtime import SmolagentsModelSettings
 from qwopus_agent.memory import ConversationKnowledgeManager
 from qwopus_agent.services.orchestration_models import OrchestrationResult
+from qwopus_agent.utils.debug_store import load_debug_records
 from tests.minirag_fakes import make_test_minirag
 
 
@@ -69,6 +70,7 @@ class SavedDocumentApiTests(unittest.TestCase):
             import_legacy=False,
         )
         self.document_store = DocumentStore(root / "documents")
+        self.debug_directory = root / "debug"
         self.knowledge = ConversationKnowledgeManager(
             root=root / "knowledge",
             factory=make_test_minirag,
@@ -84,7 +86,7 @@ class SavedDocumentApiTests(unittest.TestCase):
                 self.repository,
                 knowledge_manager=self.knowledge,
                 model_runtime=self.runtime,
-                debug_directory=root / "debug",
+                debug_directory=self.debug_directory,
                 runtime_log_path=root / "runtime.log",
                 document_store=self.document_store,
             )
@@ -251,6 +253,208 @@ class SavedDocumentApiTests(unittest.TestCase):
             ],
         )
         self.assertTrue(all(file.content is None for file in request.uploaded_files))
+
+    def test_question_analysis_rejects_empty_input_without_starting_work(self) -> None:
+        saved = self._save("lesson-26.md", "evidence")
+        conversation_id = self._conversation()
+
+        with (
+            patch("qwopus_agent.api.routes.documents.AgentOrchestrator") as orchestrator,
+            patch.object(
+                DocumentStore,
+                "load_document",
+            ) as load_document,
+        ):
+            response = self.client.post(
+                "/api/documents/analyze",
+                json={
+                    "conversation_id": conversation_id,
+                    "document_ids": [saved.document_id],
+                    "question": "",
+                    "analysis_mode": "question",
+                },
+            )
+
+        self.assertEqual(response.status_code, 422)
+        self.assertEqual(
+            response.json()["detail"],
+            "Enter a question for question-based analysis.",
+        )
+        orchestrator.assert_not_called()
+        load_document.assert_not_called()
+        self.assertEqual(load_debug_records(directory=self.debug_directory), [])
+
+    def test_question_analysis_rejects_whitespace_input(self) -> None:
+        saved = self._save("lesson-27.md", "evidence")
+        conversation_id = self._conversation()
+
+        with patch(
+            "qwopus_agent.api.routes.documents.AgentOrchestrator"
+        ) as orchestrator:
+            response = self.client.post(
+                "/api/documents/analyze",
+                json={
+                    "conversation_id": conversation_id,
+                    "document_ids": [saved.document_id],
+                    "question": "   ",
+                    "analysis_mode": "question",
+                },
+            )
+
+        self.assertEqual(response.status_code, 422)
+        orchestrator.assert_not_called()
+
+    def test_question_analysis_trims_valid_objective(self) -> None:
+        saved = self._save("lesson-28.md", "evidence")
+        conversation_id = self._conversation()
+        orchestrator = self._successful_orchestrator(saved)
+
+        with patch(
+            "qwopus_agent.api.routes.documents.AgentOrchestrator",
+            return_value=orchestrator,
+        ):
+            response = self.client.post(
+                "/api/documents/analyze",
+                json={
+                    "conversation_id": conversation_id,
+                    "document_ids": [saved.document_id],
+                    "question": "  Compare the evidence.  ",
+                    "analysis_mode": "question",
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        request = orchestrator.run_sync.call_args.args[0]
+        self.assertEqual(request.objective, "Compare the evidence.")
+
+    def test_full_analysis_uses_stable_objective_when_question_is_empty(self) -> None:
+        saved = self._save("lesson-29.md", "evidence")
+        conversation_id = self._conversation()
+        orchestrator = self._successful_orchestrator(saved)
+
+        with patch(
+            "qwopus_agent.api.routes.documents.AgentOrchestrator",
+            return_value=orchestrator,
+        ):
+            response = self.client.post(
+                "/api/documents/analyze",
+                json={
+                    "conversation_id": conversation_id,
+                    "document_ids": [saved.document_id],
+                    "question": "",
+                    "analysis_mode": "full",
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        request = orchestrator.run_sync.call_args.args[0]
+        self.assertEqual(
+            request.objective,
+            "Analyze and summarize every selected document, including its central "
+            "arguments, evidence, relationships, and limitations.",
+        )
+
+    def test_section_analysis_requires_a_selected_section(self) -> None:
+        saved = self._save("lesson-30.md", "evidence")
+        conversation_id = self._conversation()
+
+        with patch(
+            "qwopus_agent.api.routes.documents.AgentOrchestrator"
+        ) as orchestrator:
+            response = self.client.post(
+                "/api/documents/analyze",
+                json={
+                    "conversation_id": conversation_id,
+                    "document_ids": [saved.document_id],
+                    "question": "",
+                    "analysis_mode": "section",
+                    "selected_sections": {},
+                },
+            )
+
+        self.assertEqual(response.status_code, 422)
+        self.assertEqual(
+            response.json()["detail"],
+            "Select at least one document section for section analysis.",
+        )
+        orchestrator.assert_not_called()
+
+    def test_section_analysis_uses_stable_objective_for_valid_scope(self) -> None:
+        saved = self._save("lesson-31.md", "evidence")
+        conversation_id = self._conversation()
+        orchestrator = self._successful_orchestrator(saved)
+        section_id = saved.sections[0].id
+
+        with patch(
+            "qwopus_agent.api.routes.documents.AgentOrchestrator",
+            return_value=orchestrator,
+        ):
+            response = self.client.post(
+                "/api/documents/analyze",
+                json={
+                    "conversation_id": conversation_id,
+                    "document_ids": [saved.document_id],
+                    "question": "",
+                    "analysis_mode": "section",
+                    "selected_sections": {
+                        saved.document_id: [section_id],
+                    },
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        request = orchestrator.run_sync.call_args.args[0]
+        self.assertEqual(
+            request.objective,
+            "Analyze and summarize the selected document sections, including their "
+            "central arguments, evidence, relationships, and limitations.",
+        )
+        self.assertEqual(
+            request.selected_sections[saved.document_id],
+            (section_id,),
+        )
+
+    def test_section_analysis_rejects_scope_from_another_document(self) -> None:
+        saved = self._save("lesson-32.md", "evidence")
+        other = self._save("lesson-33.md", "other evidence")
+        conversation_id = self._conversation()
+
+        with patch(
+            "qwopus_agent.api.routes.documents.AgentOrchestrator"
+        ) as orchestrator:
+            response = self.client.post(
+                "/api/documents/analyze",
+                json={
+                    "conversation_id": conversation_id,
+                    "document_ids": [saved.document_id],
+                    "question": "",
+                    "analysis_mode": "section",
+                    "selected_sections": {
+                        other.document_id: [other.sections[0].id],
+                    },
+                },
+            )
+
+        self.assertEqual(response.status_code, 422)
+        self.assertEqual(
+            response.json()["detail"],
+            "Selected sections must belong to the selected saved documents.",
+        )
+        orchestrator.assert_not_called()
+
+    def _successful_orchestrator(self, structure):
+        orchestrator = MagicMock()
+        orchestrator.run_sync.return_value = OrchestrationResult(
+            success=True,
+            final_answer="Analysis completed.",
+            route="single_agent",
+            analysis_result=AnalysisResult(
+                markdown_summary="# Summary",
+                markdown_document="# Combined",
+                document_structures=(structure,),
+            ),
+        )
+        return orchestrator
 
 
 if __name__ == "__main__":

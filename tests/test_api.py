@@ -1,7 +1,8 @@
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -11,8 +12,11 @@ from qwopus_agent.api.app import SPAStaticFiles, create_app
 from qwopus_agent.api.model_runtime import ModelRuntimeError, RuntimeModelStatus
 from qwopus_agent.api.repository import ConversationRepository
 from qwopus_agent.api.routes.analysis import analysis_view
+from qwopus_agent.code_workspace.models import CodeWorkspaceAgentRun
+from qwopus_agent.code_workspace.repository import CodeChangeRepository
 from qwopus_agent.documents import DocumentStore, build_document_structure, chunk_document_structure
 from qwopus_agent.integrations.smolagents_runtime import AgentDebugRun, SmolagentsModelSettings
+from qwopus_agent.integrations.tavily_credentials import TavilyCredentialStore
 from qwopus_agent.llm import BaseLLM, ChatMessage, LLMResponse, ModelCapabilities
 from qwopus_agent.memory import ConversationKnowledgeManager
 from qwopus_agent.memory.graph_extraction import (
@@ -20,6 +24,7 @@ from qwopus_agent.memory.graph_extraction import (
     LLMGraphExtractor,
     RuleBasedGraphExtractor,
 )
+from qwopus_agent.services.code_workspace_service import CodeWorkspaceService
 from qwopus_agent.services.orchestration_models import OrchestrationResult
 from qwopus_agent.services.skill_growth_service import SkillRunTrace, SkillTraceStep
 from qwopus_agent.utils.debug_store import load_debug_records
@@ -71,6 +76,27 @@ class ApiConversationSkillLLM(BaseLLM):
         return LLMResponse(content=content, model="conversation-authoring-model")
 
 
+class ApiCodeProposalLLM(BaseLLM):
+    """Return a deterministic source replacement without contacting a server."""
+
+    def generate(
+        self,
+        messages: list[ChatMessage],
+        *,
+        temperature: float = 0.2,
+        max_tokens: int | None = None,
+    ) -> LLMResponse:
+        return LLMResponse(
+            content=(
+                '{"summary":"Clarify value","reason":"The new value is explicit.",'
+                '"verification_plan":["Run git diff check"],'
+                '"changes":[{"path":"sample.py","replacements":['
+                '{"old_text":"VALUE = 1","new_text":"VALUE = 2"}]}]}'
+            ),
+            model="api-code-model",
+        )
+
+
 class ApiTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_directory = tempfile.TemporaryDirectory()
@@ -79,6 +105,32 @@ class ApiTests(unittest.TestCase):
         self.runtime_log_path = Path(self.temp_directory.name) / "qwopus_agent.log"
         self.knowledge_root = Path(self.temp_directory.name) / "minirag"
         self.document_directory = Path(self.temp_directory.name) / "documents"
+        self.code_root = Path(self.temp_directory.name) / "code-repository"
+        self.code_root.mkdir()
+        subprocess.run(["git", "init", "-q", str(self.code_root)], check=True)
+        (self.code_root / "sample.py").write_text("VALUE = 1\n", encoding="utf-8")
+        self.code_workspace_service = CodeWorkspaceService(
+            CodeChangeRepository(Path(self.temp_directory.name) / "code_changes"),
+            llm_factory=ApiCodeProposalLLM,
+            code_chat_runner=lambda _root, _transcript, _paths, _selected: (
+                CodeWorkspaceAgentRun(
+                    content=(
+                        '{"mode":"ready","message":"I inspected sample.py and found the '
+                        'current configuration value. It can be clarified without changing '
+                        'the module structure and verified through the existing diff check.",'
+                        '"objective":"Change the sample value while preserving module structure.",'
+                        '"selected_files":["sample.py"]}'
+                    ),
+                    inspected_files=["sample.py"],
+                    tool_calls=["code_search", "code_read"],
+                    state="success",
+                )
+            ),
+        )
+        self.tavily_credentials = TavilyCredentialStore(
+            path=Path(self.temp_directory.name) / "secrets" / "tavily.key",
+            legacy_env_path=Path(self.temp_directory.name) / "missing.env",
+        )
         # 原因：API 测试必须验证 SQLite 持久化，但不能读取或修改用户现有对话。
         # 作用：每个测试使用独立数据库，并关闭旧 JSONL 自动导入。
         self.repository = ConversationRepository(database_path, import_legacy=False)
@@ -112,6 +164,8 @@ class ApiTests(unittest.TestCase):
                 debug_directory=self.debug_directory,
                 runtime_log_path=self.runtime_log_path,
                 document_store=DocumentStore(self.document_directory),
+                tavily_credentials=self.tavily_credentials,
+                code_workspace_service=self.code_workspace_service,
             )
         )
         self.client = self.client_context.__enter__()
@@ -125,6 +179,155 @@ class ApiTests(unittest.TestCase):
         )
         self.assertEqual(initialized.status_code, 201)
         self.user_id = initialized.json()["user"]["id"]
+
+    def test_code_workspace_requires_proposal_approval_and_supports_rollback(self) -> None:
+        scanned = self.client.post(
+            "/api/code-workspaces/scan",
+            json={"path": str(self.code_root)},
+        )
+        proposed = self.client.post(
+            "/api/code-changes/propose",
+            json={
+                "root": str(self.code_root),
+                "objective": "Change the sample value.",
+                "selected_files": ["sample.py"],
+            },
+        )
+
+        self.assertEqual(scanned.status_code, 200)
+        self.assertEqual(scanned.json()["file_count"], 1)
+        self.assertEqual(proposed.status_code, 200)
+        self.assertEqual(proposed.json()["status"], "proposed")
+        self.assertEqual(
+            (self.code_root / "sample.py").read_text(encoding="utf-8"),
+            "VALUE = 1\n",
+        )
+
+        change_id = proposed.json()["id"]
+        applied = self.client.post(f"/api/code-changes/{change_id}/apply")
+        rolled_back = self.client.post(f"/api/code-changes/{change_id}/rollback")
+
+        self.assertEqual(applied.json()["status"], "applied")
+        self.assertEqual(rolled_back.json()["status"], "rolled_back")
+        self.assertEqual(
+            (self.code_root / "sample.py").read_text(encoding="utf-8"),
+            "VALUE = 1\n",
+        )
+        records = load_debug_records(directory=self.debug_directory)
+        self.assertTrue(any(record["source"] == "code_workspace" for record in records))
+
+    def test_code_workspace_chat_prepares_grounded_change_without_writing(self) -> None:
+        discussed = self.client.post(
+            "/api/code-workspaces/chat",
+            json={
+                "root": str(self.code_root),
+                "message": "Make this configuration value clearer.",
+                "history": [],
+                "selected_files": [],
+            },
+        )
+
+        self.assertEqual(discussed.status_code, 200)
+        self.assertEqual(discussed.json()["mode"], "ready")
+        self.assertEqual(discussed.json()["selected_files"], ["sample.py"])
+        self.assertEqual(
+            (self.code_root / "sample.py").read_text(encoding="utf-8"),
+            "VALUE = 1\n",
+        )
+
+    def test_admin_can_manage_and_test_tavily_without_key_disclosure(self) -> None:
+        api_key = "tvly-test-admin-secret-123456"
+        with (
+            patch.dict("os.environ", {"TAVILY_API_KEY": ""}),
+            patch(
+                "qwopus_agent.api.routes.web_search_settings._test_connection",
+                return_value={
+                    "success": True,
+                    "message": "Tavily search is ready.",
+                },
+            ),
+        ):
+            initial = self.client.get("/api/web-search-settings")
+            saved = self.client.put(
+                "/api/web-search-settings",
+                json={"api_key": api_key},
+            )
+            tested = self.client.post(
+                "/api/web-search-settings/test",
+                json={},
+            )
+            deleted = self.client.delete("/api/web-search-settings")
+
+        self.assertFalse(initial.json()["configured"])
+        self.assertTrue(saved.json()["configured"])
+        self.assertEqual(saved.json()["source"], "managed")
+        self.assertNotIn(api_key, saved.text)
+        self.assertTrue(tested.json()["success"])
+        self.assertFalse(deleted.json()["configured"])
+        self.assertFalse(self.tavily_credentials.path.exists())
+
+    def test_web_run_is_rejected_before_model_use_when_tavily_is_missing(self) -> None:
+        conversation = self.client.post(
+            "/api/conversations",
+            json={"title": "Web test"},
+        ).json()
+        self.model_runtime.require_online_settings.reset_mock()
+
+        with patch.dict("os.environ", {"TAVILY_API_KEY": ""}):
+            response = self.client.post(
+                f"/api/conversations/{conversation['id']}/runs",
+                json={"content": "Search current information", "enable_web_search": True},
+            )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("administrator configures Tavily", response.json()["detail"])
+        self.model_runtime.require_online_settings.assert_not_called()
+
+    def test_member_can_see_availability_but_cannot_manage_tavily(self) -> None:
+        api_key = "tvly-test-member-hidden-123456"
+        self.tavily_credentials.save(api_key)
+        created = self.client.post(
+            "/api/users",
+            json={
+                "username": "member",
+                "display_name": "Member",
+                "password": "member-password-123",
+                "role": "member",
+            },
+        )
+        self.assertEqual(created.status_code, 201)
+        self.client.post("/api/auth/logout")
+        logged_in = self.client.post(
+            "/api/auth/login",
+            json={
+                "username": "member",
+                "password": "member-password-123",
+            },
+        )
+        self.assertEqual(logged_in.status_code, 200)
+
+        status = self.client.get("/api/web-search-settings")
+        self.assertEqual(status.status_code, 200)
+        self.assertTrue(status.json()["configured"])
+        self.assertFalse(status.json()["can_manage"])
+        self.assertIsNone(status.json()["source"])
+        self.assertIsNone(status.json()["masked_key"])
+        self.assertNotIn(api_key, status.text)
+        self.assertEqual(
+            self.client.put(
+                "/api/web-search-settings",
+                json={"api_key": "tvly-member-replacement-123456"},
+            ).status_code,
+            403,
+        )
+        self.assertEqual(
+            self.client.post("/api/web-search-settings/test", json={}).status_code,
+            403,
+        )
+        self.assertEqual(
+            self.client.delete("/api/web-search-settings").status_code,
+            403,
+        )
 
     def tearDown(self) -> None:
         self.client_context.__exit__(None, None, None)
@@ -475,6 +678,64 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(response.json()[0]["section_count"], 2)
         self.assertTrue(response.json()[0]["summary_available"])
 
+    def test_chat_receives_attached_spreadsheet_only_with_local_knowledge(self) -> None:
+        conversation_id = self.client.post(
+            "/api/conversations",
+            json={"title": "Spreadsheet chat"},
+        ).json()["id"]
+        original = Path(self.temp_directory.name) / "sales.xlsx"
+        original.write_bytes(b"test workbook placeholder")
+        structure = chunk_document_structure(
+            build_document_structure(
+                "# Sales workbook\nRevenue and region columns.",
+                source=original.name,
+            )
+        )
+        store = DocumentStore(self.document_directory)
+        store.persist(
+            original_path=original,
+            markdown="# Sales workbook\nRevenue and region columns.",
+            structure=structure,
+            metadata={"parser": "spreadsheet"},
+        )
+        self.repository.register_document(
+            structure.document_id,
+            owner_user_id=self.user_id,
+            conversation_id=conversation_id,
+        )
+
+        with patch("qwopus_agent.api.runs.start_chat_task") as start_task:
+            start_task.return_value.refresh_phase.return_value = "executing"
+            start_task.return_value.poll_result.return_value = None
+            enabled = self.client.post(
+                f"/api/conversations/{conversation_id}/runs",
+                json={
+                    "content": "Calculate average revenue and show details in a table.",
+                    "enable_local_knowledge": True,
+                },
+            )
+            enabled_files = start_task.call_args.kwargs["uploaded_files"]
+            disabled = self.client.post(
+                f"/api/conversations/{conversation_id}/runs",
+                json={
+                    "content": "Explain how averages are calculated.",
+                    "enable_local_knowledge": False,
+                },
+            )
+            disabled_files = start_task.call_args.kwargs["uploaded_files"]
+
+        # 原因：MiniRAG 中的摘要不能支持聊天时才提出的任意表格计算。
+        # 作用：开启知识权限时交给本地 Excel Tool 原文件，关闭时则不泄露附件路径。
+        self.assertEqual(enabled.status_code, 200)
+        self.assertEqual(disabled.status_code, 200)
+        self.assertEqual(len(enabled_files), 1)
+        self.assertEqual(enabled_files[0].name, "sales.xlsx")
+        self.assertEqual(
+            enabled_files[0].local_path,
+            store.load_original_path(structure.document_id),
+        )
+        self.assertEqual(disabled_files, ())
+
     def test_debug_overview_exposes_complete_local_diagnostics(self) -> None:
         self.runtime_log_path.write_text(
             "line one\nline two\nline three\n",
@@ -530,6 +791,35 @@ class ApiTests(unittest.TestCase):
         # 作用：在创建 OrchestrationRequest 前拒绝形状错误的 multipart 字段。
         self.assertEqual(response.status_code, 422)
         self.assertEqual(response.json()["detail"], "Invalid selected sections.")
+
+    def test_upload_question_analysis_rejects_blank_before_reading_files(self) -> None:
+        conversation_id = self.client.post(
+            "/api/conversations",
+            json={"title": "Documents"},
+        ).json()["id"]
+
+        with (
+            patch(
+                "qwopus_agent.api.routes.analysis._read_uploads",
+                new_callable=AsyncMock,
+            ) as read_uploads,
+            patch(
+                "qwopus_agent.api.routes.analysis.AgentOrchestrator"
+            ) as orchestrator,
+        ):
+            response = self.client.post(
+                "/api/analysis",
+                files={"files": ("sample.txt", b"content", "text/plain")},
+                data={
+                    "conversation_id": conversation_id,
+                    "question": "   ",
+                    "analysis_mode": "question",
+                },
+            )
+
+        self.assertEqual(response.status_code, 422)
+        read_uploads.assert_not_awaited()
+        orchestrator.assert_not_called()
 
     def test_model_settings_switches_remote_endpoint_without_env_changes(self) -> None:
         response = self.client.put(
@@ -701,7 +991,7 @@ class ApiTests(unittest.TestCase):
         response = self.client.post(
             "/api/analysis",
             files={"files": ("archive.zip", b"not a document", "application/zip")},
-            data={"conversation_id": conversation_id},
+            data={"conversation_id": conversation_id, "question": "Summarize"},
         )
 
         self.assertEqual(response.status_code, 415)
@@ -761,6 +1051,37 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(request.uploaded_files[0].name, "selected.md")
         self.assertEqual(request.uploaded_files[0].local_path, selected.resolve())
         self.assertIsNone(request.uploaded_files[0].content)
+
+    def test_local_folder_question_analysis_rejects_blank_before_file_access(
+        self,
+    ) -> None:
+        conversation_id = self.client.post(
+            "/api/conversations",
+            json={"title": "Local documents"},
+        ).json()["id"]
+
+        with (
+            patch(
+                "qwopus_agent.api.routes.local_folders.resolve_selected_files"
+            ) as resolve_files,
+            patch(
+                "qwopus_agent.api.routes.local_folders.AgentOrchestrator"
+            ) as orchestrator,
+        ):
+            response = self.client.post(
+                "/api/local-folders/analyze",
+                json={
+                    "conversation_id": conversation_id,
+                    "root": "/missing",
+                    "selected_files": ["missing.md"],
+                    "question": "",
+                    "analysis_mode": "question",
+                },
+            )
+
+        self.assertEqual(response.status_code, 422)
+        resolve_files.assert_not_called()
+        orchestrator.assert_not_called()
 
     def test_chat_rejects_global_knowledge_without_local_permission(self) -> None:
         conversation_id = self.client.post(

@@ -155,6 +155,33 @@ class WorkbookProfileTests(unittest.TestCase):
         self.assertEqual(sheet_profile.kind, "table")
         self.assertEqual(sheet_profile.primary_region().header_rows, (1, 2))
 
+    def test_fragmented_report_preserves_complete_sheet_as_primary_frame(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            path = Path(temporary_directory) / "fragmented_report.xlsx"
+            workbook = Workbook()
+            sheet = workbook.active
+            sheet.title = "Report"
+            for index in range(30):
+                row = index * 3 + 1
+                sheet.cell(row, 1, f"Item {index}")
+                sheet.cell(row, 3, index * 10)
+                sheet.cell(row + 1, 1, f"Detail {index}")
+                sheet.cell(row + 1, 3, index * 10 + 1)
+            workbook.save(path)
+
+            result = read_spreadsheet(path)
+
+        # 原因：格式化报表的空白分隔行会产生许多小区域，最大区域并不代表整张表。
+        # 作用：主帧保留全部项目，Agent 可查询任意行；少量区域帧只用于辅助识别局部结构。
+        primary = result.sheets["Report"]
+        self.assertEqual(result.metadata["Report"]["primary_strategy"], "full_sheet_fallback")
+        self.assertTrue(primary.astype(str).eq("Item 29").any().any())
+        self.assertTrue(primary.eq(290).any().any())
+        self.assertLessEqual(
+            len(result.analysis_frames()),
+            1 + 4,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

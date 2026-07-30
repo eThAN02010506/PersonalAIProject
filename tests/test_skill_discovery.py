@@ -11,6 +11,11 @@ class SkillDiscoveryTests(unittest.TestCase):
             registry.list_names(),
             [
                 "browser",
+                "code_patch",
+                "code_read",
+                "code_search",
+                "code_test",
+                "code_tree",
                 "document_parser",
                 "excel_analysis",
                 "excel_schema",

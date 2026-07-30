@@ -7,7 +7,10 @@ from pathlib import Path
 from typing import Any
 
 from qwopus_agent.analysis.excel_processing import read_spreadsheet
-from qwopus_agent.analysis.pandas_sandbox import execute_pandas_code
+from qwopus_agent.analysis.pandas_sandbox import (
+    PANDAS_SANDBOX_CODE_GUIDANCE,
+    execute_pandas_code,
+)
 from qwopus_agent.utils.token_budget import (
     TokenBudgetManager,
     estimate_tokens,
@@ -77,9 +80,10 @@ def build_excel_analysis_tool(spreadsheets: Mapping[str, str | Path]) -> Any:
         name = "excel_analysis"
         description = (
             "Execute restricted pandas code against an uploaded spreadsheet locally. "
-            "Call excel_schema first. The code may use only dfs and pd and must "
-            "assign its final value "
-            f"to result. Available files: {available_files}."
+            f"Call excel_schema first. {PANDAS_SANDBOX_CODE_GUIDANCE} "
+            "Prefer a DataFrame with explicit metric "
+            "and group labels so the bounded output is a verifiable Markdown table. "
+            f"Available files: {available_files}."
         )
         inputs = {
             "file_name": {
@@ -88,7 +92,7 @@ def build_excel_analysis_tool(spreadsheets: Mapping[str, str | Path]) -> Any:
             },
             "code": {
                 "type": "string",
-                "description": "Restricted pandas code that assigns the computed answer to result.",
+                "description": PANDAS_SANDBOX_CODE_GUIDANCE,
             },
         }
         output_type = "string"
@@ -100,7 +104,12 @@ def build_excel_analysis_tool(spreadsheets: Mapping[str, str | Path]) -> Any:
             spreadsheet = read_spreadsheet(path)
             # 原因：模型负责提出分析代码，但不能直接运行任意 Python 或读取本机文件。
             # 作用：在 AST 受限沙箱内针对所有检测到的表区域执行，只把计算结果返回 Agent。
-            execution = execute_pandas_code(code, spreadsheet.analysis_frames())
+            try:
+                execution = execute_pandas_code(code, spreadsheet.analysis_frames())
+            except ValueError as exc:
+                # 原因：只返回 AST 错误时，弱模型会原样重复同一段普通 pandas 脚本。
+                # 作用：把可模仿的安全合同放入 Tool error，下一步可自行修正而不放宽沙箱。
+                raise ValueError(f"{exc}\n{PANDAS_SANDBOX_CODE_GUIDANCE}") from exc
             return str(execution.markdown)
 
     return ExcelAnalysisTool()

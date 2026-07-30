@@ -44,6 +44,32 @@ class PandasSandboxTests(unittest.TestCase):
 
         self.assertEqual(result.value, 3)
 
+    def test_coerces_mixed_report_columns_before_calculating_mean(self) -> None:
+        dataframes = {
+            "Report": pd.DataFrame(
+                {
+                    "label": ["Heading", "Item"],
+                    "first": ["Year one", "1.0"],
+                    "second": ["Year two", "3.0"],
+                }
+            )
+        }
+
+        result = execute_pandas_code(
+            (
+                'df = dfs["Report"]\n'
+                'values = df[["first", "second"]].apply('
+                'pd.to_numeric, errors="coerce")\n'
+                'result = values.mean(axis=1).dropna().reset_index(name="mean")'
+            ),
+            dataframes,
+        )
+
+        # 原因：复杂 Excel 的标题文字会让数值列成为 object，直接 mean 会遗漏真实数据。
+        # 作用：锁定 Agent 可在受限沙箱内安全转换列，并以表格返回计算后的平均值。
+        self.assertEqual(result.value[0]["mean"], 2.0)
+        self.assertIn("| mean |", result.markdown)
+
     def test_rejects_imports(self) -> None:
         with self.assertRaisesRegex(ValueError, "Unsupported sandbox syntax"):
             execute_pandas_code("import os\nresult = 1", {"Sheet1": pd.DataFrame()})

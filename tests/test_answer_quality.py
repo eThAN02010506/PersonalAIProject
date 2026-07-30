@@ -61,11 +61,35 @@ class AnswerQualityEvaluatorTests(unittest.TestCase):
             "## 权衡与结论\n\n若当前阶段优先验证业务闭环，方案 A 的风险更低；"
             "若已确认需要长任务恢复和并行执行，则方案 B 的额外复杂度是合理的。"
             "最终应以真实并发量、失败恢复目标和团队维护能力作为选择标准。"
+            "具体做法是先用同一批任务测量两种方案的完成时间、失败类型和恢复结果，"
+            "再检查维护者是否能从日志定位每一步状态。若两者效果接近，应选择方案 A，"
+            "因为它减少状态迁移和运行依赖；只有方案 A 无法满足已验证的恢复或并发目标时，"
+            "才应承担方案 B 的持久化、调度和一致性成本。"
         )
 
         report = self.evaluator.evaluate(answer, intent)
 
         self.assertTrue(report.passed, report.issues)
+
+    def test_detailed_rejects_structured_but_summary_like_answer(self) -> None:
+        intent = self.resolver.resolve(
+            "请详细分析这个架构的优点、风险和限制",
+            response_detail="detailed",
+        )
+        answer = (
+            "## 结论\n\n架构总体可行。\n\n"
+            "## 优点\n\n因为模块分离，所以更容易维护。\n\n"
+            "## 风险\n\n例如模型连接可能失败，需要重试。\n\n"
+            "## 限制\n\n当前仍有扩展空间。"
+        )
+
+        report = self.evaluator.evaluate(answer, intent)
+
+        # 原因：标题数量不代表内容被展开，弱模型常用这种形式冒充 Detailed。
+        # 作用：锁定概述式答案必须进入一次针对性的细化轮。
+        self.assertFalse(report.passed)
+        self.assertIn("insufficient_depth", report.issues)
+        self.assertGreaterEqual(report.target_tokens, 300)
 
     def test_detailed_analysis_rejects_disconnected_bullet_stack(self) -> None:
         intent = self.resolver.resolve(

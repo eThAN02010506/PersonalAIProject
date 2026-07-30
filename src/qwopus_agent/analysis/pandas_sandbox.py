@@ -14,6 +14,7 @@ from typing import Any
 
 import pandas as pd
 
+from qwopus_agent.analysis.markdown_tables import dataframe_to_markdown
 from qwopus_agent.utils.token_budget import estimate_tokens, truncate_to_tokens
 
 
@@ -24,6 +25,22 @@ class SandboxExecutionResult:
     value: Any
 
     markdown: str
+
+
+# 原因：弱模型常按普通 pandas 脚本习惯重复读文件、导入模块或修改原 DataFrame。
+# 作用：向 Prompt、Tool 描述和失败反馈提供同一份可执行合同，避免安全规则在多处漂移。
+PANDAS_SANDBOX_CODE_GUIDANCE = (
+    "Sandbox code contract: the workbook is already loaded in dfs; start with "
+    'df = dfs["exact sheet or table name"]. Do not import, read files, call '
+    "pd.read_excel, use loops/lambdas/comprehensions, mutate df[...] columns, or "
+    "call output methods such as to_markdown. Assign only simple approved variables: "
+    "data, df, grouped, mask, result, rows, series, summary, table, value, values. "
+    "Always assign the final scalar, Series, or DataFrame to result. Safe pattern: "
+    'df = dfs["Table 1"]\\n'
+    'values = df.iloc[:, 1:].apply(pd.to_numeric, errors="coerce")\\n'
+    'result = pd.DataFrame({"label": df.iloc[:, 0], '
+    '"mean": values.mean(axis=1).round(3)})'
+)
 
 
 _ALLOWED_BUILTINS = {
@@ -95,6 +112,9 @@ _ALLOWED_METHOD_CALLS = {
     "aggregate",
     "all",
     "any",
+    # 原因：真实报表列常混有标题和占位符，需要逐列调用白名单转换函数后才能计算。
+    # 作用：允许 apply(pd.to_numeric)，lambda、函数定义和危险调用仍由 AST 规则拒绝。
+    "apply",
     "astype",
     "between",
     "clip",
@@ -494,15 +514,17 @@ def _call_root_name(node: ast.AST) -> str | None:
 def _result_to_markdown(value: Any) -> str:
     """Convert sandbox result into bounded Markdown for LLM/UI context."""
     if isinstance(value, pd.DataFrame):
-        return _dataframe_to_markdown(value.head(20))
+        return dataframe_to_markdown(value.head(20))
     if isinstance(value, pd.Series):
-        return _dataframe_to_markdown(value.head(20).to_frame(name=value.name or "value"))
+        return dataframe_to_markdown(value.head(20).to_frame(name=value.name or "value"))
     if isinstance(value, dict):
         rows = [{"key": key, "value": item} for key, item in value.items()]
-        return _dataframe_to_markdown(pd.DataFrame(rows).head(50))
+        return dataframe_to_markdown(pd.DataFrame(rows).head(50))
     if isinstance(value, (list, tuple, set)):
-        return _dataframe_to_markdown(pd.DataFrame({"value": list(value)}).head(50))
-    return str(value)
+        return dataframe_to_markdown(pd.DataFrame({"value": list(value)}).head(50))
+    # 原因：单个平均值若返回裸数字，模型容易把计算结果改写成无法核对的叙述。
+    # 作用：即使结果是标量也保留统一表格契约，原始 typed value 仍供内部测试使用。
+    return dataframe_to_markdown(pd.DataFrame([{"result": value}]))
 
 
 def _bounded_result_value(value: Any) -> Any:
@@ -518,25 +540,6 @@ def _bounded_result_value(value: Any) -> Any:
     if isinstance(value, set):
         return set(list(value)[:50])
     return value
-
-
-def _dataframe_to_markdown(dataframe: pd.DataFrame) -> str:
-    """Render a small dataframe as Markdown without optional tabulate dependency."""
-    if dataframe.empty:
-        return "_Empty result._"
-    columns = [str(column) for column in dataframe.columns]
-    rows = dataframe.astype(str).values.tolist()
-    # 原因：pandas.to_markdown 需要 tabulate，可选依赖不一定安装。
-    # 作用：用项目内轻量渲染保证沙箱结果在干净环境中也能展示。
-    header = "| " + " | ".join(_escape_markdown_cell(column) for column in columns) + " |"
-    separator = "| " + " | ".join("---" for _ in columns) + " |"
-    body = ["| " + " | ".join(_escape_markdown_cell(value) for value in row) + " |" for row in rows]
-    return "\n".join([header, separator, *body])
-
-
-def _escape_markdown_cell(value: str) -> str:
-    """Escape table cell separators for Markdown output."""
-    return value.replace("|", "\|").replace("\n", " ")
 
 
 def _truncate_markdown(markdown: str) -> str:

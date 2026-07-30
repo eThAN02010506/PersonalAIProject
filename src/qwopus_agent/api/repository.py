@@ -620,6 +620,20 @@ class ConversationRepository:
                 (conversation_id, document_id, attached_by_user_id, _now()),
             )
 
+    def document_ids_for_conversation(self, conversation_id: str) -> tuple[str, ...]:
+        """Return persisted document links for one conversation in stable order."""
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT document_id
+                FROM conversation_documents
+                WHERE conversation_id = ?
+                ORDER BY created_at, document_id
+                """,
+                (conversation_id,),
+            ).fetchall()
+        return tuple(str(row["document_id"]) for row in rows)
+
     def accessible_document_ids(self, user_id: str) -> set[str]:
         with self._connect() as connection:
             rows = connection.execute(

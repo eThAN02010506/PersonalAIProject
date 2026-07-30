@@ -20,6 +20,7 @@ from qwopus_agent.services.chat_service import (
     start_chat_task,
 )
 from qwopus_agent.services.orchestration_models import (
+    OrchestrationFile,
     OrchestrationRequest,
     OrchestrationResult,
     ProcessEvent,
@@ -67,6 +68,7 @@ class ChatServiceTests(unittest.TestCase):
             self.assertEqual(request.min_source_relevance, 0.8)
             self.assertEqual(request.max_evidence_sources, 18)
             self.assertEqual(request.response_detail, "balanced")
+            self.assertEqual(request.uploaded_files[0].name, "sales.xlsx")
             assert progress_callback is not None
             progress_callback("planning")
             progress_callback("completed")
@@ -111,6 +113,12 @@ class ChatServiceTests(unittest.TestCase):
                     max_evidence_sources=18,
                     response_detail="balanced",
                     workflow_specs=(workflow,),
+                    uploaded_files=(
+                        OrchestrationFile(
+                            name="sales.xlsx",
+                            local_path=Path("/tmp/sales.xlsx"),
+                        ),
+                    ),
                 ),
             )
 
@@ -178,6 +186,12 @@ class ChatServiceTests(unittest.TestCase):
                 response_detail="concise",
                 knowledge_root=Path("/tmp/conversation-knowledge"),
                 workflow_specs=(workflow,),
+                uploaded_files=(
+                    OrchestrationFile(
+                        name="sales.xlsx",
+                        local_path=Path("/tmp/sales.xlsx"),
+                    ),
+                ),
             )
 
         process_kwargs = context.Process.call_args.kwargs
@@ -203,6 +217,7 @@ class ChatServiceTests(unittest.TestCase):
         self.assertEqual(request.response_detail, "concise")
         self.assertEqual(request.knowledge_root, Path("/tmp/conversation-knowledge"))
         self.assertEqual(request.workflow_specs, (workflow,))
+        self.assertEqual(request.uploaded_files[0].name, "sales.xlsx")
         self.assertIs(task.process, process)
         self.assertEqual(task.timeout_seconds, settings.run_timeout_seconds)
         process.start.assert_called_once_with()

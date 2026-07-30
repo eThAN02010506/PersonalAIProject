@@ -12,6 +12,7 @@ from threading import Lock
 from typing import Literal
 from uuid import uuid4
 
+from qwopus_agent.documents import DocumentStore, StoredDocumentError
 from qwopus_agent.integrations.smolagents_runtime import SmolagentsModelSettings
 from qwopus_agent.memory import (
     DEFAULT_CONVERSATION_KNOWLEDGE_ROOT,
@@ -27,6 +28,7 @@ from qwopus_agent.services.orchestration_models import (
     ContextSnapshot,
     ConversationTaskState,
     InterpretationMode,
+    OrchestrationFile,
     ResolvedIntent,
 )
 from qwopus_agent.services.skill_growth_service import (
@@ -79,6 +81,7 @@ _REUSABLE_TOOL_SKILLS = {
     "rag_search": "rag_search",
     "graph_search": "graph_search",
 }
+_SPREADSHEET_EXTENSIONS = {"csv", "xls", "xlsx"}
 
 
 class ChatRunRegistry:
@@ -93,6 +96,7 @@ class ChatRunRegistry:
         skill_catalog: SkillCatalog | None = None,
         skill_growth: SkillGrowthService | None = None,
         intent_resolver: IntentResolver | None = None,
+        document_store: DocumentStore | None = None,
         completed_ttl_seconds: float = DEFAULT_COMPLETED_RUN_TTL_SECONDS,
         max_completed_runs: int = DEFAULT_MAX_COMPLETED_RUNS,
     ) -> None:
@@ -103,6 +107,7 @@ class ChatRunRegistry:
         self.skill_catalog = skill_catalog or SkillCatalog()
         self.skill_growth = skill_growth
         self.intent_resolver = intent_resolver or IntentResolver()
+        self.document_store = document_store
         self.completed_ttl_seconds = completed_ttl_seconds
         self.max_completed_runs = max_completed_runs
         self._runs: dict[str, _ActiveRun] = {}
@@ -156,6 +161,10 @@ class ChatRunRegistry:
             global_knowledge_path=global_knowledge_path,
             resolved_intent=resolved_request.resolved_intent,
             workflow_specs=self._active_workflow_specs(),
+            uploaded_files=self._attached_spreadsheets(
+                conversation_id,
+                enabled=enable_local_knowledge,
+            ),
         )
         run_id = uuid4().hex
         with self._lock:
@@ -172,6 +181,38 @@ class ChatRunRegistry:
                 resolved_request,
             )
         return run_id
+
+    def _attached_spreadsheets(
+        self,
+        conversation_id: str,
+        *,
+        enabled: bool,
+    ) -> tuple[OrchestrationFile, ...]:
+        """Resolve attached spreadsheet originals only for authorized knowledge turns."""
+        if not enabled or self.document_store is None:
+            return ()
+        files: list[OrchestrationFile] = []
+        seen_sources: set[str] = set()
+        for document_id in self.repository.document_ids_for_conversation(conversation_id):
+            try:
+                saved = self.document_store.load_document(document_id)
+            except (OSError, StoredDocumentError):
+                continue
+            if (
+                saved.document.file_type not in _SPREADSHEET_EXTENSIONS
+                or saved.document.source in seen_sources
+            ):
+                continue
+            seen_sources.add(saved.document.source)
+            # 原因：MiniRAG 只保存表格摘要，无法回答之后才提出的分组平均值问题。
+            # 作用：把受 DocumentStore 限定的原文件路径交给现有 Excel Tool，数据仍在本地沙箱计算。
+            files.append(
+                OrchestrationFile(
+                    name=saved.document.source,
+                    local_path=saved.original_path,
+                )
+            )
+        return tuple(files)
 
     def _active_workflow_specs(self) -> tuple[WorkflowSpec, ...]:
         """Capture immutable, active workflow versions for one worker request."""

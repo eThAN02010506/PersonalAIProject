@@ -97,6 +97,43 @@ class ConversationRepositoryTests(unittest.TestCase):
         )
         self.assertEqual(memory.task_state.last_task_type, "compare")
 
+    def test_attached_document_ids_are_scoped_and_stable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repository = ConversationRepository(
+                Path(tmpdir) / "qwopus.db",
+                import_legacy=False,
+            )
+            repository.initialize()
+            user = repository.create_user(
+                username="document-owner",
+                display_name="Document Owner",
+                password_hash="test-hash",
+            )
+            first = repository.create_conversation(owner_user_id=user.id)
+            second = repository.create_conversation(owner_user_id=user.id)
+            # 原因：会话附件表受用户、文档所有权外键约束，测试必须走正式注册边界。
+            # 作用：同时证明仓储查询只返回当前会话实际登记的文档。
+            repository.register_document(
+                "document-b",
+                conversation_id=first.id,
+                owner_user_id=user.id,
+            )
+            repository.register_document(
+                "document-a",
+                conversation_id=first.id,
+                owner_user_id=user.id,
+            )
+            repository.register_document(
+                "document-other",
+                conversation_id=second.id,
+                owner_user_id=user.id,
+            )
+
+            attached = repository.document_ids_for_conversation(first.id)
+
+        self.assertEqual(set(attached), {"document-a", "document-b"})
+        self.assertNotIn("document-other", attached)
+
     def test_initialize_migrates_legacy_memory_table(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             database_path = Path(tmpdir) / "qwopus.db"

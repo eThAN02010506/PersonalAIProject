@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import pandas as pd
 
@@ -88,6 +88,7 @@ def analyze_uploaded_files(
     selected_sections: dict[str, tuple[str, ...]] | None = None,
     document_store: DocumentStore | None = None,
     analysis_mode: str = "question",
+    response_detail: Literal["concise", "balanced", "detailed"] = "detailed",
 ) -> UploadAnalysisOutcome:
     """Analyze uploaded files, update MiniRAG, and optionally call the LLM."""
     if not uploaded_files:
@@ -264,6 +265,7 @@ def analyze_uploaded_files(
         scoped_sections=scoped_sections,
         question=effective_question,
         analysis_mode=analysis_mode,
+        response_detail=response_detail,
         settings=settings,
         minirag=minirag,
         min_source_relevance=min_source_relevance,
@@ -347,6 +349,7 @@ def _run_model_analysis(
     scoped_sections: dict[str, tuple[str, ...]],
     question: str,
     analysis_mode: str,
+    response_detail: Literal["concise", "balanced", "detailed"],
     settings: SmolagentsModelSettings,
     minirag: MiniRAG | None,
     min_source_relevance: float,
@@ -407,6 +410,9 @@ def _run_model_analysis(
         tools=analysis_tools,
         settings=settings,
         analysis_mode=analysis_mode,
+        # 原因：文档页和聊天页必须对 Detailed 使用同一语义，否则 UI 选择会静默失效。
+        # 作用：文件 Agent 收到用户本轮的详略偏好，而不是始终使用隐式默认值。
+        response_detail=response_detail,
     )
     logger.info(
         "analysis_llm_completed files=%s answer_length=%s",

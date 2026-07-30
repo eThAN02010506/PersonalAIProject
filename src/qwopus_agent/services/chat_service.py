@@ -15,13 +15,14 @@ from qwopus_agent.services.agent_orchestrator import AgentOrchestrator
 from qwopus_agent.services.intent_resolver import IntentResolver
 from qwopus_agent.services.orchestration_models import (
     ConversationTurn,
+    OrchestrationFile,
     OrchestrationRequest,
     ResolvedIntent,
 )
 from qwopus_agent.skills import WorkflowSpec
 
 ChatTaskStatus = Literal["completed", "failed"]
-CHAT_WORKER_REQUEST_SCHEMA_VERSION = 6
+CHAT_WORKER_REQUEST_SCHEMA_VERSION = 7
 
 
 @dataclass(frozen=True)
@@ -43,6 +44,7 @@ class ChatWorkerRequest:
     knowledge_root: Path = DEFAULT_CONVERSATION_KNOWLEDGE_ROOT
     global_knowledge_path: Path | None = None
     workflow_specs: tuple[WorkflowSpec, ...] = ()
+    uploaded_files: tuple[OrchestrationFile, ...] = ()
     schema_version: int = CHAT_WORKER_REQUEST_SCHEMA_VERSION
 
     def validate_schema(self) -> None:
@@ -178,6 +180,7 @@ def start_chat_task(
     global_knowledge_path: Path | None = None,
     resolved_intent: ResolvedIntent | None = None,
     workflow_specs: tuple[WorkflowSpec, ...] = (),
+    uploaded_files: tuple[OrchestrationFile, ...] = (),
 ) -> BackgroundChatTask:
     """Start one cancelable Agent request in a spawned process."""
     context = multiprocessing.get_context("spawn")
@@ -209,6 +212,7 @@ def start_chat_task(
             else None
         ),
         workflow_specs=workflow_specs,
+        uploaded_files=uploaded_files,
     )
     process = context.Process(
         target=_run_chat_task,
@@ -266,6 +270,7 @@ def _run_chat_task(
                     for item in request.history
                     if item.get("role") in {"user", "assistant"} and item.get("content")
                 ),
+                uploaded_files=request.uploaded_files,
                 enable_web_search=request.enable_web_search,
                 enable_browser=request.enable_browser,
                 enable_local_knowledge=request.enable_local_knowledge,

@@ -345,8 +345,15 @@ class SmolagentsToolsTests(unittest.TestCase):
                 'df = dfs["Sheet1"]\nresult = df.groupby("region")["revenue"].sum().reset_index()',
             )
 
+            with self.assertRaisesRegex(ValueError, "already loaded in dfs"):
+                tool.forward(
+                    "sales.xlsx",
+                    'df = pd.read_excel("sales.xlsx")\nresult = df',
+                )
+
         self.assertIn("East", result)
         self.assertIn("40", result)
+        self.assertIn('df = dfs["exact sheet or table name"]', tool.description)
 
     def test_excel_analysis_tool_exposes_secondary_table_regions(self) -> None:
         fake_module = types.SimpleNamespace(Tool=FakeTool)
@@ -372,7 +379,8 @@ class SmolagentsToolsTests(unittest.TestCase):
                 'df = dfs["Data::table_2"]\nresult = df["tickets"].sum()',
             )
 
-        self.assertEqual(result, "7")
+        self.assertIn("| result |", result)
+        self.assertIn("| 7 |", result)
 
     def test_minirag_tool_returns_bounded_search_results(self) -> None:
         fake_module = types.SimpleNamespace(Tool=FakeTool)

@@ -200,6 +200,79 @@ export type LocalFolderTree = {
   tree: LocalFolderNode;
 };
 
+export type CodeTreeNode = {
+  name: string;
+  relative_path: string;
+  kind: "directory" | "file";
+  children: CodeTreeNode[];
+};
+
+export type CodeWorkspaceTree = {
+  root: string;
+  file_count: number;
+  tree: CodeTreeNode;
+};
+
+export type CodeFile = {
+  root: string;
+  path: string;
+  sha256: string;
+  content: string;
+  total_lines: number;
+  start_line: number;
+  end_line: number;
+};
+
+export type CodeSearchMatch = {
+  path: string;
+  line: number;
+  column: number;
+  preview: string;
+};
+
+export type CodeWorkspaceMessage = {
+  role: "user" | "assistant";
+  content: string;
+};
+
+export type CodeChatReply = {
+  mode: "answer" | "clarify" | "ready";
+  message: string;
+  objective?: string | null;
+  selected_files: string[];
+  inspected_files: string[];
+};
+
+export type CodeChange = {
+  id: string;
+  root: string;
+  objective: string;
+  summary: string;
+  reason: string;
+  verification_plan: string[];
+  unified_diff: string;
+  status: "proposed" | "applied" | "rejected" | "rolled_back";
+  changed_files: string[];
+  created_at: string;
+  applied_at?: string;
+  rolled_back_at?: string;
+};
+
+export type CodeCommand = {
+  id: string;
+  label: string;
+  description: string;
+};
+
+export type CodeTestResult = {
+  command_id: string;
+  command: string[];
+  return_code: number;
+  success: boolean;
+  timed_out: boolean;
+  output: string;
+};
+
 export type Health = {
   status: string;
   mode: "remote" | "local";
@@ -215,6 +288,19 @@ export type Health = {
   request_timeout_seconds: number;
   max_retries: number;
   run_timeout_seconds: number;
+};
+
+export type WebSearchSettings = {
+  configured: boolean;
+  source: "managed" | "legacy_local" | "environment" | "none" | null;
+  masked_key: string | null;
+  can_manage: boolean;
+  message: string;
+};
+
+export type TavilyConnectionTest = {
+  success: boolean;
+  message: string;
 };
 
 export type DebugAgentRun = {

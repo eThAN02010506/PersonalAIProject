@@ -22,6 +22,7 @@ chat owner can explicitly share that chat and its attached files.
 | Web research | Optional Tavily search plus separately authorized, isolated Playwright page rendering |
 | Reports | Unified Markdown, Excel, PNG/SVG chart, and complete paginated Unicode PDF artifacts |
 | Skills | Automatic discovery, declarative Workflow Skills, semantic versions, promotion, rollback, and model-assisted candidate authoring |
+| Code workspace | Host-only Git inspection, exact-edit proposals, Diff approval, allowlisted checks, conflict detection, and rollback |
 | Interfaces | Responsive React 19 workspace with assistant-ui, FastAPI, account-scoped SQLite history, CLI entry points, and a host-only React Debug Console |
 
 ## Architecture
@@ -30,6 +31,7 @@ chat owner can explicitly share that chat and its attached files.
 flowchart TD
     UI["React + assistant-ui"] --> API["FastAPI"]
     DEBUG["React Debug Console"] --> API
+    CODEUI["Admin Code Workspace"] --> API
     CLI["CLI"] --> CORE["Application services"]
     API --> CORE
 
@@ -50,6 +52,7 @@ flowchart TD
     CORE --> REPORT["ReportGenerator"]
     API --> SQLITE["SQLite accounts, ACLs, and conversations"]
     API --> STORAGE["Local storage and logs"]
+    API --> CODEREVIEW["Reviewed Git changes"]
 ```
 
 The main dependency direction is:
@@ -101,7 +104,7 @@ module boundaries.
 - macOS with Apple Silicon for local MLX mode
 - One reachable OpenAI-compatible model endpoint, or a local MLX model directory
 - MinerU models and pipeline dependencies for OCR and layout-aware parsing
-- A Tavily API key only when live web search is enabled
+- Your own Tavily API key only when live web search is enabled
 
 The current model name is not hardcoded into Agent logic. Qwopus-Agent probes the
 selected server's `/v1/models` endpoint and refreshes the model identifier before
@@ -195,12 +198,27 @@ Useful optional variables:
 | `QWOPUS_LAN_USERNAME` | Shared LAN login name; defaults to `qwopus` |
 | `QWOPUS_LAN_PASSWORD` | Required password for every non-loopback HTTP request |
 
-For web search, keep the credential in the ignored `.env.local` file or in the
-process environment:
+New checkouts do not contain a Tavily key. After creating the first administrator
+account, use **Web search settings** in the sidebar:
+
+1. Create a key at [Tavily](https://app.tavily.com/).
+2. Paste it into the administrator dialog and select **Test**.
+3. Select **Save key**. Web search becomes available immediately without restarting.
+
+The managed key is stored only on the host at
+`storage/secrets/tavily.key` with owner-only permissions. The API and UI return
+only masked metadata, and member accounts cannot read, replace, test, or delete
+the key.
+
+For managed deployments, `TAVILY_API_KEY` may instead be supplied through the
+process environment or ignored `.env.local` file:
 
 ```text
 TAVILY_API_KEY=your-key
 ```
+
+An administrator-managed key takes precedence over `.env.local` and the process
+environment. Removing it falls back to those deployment values when present.
 
 ## Run The Application
 
@@ -244,8 +262,9 @@ FastAPI.
 The production interface separates stable navigation from per-run Agent
 authorization:
 
-- the upper toolbar switches between **Chat**, **Documents**, and administrator
-  **Skills**, and exposes chat sharing when the current account owns the chat
+- the upper toolbar switches between **Chat**, **Documents**, administrator
+  **Skills**, and the host-only administrator **Code** workspace, and exposes
+  chat sharing when the current account owns the chat
 - the second toolbar controls answer depth, interpretation range, Web, Browser,
   conversation Knowledge, account-wide Global knowledge, and optional process
   progress for the next turn
@@ -337,13 +356,27 @@ model:
 workbook
   -> local sheet and table-region profile
   -> schema, dtypes, and bounded sample rows
-  -> model-generated pandas expression
+  -> model-generated restricted pandas code
   -> AST validation
   -> child-process validation and resource limits
   -> macOS Seatbelt: no network, writes, fork, or sensitive-path reads
-  -> inert JSON response
-  -> bounded computed result only
+  -> inert JSON plus a bounded GitHub-Flavored Markdown table
 ```
+
+General workbook analysis reports verifiable per-column statistics such as
+count, mean, standard deviation, minimum, quartiles, median, maximum, and
+missing values, together with relevant categorical counts. Group or item
+questions return one row per requested group or item. Highly fragmented report
+sheets fall back to a cleaned full-sheet view so labels are not separated from
+their numeric values; only a bounded number of secondary table regions remains
+available to the Agent.
+
+When **Knowledge** is enabled for a chat, attached CSV/XLS/XLSX originals from
+that conversation are made available to the same Excel Skills. MiniRAG still
+stores only searchable document knowledge: later averages, grouped totals, and
+other calculations are performed against the authorized local original in the
+pandas sandbox. The computed result is rendered as a Markdown table in both
+document analysis and chat responses.
 
 The pandas runner blocks imports, file access, network modules, unsafe builtins,
 unknown method calls, oversized syntax trees, and unbounded results. On macOS,
@@ -351,6 +384,14 @@ the worker also runs under `/usr/bin/sandbox-exec`; other Unix platforms retain
 AST validation, process isolation, CPU/address-space limits, and a wall-clock
 timeout. This is defense in depth for local analysis, not a VM boundary for
 executing arbitrary user Python.
+
+The safe subset includes vectorized pandas operations, `groupby`, `agg`, and
+`apply(pd.to_numeric, errors="coerce")` for mixed report columns. Arbitrary
+`lambda` callbacks, function definitions, loops, imports, workbook reads, and
+file-writing methods remain prohibited because they would turn `apply` into a
+general Python execution path. Uploaded workbooks are already available through
+the sandbox's `dfs` mapping; generated code must assign its final scalar,
+Series, or DataFrame to `result`.
 
 ## Knowledge Scope
 
@@ -410,6 +451,11 @@ Built-in modules expose `create_skill()` and are loaded by
 - `graph_search`
 - `web_search`
 - `browser`
+- `code_tree`
+- `code_read`
+- `code_search`
+- `code_patch` (in-memory diff only)
+- `code_test` (explicit execution approval only)
 
 Adding another built-in Skill requires a module in `src/qwopus_agent/skills/`
 that implements the shared contract and factory. No central registration list is
@@ -436,6 +482,46 @@ Generated Skills cannot contain arbitrary Python, shell commands, credentials,
 file paths, unknown capabilities, or persistent arguments. Generation never
 promotes a candidate automatically. Promotion, rejection, and rollback remain
 explicit lifecycle actions.
+
+## Code Workspace
+
+The administrator **Code** tab can inspect and modify an explicitly selected
+local Git repository. It is available only from the host loopback address and
+does not add source-code write access to ordinary chat Agents.
+
+```text
+select Git root
+  -> filtered source tree, bounded reads, and literal search
+  -> discuss a concrete or abstract requirement in a repository-scoped chat
+  -> smolagents plans and calls registered code_search/code_read Skills
+  -> backend accepts at most eight files that the Agent actually inspected
+  -> answer a code question, ask one material clarification, or prepare an objective
+  -> administrator can refine the objective and selected files
+  -> inspected but unselected files provide read-only test/caller context
+  -> current BaseLLM returns exact replacement JSON, with one bounded format repair
+  -> backend validates unique matches and generates a Git diff
+  -> git apply --check validates applicability without writing
+  -> administrator reviews and explicitly applies or rejects
+  -> fixed verification command may run without a shell
+  -> rollback succeeds only while applied file hashes still match
+```
+
+The tree excludes credentials, `.env` files, symbolic links, model/runtime
+directories, binary files, and files over 512 KiB. The model cannot create,
+delete, or directly write files, and cannot select additional paths. Every
+operation is recorded in the host-only Debug Console without copying source
+contents into its audit record. Full before/after snapshots are stored with
+owner-only permissions under `storage/code_changes/`.
+
+Code chat keeps the current page's recent transcript and sends at most 20
+messages to a ten-step-bounded smolagents run. The Agent performs one initial Planning
+step, explores through read-only registered Skills, then produces a grounded
+`answer`, `clarify`, or `ready` response in the user's language.
+`ready` only fills the implementation objective and inspected file selection;
+generating, applying, testing, and rolling back the Diff remain separate,
+explicit administrator actions. Proposal generation can read up to eight
+additional inspected files as context, but the backend accepts changes only for
+the administrator-selected editable files.
 
 Conversation-derived candidates use durable SQLite provenance rather than
 rotating Debug files. Only the resolved objective, model identifier, message
@@ -486,6 +572,7 @@ src/qwopus_agent/
   agents/         Planner, Executor, routing, research, and Multi-Agent supervision
   analysis/       Document analysis, workbook profiling, and pandas sandbox
   api/            FastAPI composition, routes, runtime models, SQLite, and run workers
+  code_workspace/ Git path safety, proposal records, diffs, checks, and rollback
   documents/      MinerU integration, normalization, structure, chunks, summaries, and storage
   integrations/   smolagents, Tavily, Tool adapters, provider wiring, and diagnostics
   llm/            BaseLLM, model settings, provider registry, and adapters

@@ -173,6 +173,12 @@ class DocumentAnalysisTests(unittest.TestCase):
             self.assertIn("Sheet1_categorical_summary", result.tables)
             self.assertIn("numeric_columns", result.metadata["sheets"]["Sheet1"])
             self.assertIn("Sheet1_categorical_summary", result.markdown_document)
+            numeric_summary = result.tables["Sheet1_numeric_summary"]
+            revenue = numeric_summary.loc[
+                numeric_summary["column"] == "revenue"
+            ].iloc[0]
+            self.assertEqual(revenue["mean"], 25.0)
+            self.assertIn("| column | count | mean |", result.markdown_document)
 
     def test_analyze_excel_detects_header_below_title_rows(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

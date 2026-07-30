@@ -14,13 +14,21 @@ from qwopus_agent.services.orchestration_models import (
 from qwopus_agent.utils.token_budget import estimate_tokens
 
 _COMPLEX_TASKS = {"explain", "how_to", "compare", "summarize", "analyze", "report"}
-_DETAIL_TOKEN_TARGETS = {
-    "explain": 120,
-    "how_to": 140,
-    "compare": 140,
-    "summarize": 120,
-    "analyze": 150,
-    "report": 220,
+_BALANCED_TOKEN_TARGETS = {
+    "explain": 60,
+    "how_to": 70,
+    "compare": 70,
+    "summarize": 60,
+    "analyze": 75,
+    "report": 110,
+}
+_DETAILED_TOKEN_TARGETS = {
+    "explain": 200,
+    "how_to": 220,
+    "compare": 220,
+    "summarize": 180,
+    "analyze": 260,
+    "report": 340,
 }
 _INTERNAL_PROCESS_PATTERN = re.compile(
     r"(?im)^\s*(?:thought|observation|tool output|action)\s*:"
@@ -109,8 +117,6 @@ class AnswerQualityEvaluator:
             and contract.task_type in _COMPLEX_TASKS
         ):
             target = _adaptive_token_target(contract, answer_plan)
-            if contract.response_detail == "balanced":
-                target = max(60, target // 2)
             target_tokens = target
             if token_count < target:
                 issues.append("insufficient_depth")
@@ -201,13 +207,18 @@ def _adaptive_token_target(
     answer_plan: AnswerPlan | None,
 ) -> int:
     """Scale depth with required content units rather than a global word quota."""
-    base = _DETAIL_TOKEN_TARGETS[contract.task_type]
+    detailed = contract.response_detail == "detailed"
+    targets = _DETAILED_TOKEN_TARGETS if detailed else _BALANCED_TOKEN_TARGETS
+    base = targets[contract.task_type]
     unit_count = (
         len(answer_plan.plan_items)
         if answer_plan is not None and answer_plan.plan_items
         else len(contract.required_facets) + 1
     )
-    return base + max(0, unit_count - 4) * 20
+    # 原因：同为 Detailed 的两项解释与六项分析需要的展开空间明显不同。
+    # 作用：按答案计划中的内容单元提高门槛，同时避免固定 800 字一类无关配额。
+    increment = 40 if detailed else 10
+    return base + max(0, unit_count - 4) * increment
 
 
 def _content_block_count(answer: str) -> int:

@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 import json
-import os
 import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from dotenv import dotenv_values
+from qwopus_agent.integrations.tavily_credentials import resolve_tavily_api_key
 
 
 @dataclass(frozen=True)
@@ -104,16 +103,3 @@ def format_tavily_results(payload: dict[str, Any], max_results: int) -> str:
     if result_lines:
         sections.append("## Tavily Search Results\n\n" + "\n\n".join(result_lines))
     return "\n\n".join(sections) if sections else "No Tavily search results."
-
-
-def resolve_tavily_api_key(explicit_api_key: str | None) -> str:
-    """Resolve Tavily credentials without changing the tracked .env file."""
-    if explicit_api_key and explicit_api_key.strip():
-        return explicit_api_key.strip()
-
-    # 原因：项目的 .env 已被 Git 跟踪，联网密钥不能继续写入该文件。
-    # 作用：优先读取被 Git 忽略的本地配置，同时保留进程环境变量部署方式。
-    local_api_key = dotenv_values(".env.local").get("TAVILY_API_KEY")
-    if isinstance(local_api_key, str) and local_api_key.strip():
-        return local_api_key.strip()
-    return (os.getenv("TAVILY_API_KEY") or "").strip()
