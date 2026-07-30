@@ -3,6 +3,7 @@ import unittest
 from qwopus_agent.services.answer_pipeline import (
     build_answer_plan,
     build_evidence_ledger,
+    is_internal_pipeline_payload,
     parse_evidence_packet,
     parse_evidence_review,
 )
@@ -111,6 +112,15 @@ class AnswerPipelineTests(unittest.TestCase):
         self.assertEqual(packet.facts[0].sources, ())
         self.assertEqual(packet.facts[0].confidence, "medium")
         self.assertIn("No tool-grounded source", packet.limitations[0])
+
+    def test_internal_payload_detection_parses_structure_not_string_prefix(self) -> None:
+        evidence = (
+            'Draft follows:\n```json\n{"facts":[],"limitations":["missing source"]}\n```'
+        )
+        ordinary_json = '{"status":"ok","items":[1,2]}'
+
+        self.assertTrue(is_internal_pipeline_payload(evidence))
+        self.assertFalse(is_internal_pipeline_payload(ordinary_json))
 
 
 if __name__ == "__main__":

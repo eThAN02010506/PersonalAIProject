@@ -272,6 +272,7 @@ def run_agent_chat_turn(
     knowledge_root: Path = DEFAULT_CONVERSATION_KNOWLEDGE_ROOT,
     global_knowledge_path: Path | None = None,
     document_evidence_available: bool = False,
+    enforce_document_evidence: bool = True,
     response_language_source: str | None = None,
     answer_contract: AnswerContract | None = None,
     output_role: AgentOutputRole = "final",
@@ -294,6 +295,7 @@ def run_agent_chat_turn(
         knowledge_root=knowledge_root,
         global_knowledge_path=global_knowledge_path,
         document_evidence_available=document_evidence_available,
+        enforce_document_evidence=enforce_document_evidence,
         response_language_source=response_language_source,
         answer_contract=answer_contract,
         output_role=output_role,
@@ -317,6 +319,7 @@ def run_agent_chat_turn_with_debug(
     knowledge_root: Path = DEFAULT_CONVERSATION_KNOWLEDGE_ROOT,
     global_knowledge_path: Path | None = None,
     document_evidence_available: bool = False,
+    enforce_document_evidence: bool = True,
     response_language_source: str | None = None,
     answer_contract: AnswerContract | None = None,
     output_role: AgentOutputRole = "final",
@@ -403,8 +406,11 @@ def run_agent_chat_turn_with_debug(
         or (private_sources is None and bool(knowledge_tools))
         or (enable_local_knowledge and include_global_knowledge)
     )
+    # 原因：Review/Synthesis 已消费上游 ledger，不应把内部提示重新当作用户附件请求。
+    # 作用：用户入口默认继续执行证据预检，只有明确的内部阶段调用可以跳过。
     if (
-        _requires_document_evidence(user_message)
+        enforce_document_evidence
+        and _requires_document_evidence(user_message)
         and not accessible_document_evidence
     ):
         # 原因：提示模型“不要编造”仍会让无 Tool 聊天根据历史或常识生成貌似完整的文件分析。

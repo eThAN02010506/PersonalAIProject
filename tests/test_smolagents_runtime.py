@@ -712,6 +712,38 @@ class SmolagentsRuntimeTests(unittest.TestCase):
         self.assertIsNone(FakeToolCallingAgent.last_instance)
         self.assertEqual(result.debug_runs, ())
 
+    def test_internal_ledger_stage_can_explicitly_bypass_document_preflight(self) -> None:
+        FakeToolCallingAgent.queued_results = [
+            types.SimpleNamespace(
+                output=(
+                    '{"agreements":["Ledger is usable"],"conflicts":[],'
+                    '"unsupported_claims":[],"gaps":[],"resolution":"Use the ledger."}'
+                ),
+                state="success",
+                steps=[],
+            )
+        ]
+
+        result = run_agent_chat_turn_with_debug(
+            user_message=(
+                "Original request: review all uploaded documents.\n\n"
+                "Independent evidence ledger: already supplied."
+            ),
+            history=[],
+            settings=SmolagentsModelSettings(
+                model_id="any-model",
+                base_url="http://127.0.0.1:8080/v1",
+            ),
+            output_role="review",
+            enforce_document_evidence=False,
+        )
+
+        # 原因：Review 已消费父阶段提供的 ledger，不应重新执行用户入口的附件可用性检查。
+        # 作用：仅内部调用可显式跳过 preflight，默认用户入口测试仍锁定原有拒绝行为。
+        self.assertTrue(result.success)
+        self.assertNotEqual(result.state, "preflight_rejected")
+        self.assertIn("Ledger is usable", result.answer)
+
     def test_run_agent_chat_turn_refines_short_local_knowledge_answer(self) -> None:
         settings = SmolagentsModelSettings(
             model_id="any-model",

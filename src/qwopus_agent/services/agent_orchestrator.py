@@ -27,6 +27,7 @@ from qwopus_agent.memory import DEFAULT_CONVERSATION_KNOWLEDGE_ROOT
 from qwopus_agent.services.answer_pipeline import (
     build_answer_plan,
     build_evidence_ledger,
+    is_internal_pipeline_payload,
     parse_evidence_packet,
     parse_evidence_review,
     render_answer_plan,
@@ -194,27 +195,42 @@ class AgentOrchestrator:
                     }
                 },
             )
-            citations, analysis_result, report, debug_runs = _collect_artifacts(run)
+            _, analysis_result, report, debug_runs = _collect_artifacts(run)
             terminal_run = next(
                 (item for item in run.runs if item.task_id == plan.terminal_task_id),
                 None,
             )
             terminal_result = terminal_run.result if terminal_run is not None else None
-            answer_content = run.final_answer
-            if plan.route == "single_agent" and isinstance(
-                terminal_result,
-                _CapabilityResult,
+            terminal_success = bool(
+                terminal_run is not None
+                and terminal_run.success
+                and isinstance(terminal_result, _CapabilityResult)
+                and terminal_result.success
+                and terminal_result.content.strip()
+            )
+            if terminal_success and isinstance(terminal_result, _CapabilityResult):
+                citations = terminal_result.citations
+                answer = _append_citations(
+                    terminal_result.content,
+                    citations,
+                    request.objective,
+                )
+            elif plan.route == "single_agent" and isinstance(
+                terminal_result, _CapabilityResult
             ):
                 # 原因：确定性仲裁在单 Agent 失败时只返回通用错误，会丢失安全的拒答说明。
                 # 作用：继续把能力层的无证据提示交给用户，同时 success 保持为 False。
-                answer_content = terminal_result.content
-            answer = _append_citations(answer_content, citations, request.objective)
+                citations = ()
+                answer = terminal_result.content.strip() or _terminal_failure_answer(
+                    request.objective
+                )
+            else:
+                # 原因：Arbiter 会从任意成功依赖中选择内容，即使规划的 terminal 已失败或未执行。
+                # 作用：多 Agent 的用户答案只归成功 terminal 所有，中间 JSON 仍保留在调试结果中。
+                citations = ()
+                answer = _terminal_failure_answer(request.objective)
             return OrchestrationResult(
-                # 原因：中间证据或错误文本非空，不代表规划的最终任务已经完成。
-                # 作用：整体状态只取决于 DAG 的 terminal task，避免部分结果伪装成成功。
-                success=bool(answer.strip()) and bool(
-                    terminal_run is not None and terminal_run.success
-                ),
+                success=terminal_success,
                 final_answer=answer,
                 route=plan.route,
                 citations=citations,
@@ -235,7 +251,7 @@ class AgentOrchestrator:
             )
             return OrchestrationResult(
                 success=False,
-                final_answer=f"Agent execution failed: {type(exc).__name__}: {exc}",
+                final_answer=_terminal_failure_answer(request.objective),
                 route=(
                     "multi_agent"
                     if sum(
@@ -394,6 +410,9 @@ class AgentOrchestrator:
         output_role: AgentOutputRole = "final",
         answer_plan: AnswerPlan | None = None,
         task_id: str | None = None,
+        enforce_document_evidence: bool = True,
+        answer_contract: AnswerContract | None = None,
+        response_language_source: str | None = None,
     ) -> _CapabilityResult:
         started = time.monotonic()
         trace.append(ProcessEvent(phase="execution", status="started", agent=agent_name))
@@ -416,14 +435,16 @@ class AgentOrchestrator:
                 knowledge_root=self.knowledge_root,
                 global_knowledge_path=self.global_knowledge_path,
                 document_evidence_available=bool(request.uploaded_files),
+                enforce_document_evidence=enforce_document_evidence,
                 response_language_source=(
-                    request.resolved_intent.original_request
-                    if request.resolved_intent is not None
-                    else request.objective
+                    response_language_source
+                    or (
+                        request.resolved_intent.original_request
+                        if request.resolved_intent is not None
+                        else request.objective
+                    )
                 ),
-                answer_contract=(
-                    _answer_contract(request)
-                ),
+                answer_contract=answer_contract or _answer_contract(request),
                 output_role=output_role,
                 answer_plan=answer_plan,
                 # 原因：worker 不应在执行中重读可变 Catalog，否则一次请求可能混用两个版本。
@@ -654,6 +675,8 @@ class AgentOrchestrator:
                 "enable_browser": False,
                 "enable_local_knowledge": False,
                 "include_global_knowledge": False,
+                "uploaded_files": (),
+                "resolved_intent": None,
             }
         )
         # 原因：让原 Evidence Agent 再“辩论”会重复访问文件、网络或知识库。
@@ -669,6 +692,13 @@ class AgentOrchestrator:
             output_role="review",
             answer_plan=answer_plan,
             task_id="review",
+            enforce_document_evidence=False,
+            answer_contract=_answer_contract(request),
+            response_language_source=(
+                request.resolved_intent.original_request
+                if request.resolved_intent is not None
+                else request.objective
+            ),
         )
         trace.append(
             ProcessEvent(
@@ -789,8 +819,11 @@ class AgentOrchestrator:
                 "enable_browser": False,
                 "enable_local_knowledge": False,
                 "include_global_knowledge": False,
+                "uploaded_files": (),
+                "resolved_intent": None,
             }
         )
+        trusted_citations = _trusted_citations_from_context(context)
         try:
             result = await self._chat_capability(
                 "synthesis_agent",
@@ -803,11 +836,42 @@ class AgentOrchestrator:
                 output_role="final",
                 answer_plan=answer_plan,
                 task_id="synthesis",
+                enforce_document_evidence=False,
+                answer_contract=_answer_contract(request),
+                response_language_source=(
+                    request.resolved_intent.original_request
+                    if request.resolved_intent is not None
+                    else request.objective
+                ),
             )
+            if result.success and is_internal_pipeline_payload(result.content):
+                # 原因：弱模型可能把 Evidence/Review JSON 通过 final_answer 成功返回。
+                # 作用：用结构化契约识别阻止内部载荷发布，同时保留 raw debug 输出。
+                error = "Synthesis returned an internal pipeline payload."
+                trace.append(
+                    ProcessEvent(
+                        phase="synthesis",
+                        status="failed",
+                        agent="synthesis_agent",
+                        message=error,
+                    )
+                )
+                return _CapabilityResult(
+                    content="Final synthesis did not complete.",
+                    success=False,
+                    confidence=0.0,
+                    error=error,
+                    debug_runs=result.debug_runs,
+                )
             return _CapabilityResult(
                 content=result.content,
                 success=result.success,
                 confidence=0.95 if result.success else 0.0,
+                citations=(
+                    _citations_adopted_by_answer(result.content, trusted_citations)
+                    if result.success
+                    else ()
+                ),
                 error=result.error,
                 debug_runs=result.debug_runs,
             )
@@ -815,20 +879,16 @@ class AgentOrchestrator:
             trace.append(
                 ProcessEvent(
                     phase="synthesis",
-                    status="warning",
+                    status="failed",
                     agent="synthesis_agent",
-                    message=f"Synthesis fallback: {type(exc).__name__}",
+                    message=f"{type(exc).__name__}: {exc}",
                 )
             )
             return _CapabilityResult(
-                content=(
-                    render_evidence_ledger(ledger)
-                    if ledger.facts
-                    else f"No evidence was available: {exc}"
-                ),
+                content="Final synthesis did not complete.",
                 success=False,
                 confidence=0.0,
-                error=str(exc),
+                error=f"{type(exc).__name__}: {exc}",
             )
 
     async def _report_capability(
@@ -842,14 +902,16 @@ class AgentOrchestrator:
         dependency_results = multi_agent.get("dependency_results", {})
         answer = next(iter(dependency_results.values()), "")
         tables: dict[str, Any] = {}
-        citations: list[SourceCitation] = []
+        citations = [
+            citation
+            for result in _dependency_capability_results(context)
+            for citation in result.citations
+        ]
         snapshot = multi_agent.get("shared_state", {})
         for contribution in snapshot.get("contributions", {}).values():
             raw = getattr(contribution, "raw", None)
-            if isinstance(raw, _CapabilityResult):
-                citations.extend(raw.citations)
-                if raw.analysis_result is not None:
-                    tables.update(raw.analysis_result.tables)
+            if isinstance(raw, _CapabilityResult) and raw.analysis_result is not None:
+                tables.update(raw.analysis_result.tables)
         if self.report_generator is None:
             from qwopus_agent.reports import ReportGenerator
 
@@ -901,10 +963,10 @@ class AgentOrchestrator:
                 )
             )
             return _CapabilityResult(
-                content=f"{agent_name} was unavailable: {type(exc).__name__}: {exc}",
+                content="The requested Agent capability was unavailable.",
                 success=False,
                 confidence=0.0,
-                error=str(exc),
+                error=f"{type(exc).__name__}: {exc}",
             )
 
 
@@ -951,25 +1013,55 @@ def _evidence_review_from_context(context: dict[str, Any]) -> EvidenceReview:
     )
 
 
-def _citations_from_chat(run: ChatAgentRun) -> tuple[SourceCitation, ...]:
-    """Return sources cited by the final answer, with Observation as a fallback."""
-    citations = _parse_citations(run.answer)
-    if citations:
-        # 原因：一次 RAG 查询会返回多个候选 chunk，但最终答案通常只采用其中一部分。
-        # 作用：只展示模型实际引用的来源，避免把未使用的 Observation 全部追加给用户。
-        return citations
-    observation_citations = _parse_citations("\n".join(run.observations))
-    mentioned_local = tuple(
+def _trusted_citations_from_context(
+    context: dict[str, Any],
+) -> tuple[SourceCitation, ...]:
+    """Collect only citations attached to successful typed dependencies."""
+    citations = [
         citation
-        for citation in observation_citations
+        for result in _dependency_capability_results(context)
+        for citation in result.citations
+    ]
+    return _deduplicate_citations(citations)
+
+
+def _citations_from_chat(run: ChatAgentRun) -> tuple[SourceCitation, ...]:
+    """Return answer-adopted sources that also exist in Tool Observations."""
+    trusted = _parse_citations("\n".join(run.observations))
+    return _citations_adopted_by_answer(run.answer, trusted)
+
+
+def _citations_adopted_by_answer(
+    answer: str,
+    trusted: tuple[SourceCitation, ...],
+) -> tuple[SourceCitation, ...]:
+    """Intersect model citations with exact Tool-grounded source identifiers."""
+    declared = _parse_citations(answer)
+    declared_urls = {
+        citation.url
+        for citation in declared
+        if citation.kind == "web" and citation.url is not None
+    }
+    declared_local = {
+        citation.source.casefold()
+        for citation in declared
         if citation.kind == "local"
-        and Path(citation.source).name.casefold() in run.answer.casefold()
-    )
-    if mentioned_local:
-        # 原因：部分模型会直接写出文件名，却不遵循结构化 Source 标记。
-        # 作用：仍能识别真实采用的本地文档，同时排除 Observation 内未使用的 URL。
-        return mentioned_local
-    return observation_citations
+    }
+    selected: list[SourceCitation] = []
+    for citation in trusted:
+        if citation.kind == "web":
+            if citation.url is not None and citation.url in declared_urls:
+                selected.append(citation)
+            continue
+        exact_source = citation.source.casefold()
+        source_mentioned = re.search(
+            rf"(?<!\w){re.escape(citation.source)}(?!\w)",
+            answer,
+            re.I,
+        )
+        if exact_source in declared_local or source_mentioned is not None:
+            selected.append(citation)
+    return _deduplicate_citations(selected)
 
 
 def _file_analysis_citations(
@@ -1075,6 +1167,16 @@ def _model_connection_error_answer(objective: str) -> str:
     return (
         "The model service connection was interrupted. Check the configured model "
         "address and service status, then retry."
+    )
+
+
+def _terminal_failure_answer(objective: str) -> str:
+    """Return a safe failure while preserving technical details in debug artifacts."""
+    if re.search(r"[\u3400-\u9fff]", objective):
+        return "最终回答未能生成。请重试；详细失败原因已保留在调试记录中。"
+    return (
+        "The final answer could not be generated. Please retry; detailed failure "
+        "information remains available in the debug record."
     )
 
 

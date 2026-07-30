@@ -209,7 +209,15 @@ class MultiAgentSupervisor:
                 )
                 success = result_success(result)
                 content = result_content(result)
-                error = None if success else content or "Agent returned an unsuccessful result."
+                # 原因：失败结果的 content 可能是内部 JSON，而类型化 error 才是真实故障原因。
+                # 作用：调试记录保留 Review/Synthesis 的原始异常，不让诊断被中间输出覆盖。
+                error = (
+                    None
+                    if success
+                    else getattr(result, "error", None)
+                    or content
+                    or "Agent returned an unsuccessful result."
+                )
             except Exception as exc:  # noqa: BLE001 - isolate one Agent failure.
                 result = None
                 success = False

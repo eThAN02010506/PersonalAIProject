@@ -228,6 +228,32 @@ def parse_evidence_review(content: str) -> EvidenceReview:
     )
 
 
+def is_internal_pipeline_payload(content: str) -> bool:
+    """Identify structured Evidence/Review envelopes regardless of surrounding text."""
+    decoder = json.JSONDecoder()
+    evidence_keys = {"facts", "limitations"}
+    review_keys = {
+        "agreements",
+        "conflicts",
+        "unsupported_claims",
+        "gaps",
+        "resolution",
+    }
+    for index, character in enumerate(content):
+        if character != "{":
+            continue
+        try:
+            value, _end = decoder.raw_decode(content[index:])
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(value, dict):
+            continue
+        keys = set(value)
+        if evidence_keys.issubset(keys) or review_keys.issubset(keys):
+            return True
+    return False
+
+
 def render_answer_plan(plan: AnswerPlan) -> str:
     """Render an exact bounded plan for a model prompt or Debug Console."""
     return plan.model_dump_json(indent=2)

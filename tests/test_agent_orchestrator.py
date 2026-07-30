@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pandas as pd
 
+from qwopus_agent.agents.multi_agent import MultiAgentRun, NamedAgentRun
 from qwopus_agent.analysis import AnalysisResult
 from qwopus_agent.integrations.smolagents_runtime import (
     AgentDebugRun,
@@ -183,20 +184,32 @@ class AgentOrchestratorTests(unittest.TestCase):
             output_roles.append(str(kwargs["output_role"]))
             if web:
                 return ChatAgentRun(
-                    answer="current external fact",
+                    answer=(
+                        '{"facts":[{"claim":"current external fact",'
+                        '"support":"current external support",'
+                        '"sources":["https://invented.example"],'
+                        '"confidence":"high"}],"limitations":[]}'
+                    ),
                     tool_calls=("tavily_search", "final_answer"),
                     observations=("https://example.com/current",),
                     state="success",
                 )
             if local:
                 return ChatAgentRun(
-                    answer="stored relationship",
+                    answer=(
+                        '{"facts":[{"claim":"stored relationship",'
+                        '"support":"stored relationship support",'
+                        '"sources":["ownershp.pdf"],'
+                        '"confidence":"high"}],"limitations":[]}'
+                    ),
                     tool_calls=("graph_search", "final_answer"),
                     observations=("[ownership.pdf, page 4] Company A owns Company B",),
                     state="success",
                 )
             self.assertIn("current external fact", question)
             self.assertIn("stored relationship", question)
+            self.assertNotIn("https://invented.example", question)
+            self.assertNotIn("ownershp.pdf", question)
             if "Audit this evidence" in question:
                 return ChatAgentRun(
                     answer="The sources agree on ownership but differ in recency.",
@@ -204,7 +217,13 @@ class AgentOrchestratorTests(unittest.TestCase):
                 )
             self.assertIn("differ in recency", question)
             synthesis_materials.append(question)
-            return ChatAgentRun(answer="combined final answer", state="success")
+            return ChatAgentRun(
+                answer=(
+                    "combined final answer "
+                    "https://example.com/current [ownership.pdf, page 4]"
+                ),
+                state="success",
+            )
 
         result = asyncio.run(
             AgentOrchestrator(self.settings, chat_runner=fake_chat).run(
@@ -224,6 +243,10 @@ class AgentOrchestratorTests(unittest.TestCase):
         self.assertIn("combined final answer", result.final_answer)
         self.assertIn("https://example.com/current", result.final_answer)
         self.assertIn("ownership.pdf, page 4", result.final_answer)
+        self.assertEqual(
+            [citation.source for citation in result.citations],
+            ["https://example.com/current", "ownership.pdf"],
+        )
         self.assertEqual(
             [task.agent_name for task in result.multi_agent_run.delegation_plan.tasks],
             [
@@ -249,6 +272,316 @@ class AgentOrchestratorTests(unittest.TestCase):
         self.assertIn("Evidence ledger", synthesis_materials[0])
         self.assertIn("Evidence review", synthesis_materials[0])
         self.assertNotIn("Agent evidence:", synthesis_materials[0])
+
+    def test_review_failure_cannot_publish_worker_content_or_citations(self) -> None:
+        review_debug = AgentDebugRun(
+            label="review",
+            prompt="internal review prompt",
+            max_steps=2,
+            state="generation_error",
+            output='{"agreements":[],"resolution":"partial review"}',
+        )
+
+        def fake_chat(**kwargs):
+            if kwargs["output_role"] == "review":
+                return ChatAgentRun(
+                    answer='{"agreements":[],"resolution":"partial review"}',
+                    state="generation_error",
+                    success=False,
+                    error="review model failed",
+                    debug_runs=(review_debug,),
+                )
+            if kwargs["enable_web_search"]:
+                return ChatAgentRun(
+                    answer=(
+                        '{"facts":[{"claim":"Web fact","support":"Web support",'
+                        '"sources":["https://invented.example"],"confidence":"high"}],'
+                        '"limitations":["web limitation"]}'
+                    ),
+                    observations=("https://example.com/verified",),
+                    state="success",
+                )
+            return ChatAgentRun(
+                answer=(
+                    '{"facts":[{"claim":"Knowledge fact","support":"Local support",'
+                    '"sources":["misspelled.pdf"],"confidence":"high"}],'
+                    '"limitations":["knowledge limitation"]}'
+                ),
+                observations=("[verified.pdf, page 2] Local support",),
+                state="success",
+            )
+
+        result = asyncio.run(
+            AgentOrchestrator(self.settings, chat_runner=fake_chat).run(
+                OrchestrationRequest(
+                    objective="Compare the uploaded evidence with current research.",
+                    conversation_id="conversation-1",
+                    enable_web_search=True,
+                    enable_local_knowledge=True,
+                )
+            )
+        )
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.citations, ())
+        self.assertNotIn('"facts"', result.final_answer)
+        self.assertNotIn('"limitations"', result.final_answer)
+        self.assertNotIn("partial review", result.final_answer)
+        self.assertNotIn("Observation", result.final_answer)
+        self.assertNotIn("https://example.com/verified", result.final_answer)
+        runs = {item.task_id: item for item in result.multi_agent_run.runs}
+        self.assertFalse(runs["review"].success)
+        self.assertFalse(runs["synthesis"].success)
+        self.assertEqual(runs["review"].error, "review model failed")
+        self.assertEqual(runs["review"].result.error, "review model failed")
+        self.assertEqual(result.debug_runs[-1].output, review_debug.output)
+
+    def test_synthesis_failure_cannot_publish_review_or_evidence(self) -> None:
+        synthesis_debug = AgentDebugRun(
+            label="synthesis",
+            prompt="internal synthesis prompt",
+            max_steps=2,
+            state="generation_error",
+            output="Observation: incomplete finalization",
+        )
+
+        def fake_chat(**kwargs):
+            role = kwargs["output_role"]
+            if role == "review":
+                return ChatAgentRun(
+                    answer=(
+                        '{"agreements":["Evidence agrees"],"conflicts":[],'
+                        '"unsupported_claims":[],"gaps":[],"resolution":"Use it."}'
+                    ),
+                    state="success",
+                )
+            if role == "final":
+                return ChatAgentRun(
+                    answer="Observation: incomplete finalization",
+                    state="generation_error",
+                    success=False,
+                    error="synthesis model failed",
+                    debug_runs=(synthesis_debug,),
+                )
+            observation = (
+                "https://example.com/verified"
+                if kwargs["enable_web_search"]
+                else "[verified.pdf, page 2] Local support"
+            )
+            return ChatAgentRun(
+                answer=(
+                    '{"facts":[{"claim":"Intermediate fact","support":"Internal support",'
+                    '"sources":[],"confidence":"high"}],"limitations":[]}'
+                ),
+                observations=(observation,),
+                state="success",
+            )
+
+        result = asyncio.run(
+            AgentOrchestrator(self.settings, chat_runner=fake_chat).run(
+                OrchestrationRequest(
+                    objective="Compare all evidence.",
+                    conversation_id="conversation-1",
+                    enable_web_search=True,
+                    enable_local_knowledge=True,
+                )
+            )
+        )
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.citations, ())
+        self.assertNotIn("Intermediate fact", result.final_answer)
+        self.assertNotIn("Evidence agrees", result.final_answer)
+        self.assertNotIn("Observation", result.final_answer)
+        runs = {item.task_id: item for item in result.multi_agent_run.runs}
+        self.assertFalse(runs["synthesis"].success)
+        self.assertEqual(runs["synthesis"].error, "synthesis model failed")
+        self.assertEqual(runs["synthesis"].result.error, "synthesis model failed")
+        self.assertEqual(result.debug_runs[-1].output, synthesis_debug.output)
+
+    def test_success_state_with_internal_synthesis_payload_is_rejected(self) -> None:
+        internal_payload = (
+            '{"facts":[{"claim":"Still internal","support":"Do not publish",'
+            '"sources":[],"confidence":"medium"}],"limitations":[]}'
+        )
+
+        def fake_chat(**kwargs):
+            role = kwargs["output_role"]
+            if role == "review":
+                return ChatAgentRun(
+                    answer=(
+                        '{"agreements":[],"conflicts":[],"unsupported_claims":[],'
+                        '"gaps":[],"resolution":"Synthesize."}'
+                    ),
+                    state="success",
+                )
+            if role == "final":
+                return ChatAgentRun(answer=internal_payload, state="success")
+            return ChatAgentRun(
+                answer=(
+                    '{"facts":[{"claim":"Evidence","support":"Support",'
+                    '"sources":[],"confidence":"medium"}],"limitations":[]}'
+                ),
+                state="success",
+            )
+
+        intent = ResolvedIntent(
+            original_request="Provide a detailed comparison.",
+            operational_objective="Provide a detailed comparison.",
+            task_type="compare",
+            answer_contract=AnswerContract(
+                task_type="compare",
+                complexity="complex",
+            ),
+        )
+        result = asyncio.run(
+            AgentOrchestrator(self.settings, chat_runner=fake_chat).run(
+                OrchestrationRequest(
+                    objective=intent.original_request,
+                    resolved_intent=intent,
+                    enable_web_search=True,
+                )
+            )
+        )
+
+        self.assertFalse(result.success)
+        self.assertNotIn("Still internal", result.final_answer)
+        self.assertEqual(result.citations, ())
+        synthesis = {
+            item.task_id: item for item in result.multi_agent_run.runs
+        }["synthesis"]
+        self.assertFalse(synthesis.success)
+        self.assertIn("internal pipeline payload", synthesis.error)
+
+    def test_internal_review_and_synthesis_bypass_only_user_document_preflight(
+        self,
+    ) -> None:
+        calls: list[dict[str, object]] = []
+
+        def fake_chat(**kwargs):
+            calls.append(kwargs)
+            role = kwargs["output_role"]
+            if role == "review":
+                return ChatAgentRun(
+                    answer=(
+                        '{"agreements":["Ledger is usable"],"conflicts":[],'
+                        '"unsupported_claims":[],"gaps":[],"resolution":"Synthesize it."}'
+                    ),
+                    state="success",
+                )
+            if role == "final":
+                return ChatAgentRun(
+                    answer="Final document comparison [verified.pdf, page 2]",
+                    state="success",
+                )
+            observation = (
+                "https://example.com/verified"
+                if kwargs["enable_web_search"]
+                else "[verified.pdf, page 2] Local support"
+            )
+            return ChatAgentRun(
+                answer=(
+                    '{"facts":[{"claim":"Verified fact","support":"Verified support",'
+                    '"sources":[],"confidence":"high"}],"limitations":[]}'
+                ),
+                observations=(observation,),
+                state="success",
+            )
+
+        intent = ResolvedIntent(
+            original_request="总结我上传的文档并与网页资料对比",
+            operational_objective="总结我上传的文档并与网页资料对比",
+            task_type="compare",
+            answer_contract=AnswerContract(task_type="compare"),
+        )
+        result = asyncio.run(
+            AgentOrchestrator(self.settings, chat_runner=fake_chat).run(
+                OrchestrationRequest(
+                    objective=intent.original_request,
+                    resolved_intent=intent,
+                    conversation_id="conversation-1",
+                    enable_web_search=True,
+                    enable_local_knowledge=True,
+                )
+            )
+        )
+
+        self.assertTrue(result.success)
+        evidence_calls = [call for call in calls if call["output_role"] == "evidence"]
+        internal_calls = [call for call in calls if call["output_role"] != "evidence"]
+        self.assertTrue(all(call["enforce_document_evidence"] for call in evidence_calls))
+        self.assertTrue(
+            all(not call["enforce_document_evidence"] for call in internal_calls)
+        )
+        self.assertTrue(
+            all(
+                call["response_language_source"] == intent.original_request
+                for call in internal_calls
+            )
+        )
+
+    def test_terminal_failure_states_never_promote_arbiter_fallback(self) -> None:
+        worker_json = (
+            '{"facts":[{"claim":"Internal worker result","support":"Do not expose",'
+            '"sources":[],"confidence":"medium"}],"limitations":[]}'
+        )
+
+        class TerminalStateExecutor:
+            def __init__(self, terminal_error: str | None) -> None:
+                self.terminal_error = terminal_error
+
+            async def execute(self, plan, **_kwargs):
+                runs = [
+                    NamedAgentRun(
+                        name="research_agent",
+                        result=worker_json,
+                        task_id="research",
+                        success=True,
+                    )
+                ]
+                if self.terminal_error is not None:
+                    runs.append(
+                        NamedAgentRun(
+                            name="synthesis_agent",
+                            result=None,
+                            task_id=plan.terminal_task_id,
+                            success=False,
+                            error=self.terminal_error,
+                        )
+                    )
+                return MultiAgentRun(
+                    objective=plan.delegation.objective,
+                    runs=runs,
+                    delegation_plan=plan.delegation,
+                    final_answer=worker_json,
+                )
+
+        for terminal_error in (
+            None,
+            "Skipped because dependencies failed: review",
+            "terminal task was skipped",
+            "terminal task was cancelled",
+            "RuntimeError: synthesis exploded",
+        ):
+            with self.subTest(terminal_error=terminal_error):
+                result = asyncio.run(
+                    AgentOrchestrator(
+                        self.settings,
+                        executor=TerminalStateExecutor(terminal_error),
+                    ).run(
+                        OrchestrationRequest(
+                            objective="Compare all available sources.",
+                            conversation_id="conversation-1",
+                            enable_web_search=True,
+                            enable_local_knowledge=True,
+                        )
+                    )
+                )
+
+                self.assertFalse(result.success)
+                self.assertEqual(result.citations, ())
+                self.assertNotIn("Internal worker result", result.final_answer)
+                self.assertNotIn('"facts"', result.final_answer)
 
     def test_final_answer_citations_exclude_unused_retrieval_candidates(self) -> None:
         run = ChatAgentRun(
@@ -407,10 +740,11 @@ class AgentOrchestratorTests(unittest.TestCase):
             )
         )
 
-        # 原因：异常文本过去沿用 success=True，导致 synthesis 和整体请求伪装成成功。
-        # 作用：保留已取得的本地证据供降级展示，但 terminal 未完成时状态必须为失败。
+        # 原因：依赖失败后 Arbiter 仍可能选择成功 Worker 的内部 Evidence 作为答案。
+        # 作用：terminal 未完成时 fail closed，同时在 MultiAgentRun 中保留各节点诊断。
         self.assertFalse(result.success)
-        self.assertIn("local evidence", result.final_answer)
+        self.assertNotIn("local evidence", result.final_answer)
+        self.assertEqual(result.citations, ())
         self.assertTrue(
             any(
                 event.status == "warning" and event.agent == "research_agent"
@@ -504,7 +838,10 @@ class AgentOrchestratorTests(unittest.TestCase):
 
         def fake_chat(**kwargs):
             self.assertIn("document answer", kwargs["user_message"])
-            return ChatAgentRun(answer="synthesized document answer", state="success")
+            return ChatAgentRun(
+                answer="synthesized document answer [Source: notes.txt]",
+                state="success",
+            )
 
         with tempfile.TemporaryDirectory() as tmpdir:
             report = SimpleNamespace(
