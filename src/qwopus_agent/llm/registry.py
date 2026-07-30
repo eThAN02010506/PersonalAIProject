@@ -61,6 +61,7 @@ def create_default_llm_registry() -> LLMRegistry:
             base_url=config.base_url or "http://127.0.0.1:8080/v1",
             api_key=config.api_key,
             timeout_seconds=config.timeout_seconds,
+            max_retries=int(config.extra.get("max_retries", 1)),
         ),
     )
 
@@ -72,6 +73,7 @@ def create_default_llm_registry() -> LLMRegistry:
             base_url=config.base_url or "http://127.0.0.1:8080/v1",
             api_key=config.api_key,
             timeout_seconds=config.timeout_seconds,
+            max_retries=int(config.extra.get("max_retries", 1)),
         ),
     )
     return registry

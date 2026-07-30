@@ -489,6 +489,16 @@ class ModelSettingsUpdate(BaseModel):
     agent_mode: Literal["tool_calling", "code"] = "tool_calling"
     supports_structured_output: bool = False
     supports_vision: bool = False
+    request_timeout_seconds: int = Field(default=120, ge=1, le=600)
+    max_retries: int = Field(default=1, ge=0, le=3)
+    run_timeout_seconds: int = Field(default=600, ge=1, le=3600)
+
+    @model_validator(mode="after")
+    def validate_timeouts(self) -> ModelSettingsUpdate:
+        """Require enough total time for at least one configured model request."""
+        if self.run_timeout_seconds < self.request_timeout_seconds:
+            raise ValueError("Run timeout must not be shorter than request timeout.")
+        return self
 
 
 class ModelSettingsView(BaseModel):
@@ -505,6 +515,9 @@ class ModelSettingsView(BaseModel):
     agent_mode: Literal["tool_calling", "code"]
     supports_structured_output: bool
     supports_vision: bool
+    request_timeout_seconds: int
+    max_retries: int
+    run_timeout_seconds: int
 
 
 class DebugRuntimeLogView(BaseModel):

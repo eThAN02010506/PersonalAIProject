@@ -37,6 +37,8 @@ class ModelSettings:
     provider: str = "openai_compatible"
     api_key: str = "sk-optiq-local"
     timeout_seconds: int = 120
+    max_retries: int = 1
+    run_timeout_seconds: int = 600
     temperature: float = 0.2
     max_tokens: int = 8192
     capabilities: ModelCapabilities = field(default_factory=ModelCapabilities)
@@ -44,6 +46,12 @@ class ModelSettings:
     def __post_init__(self) -> None:
         if self.max_tokens < 1:
             raise ValueError("max_tokens must be positive.")
+        if self.timeout_seconds < 1:
+            raise ValueError("timeout_seconds must be positive.")
+        if not 0 <= self.max_retries <= 3:
+            raise ValueError("max_retries must be between 0 and 3.")
+        if self.run_timeout_seconds < self.timeout_seconds:
+            raise ValueError("run_timeout_seconds must not be shorter than one request timeout.")
         if self.max_tokens >= self.context_window_tokens:
             # 原因：输出上限占满上下文后，系统提示、历史和 Tool 证据没有任何可用空间。
             # 作用：在请求模型前拒绝不可能成立的运行配置。
@@ -66,6 +74,10 @@ class ModelSettings:
             provider=os.getenv("QWOPUS_LLM_PROVIDER", "openai_compatible"),
             api_key=os.getenv("QWOPUS_SMOLAGENTS_API_KEY", "sk-optiq-local"),
             timeout_seconds=int(os.getenv("QWOPUS_SMOLAGENTS_TIMEOUT_SECONDS", "120")),
+            max_retries=int(os.getenv("QWOPUS_SMOLAGENTS_MAX_RETRIES", "1")),
+            run_timeout_seconds=int(
+                os.getenv("QWOPUS_AGENT_RUN_TIMEOUT_SECONDS", "600")
+            ),
             temperature=float(os.getenv("QWOPUS_SMOLAGENTS_TEMPERATURE", "0.2")),
             max_tokens=int(os.getenv("QWOPUS_SMOLAGENTS_MAX_TOKENS", "8192")),
             capabilities=ModelCapabilities(
@@ -92,6 +104,7 @@ class ModelSettings:
             extra={
                 "temperature": self.temperature,
                 "max_tokens": self.max_tokens,
+                "max_retries": self.max_retries,
                 "capabilities": self.capabilities,
             },
         )

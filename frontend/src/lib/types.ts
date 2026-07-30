@@ -212,6 +212,9 @@ export type Health = {
   agent_mode: "tool_calling" | "code";
   supports_structured_output: boolean;
   supports_vision: boolean;
+  request_timeout_seconds: number;
+  max_retries: number;
+  run_timeout_seconds: number;
 };
 
 export type DebugAgentRun = {
@@ -234,6 +237,7 @@ export type DebugRecord = {
   result?: string;
   trace?: Record<string, unknown>[];
   debug_runs?: DebugAgentRun[];
+  metrics?: Record<string, unknown>;
 };
 
 export type DebugRecordSummary = {

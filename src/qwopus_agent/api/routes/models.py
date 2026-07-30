@@ -48,6 +48,9 @@ def build_model_router(runtime: RuntimeModelController) -> APIRouter:
                     runtime.configure_remote,
                     payload.base_url,
                     capabilities,
+                    timeout_seconds=payload.request_timeout_seconds,
+                    max_retries=payload.max_retries,
+                    run_timeout_seconds=payload.run_timeout_seconds,
                 )
             else:
                 if not payload.model_path:
@@ -56,6 +59,9 @@ def build_model_router(runtime: RuntimeModelController) -> APIRouter:
                     runtime.configure_local,
                     payload.model_path,
                     capabilities,
+                    timeout_seconds=payload.request_timeout_seconds,
+                    max_retries=payload.max_retries,
+                    run_timeout_seconds=payload.run_timeout_seconds,
                 )
         except ModelRuntimeError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -78,4 +84,7 @@ def _model_settings_view(status: RuntimeModelStatus) -> ModelSettingsView:
             status.settings.capabilities.supports_structured_output
         ),
         supports_vision=status.settings.capabilities.supports_vision,
+        request_timeout_seconds=status.settings.timeout_seconds,
+        max_retries=status.settings.max_retries,
+        run_timeout_seconds=status.settings.run_timeout_seconds,
     )

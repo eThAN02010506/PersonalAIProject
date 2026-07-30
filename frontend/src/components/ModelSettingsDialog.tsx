@@ -22,6 +22,9 @@ export function ModelSettingsDialog({
   const [modelPath, setModelPath] = useState("");
   const [contextWindow, setContextWindow] = useState(32768);
   const [agentMode, setAgentMode] = useState<"tool_calling" | "code">("tool_calling");
+  const [requestTimeout, setRequestTimeout] = useState(120);
+  const [maxRetries, setMaxRetries] = useState(1);
+  const [runTimeout, setRunTimeout] = useState(600);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -34,6 +37,9 @@ export function ModelSettingsDialog({
     setModelPath(health?.local_model_path ?? "");
     setContextWindow(health?.context_window_tokens ?? 32768);
     setAgentMode(health?.agent_mode ?? "tool_calling");
+    setRequestTimeout(health?.request_timeout_seconds ?? 120);
+    setMaxRetries(health?.max_retries ?? 1);
+    setRunTimeout(health?.run_timeout_seconds ?? 600);
     setError(null);
   }, [health, open]);
 
@@ -53,6 +59,9 @@ export function ModelSettingsDialog({
               agent_mode: agentMode,
               supports_structured_output: health?.supports_structured_output ?? false,
               supports_vision: health?.supports_vision ?? false,
+              request_timeout_seconds: requestTimeout,
+              max_retries: maxRetries,
+              run_timeout_seconds: runTimeout,
             }
           : {
               mode,
@@ -61,6 +70,9 @@ export function ModelSettingsDialog({
               agent_mode: agentMode,
               supports_structured_output: health?.supports_structured_output ?? false,
               supports_vision: health?.supports_vision ?? false,
+              request_timeout_seconds: requestTimeout,
+              max_retries: maxRetries,
+              run_timeout_seconds: runTimeout,
             },
       );
       onSaved(updated);
@@ -155,6 +167,42 @@ export function ModelSettingsDialog({
                 <option value="tool_calling">Tool calling</option>
                 <option value="code">Code actions</option>
               </select>
+            </label>
+          </div>
+
+          <div className="model-capability-grid">
+            <label className="model-field">
+              <span>Request timeout (seconds)</span>
+              <input
+                type="number"
+                min="1"
+                max="600"
+                value={requestTimeout}
+                onChange={(event) => setRequestTimeout(Number(event.target.value))}
+                required
+              />
+            </label>
+            <label className="model-field">
+              <span>Transient retries</span>
+              <input
+                type="number"
+                min="0"
+                max="3"
+                value={maxRetries}
+                onChange={(event) => setMaxRetries(Number(event.target.value))}
+                required
+              />
+            </label>
+            <label className="model-field">
+              <span>Run timeout (seconds)</span>
+              <input
+                type="number"
+                min={requestTimeout}
+                max="3600"
+                value={runTimeout}
+                onChange={(event) => setRunTimeout(Number(event.target.value))}
+                required
+              />
             </label>
           </div>
 

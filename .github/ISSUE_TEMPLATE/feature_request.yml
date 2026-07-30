@@ -1,0 +1,31 @@
+name: Feature request
+description: Propose a user-visible capability or improvement
+title: "[Feature]: "
+labels: ["enhancement", "triage"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: User problem
+      description: Which role and use case need this change?
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Required outcome
+      description: Describe observable behavior and acceptance criteria, not only an implementation.
+    validations:
+      required: true
+  - type: textarea
+    id: boundaries
+    attributes:
+      label: Data and capability boundaries
+      description: Note model, files, accounts, network access, tools, and compatibility implications.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Explain whether existing Skills or settings already solve part of the problem.

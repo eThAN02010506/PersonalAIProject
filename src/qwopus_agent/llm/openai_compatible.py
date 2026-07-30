@@ -7,6 +7,8 @@ those models through one implementation.
 from __future__ import annotations
 
 import json
+import logging
+import time
 from dataclasses import dataclass
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -17,6 +19,10 @@ from qwopus_agent.llm.base import BaseLLM, ChatMessage, LLMResponse
 
 class OpenAICompatibleLLMError(RuntimeError):
     """Raised when an OpenAI-compatible server fails or returns invalid data."""
+
+
+_RETRYABLE_HTTP_STATUS = {408, 429, 500, 502, 503, 504}
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -34,6 +40,15 @@ class OpenAICompatibleLLM(BaseLLM):
 
     # Role: Prevents HTTP calls from hanging forever.
     timeout_seconds: float = 120.0
+
+    # Role: Retry only transient transport failures; invalid requests and auth errors stop.
+    max_retries: int = 1
+
+    def __post_init__(self) -> None:
+        if self.timeout_seconds <= 0:
+            raise ValueError("timeout_seconds must be positive.")
+        if not 0 <= self.max_retries <= 3:
+            raise ValueError("max_retries must be between 0 and 3.")
 
     def generate(
         self,
@@ -75,18 +90,26 @@ class OpenAICompatibleLLM(BaseLLM):
             headers["Authorization"] = f"Bearer {self.api_key}"
 
         request = Request(url, data=body, headers=headers, method="POST")
-        try:
-            with urlopen(request, timeout=self.timeout_seconds) as response:
-                data = response.read().decode("utf-8")
-        except HTTPError as exc:
-            detail = exc.read().decode("utf-8", errors="replace")
-            raise OpenAICompatibleLLMError(
-                f"OpenAI-compatible server returned HTTP {exc.code}: {detail}"
-            ) from exc
-        except URLError as exc:
-            raise OpenAICompatibleLLMError(
-                f"Could not reach LLM server at {url}: {exc.reason}"
-            ) from exc
+        data = ""
+        for attempt in range(self.max_retries + 1):
+            try:
+                with urlopen(request, timeout=self.timeout_seconds) as response:
+                    data = response.read().decode("utf-8")
+                break
+            except HTTPError as exc:
+                detail = exc.read().decode("utf-8", errors="replace")
+                if exc.code not in _RETRYABLE_HTTP_STATUS or attempt >= self.max_retries:
+                    raise OpenAICompatibleLLMError(
+                        f"OpenAI-compatible server returned HTTP {exc.code}: {detail}"
+                    ) from exc
+                _wait_before_retry(url, attempt, f"HTTP {exc.code}")
+            except (TimeoutError, URLError) as exc:
+                if attempt >= self.max_retries:
+                    reason = getattr(exc, "reason", str(exc))
+                    raise OpenAICompatibleLLMError(
+                        f"Could not reach LLM server at {url}: {reason}"
+                    ) from exc
+                _wait_before_retry(url, attempt, type(exc).__name__)
 
         try:
             decoded = json.loads(data)
@@ -99,3 +122,18 @@ class OpenAICompatibleLLM(BaseLLM):
                 "OpenAI-compatible server returned a non-object JSON response."
             )
         return decoded
+
+
+def _wait_before_retry(url: str, attempt: int, reason: str) -> None:
+    """Apply one short exponential delay and expose the attempt in runtime logs."""
+    delay_seconds = 0.25 * (2**attempt)
+    # 原因：立即重复请求会放大繁忙模型服务的负载，并让多个并发用户同步重试。
+    # 作用：只对瞬态失败做短指数退避；总次数仍由 max_retries 硬限制。
+    logger.warning(
+        "llm_request_retry url=%s attempt=%s delay_seconds=%.2f reason=%s",
+        url,
+        attempt + 2,
+        delay_seconds,
+        reason,
+    )
+    time.sleep(delay_seconds)

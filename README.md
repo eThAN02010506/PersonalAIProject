@@ -88,8 +88,11 @@ from a weaker compatible model is converted into a bounded evidence fallback
 instead of being displayed as an intermediate answer.
 
 See [docs/requirements.md](docs/requirements.md) for product roles, use cases,
-status, and acceptance criteria. See
-[docs/architecture.md](docs/architecture.md) for module-level design notes.
+status, and acceptance criteria. The
+[traceability matrix](docs/traceability.md) maps requirements to production
+modules and tests, [evaluation guidance](docs/evaluation.md) defines quality
+gates and real cases, and [architecture notes](docs/architecture.md) describe
+module boundaries.
 
 ## Requirements
 
@@ -184,6 +187,9 @@ Useful optional variables:
 | `QWOPUS_AGENT_MODE` | `tool_calling` by default, or legacy `code` mode |
 | `QWOPUS_SMOLAGENTS_CONTEXT_WINDOW_TOKENS` | Context budget used by prompt and evidence selection |
 | `QWOPUS_SMOLAGENTS_MAX_TOKENS` | Maximum generated output tokens |
+| `QWOPUS_SMOLAGENTS_TIMEOUT_SECONDS` | Timeout for one model request |
+| `QWOPUS_SMOLAGENTS_MAX_RETRIES` | Transient model request retries, from `0` to `3` |
+| `QWOPUS_AGENT_RUN_TIMEOUT_SECONDS` | Hard timeout for one complete Agent turn |
 | `QWOPUS_MLX_SERVER_EXECUTABLE` | Explicit `mlx_lm.server` executable for local-path mode |
 | `QWOPUS_EMBEDDING_MODEL` | Locally cached sentence-transformer used by MiniRAG |
 | `QWOPUS_LAN_USERNAME` | Shared LAN login name; defaults to `qwopus` |
@@ -450,6 +456,8 @@ main application:
 - the account responsible for every recorded run
 - complete recorded prompts and raw model outputs
 - Tool names, arguments, Observations, parsing errors, and max-step state
+- run duration, configured timeouts/retries, phase durations, Agent runs,
+  recorded steps, refinement count, and max-step failures
 - downloadable JSON traces and a bounded runtime-log tail
 - Skill candidate generation, diff, validation, dry run, promotion, rejection,
   and rollback
@@ -494,7 +502,7 @@ vendor/minirag/   Vendored MiniRAG source used by the local knowledge adapter
 vendor/mineru/    Pinned MinerU Git submodule used for document parsing and OCR
 storage/          Runtime documents, indexes, reports, Skills, cache, and SQLite
 logs/             Runtime logs and bounded Debug records
-docs/             Product requirements and architecture notes
+docs/             Requirements, traceability, evaluation, and architecture notes
 AGENTS.md         Repository development and verification rules
 ```
 
@@ -560,6 +568,18 @@ Run static checks:
 MYPY_CACHE_DIR=/tmp/qwopus-mypy .venv/bin/mypy src/qwopus_agent
 ```
 
+Run the deterministic P0 acceptance set and read the external test checklist in
+[docs/evaluation.md](docs/evaluation.md):
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src \
+  .venv/bin/python -m unittest \
+  tests.test_p0_acceptance \
+  tests.test_graph_multiformat_realcase \
+  tests.test_conversation_knowledge \
+  tests.test_saved_documents_api
+```
+
 Validate the frontend:
 
 ```bash
@@ -571,6 +591,15 @@ pnpm run build
 Every module is designed to be testable with injected model, memory, search, and
 Skill dependencies. New business logic belongs in Python services or domain
 modules, not in React components or FastAPI route handlers.
+
+## Contributing And Security
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for change scope and verification,
+[SECURITY.md](SECURITY.md) for private vulnerability reporting,
+[SUPPORT.md](SUPPORT.md) for safe support requests, and
+[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) for participation standards.
+The source may be viewed for evaluation, but no open-source license is granted.
+All rights are reserved by the project owner.
 
 ## Current Boundaries
 
@@ -592,4 +621,5 @@ modules, not in React components or FastAPI route handlers.
   isolate chats and files, but this is not an external identity or
   enterprise-tenant system.
 
-Package metadata declares the project under the MIT license.
+The repository currently has no open-source license. Public visibility does not
+grant permission to use, copy, modify, redistribute, or sublicense the source.

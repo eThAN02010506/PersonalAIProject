@@ -1,0 +1,45 @@
+name: Bug report
+description: Report a reproducible Qwopus-Agent defect
+title: "[Bug]: "
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Remove credentials, document contents, personal paths, and raw Debug traces before posting.
+        Report security vulnerabilities privately according to SECURITY.md.
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Observed behavior
+      description: What happened, and what did you expect instead?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: Provide the smallest safe sequence that reproduces the problem.
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Include revision, macOS/Python/Node versions, model server type, and enabled capabilities.
+    validations:
+      required: true
+  - type: textarea
+    id: verification
+    attributes:
+      label: Diagnostics
+      description: Include sanitized status, failure category, and relevant test output.
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety check
+      options:
+        - label: I removed credentials, private documents, personal data, and sensitive Debug content.
+          required: true
+        - label: This is not a security vulnerability.
+          required: true

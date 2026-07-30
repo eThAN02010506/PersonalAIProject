@@ -57,6 +57,9 @@ class _ActiveRun:
     username: str
     user_message_id: str
     model_id: str
+    request_timeout_seconds: int
+    configured_model_retries: int
+    run_timeout_seconds: int
     task: BackgroundChatTask
     prepared: PreparedChatRequest
 
@@ -162,6 +165,9 @@ class ChatRunRegistry:
                 username,
                 user_message.id,
                 settings.model_id,
+                settings.timeout_seconds,
+                settings.max_retries,
+                settings.run_timeout_seconds,
                 task,
                 resolved_request,
             )
@@ -320,6 +326,12 @@ class ChatRunRegistry:
                 user_id=active.user_id,
                 username=active.username,
                 directory=self.debug_directory,
+                metrics={
+                    "elapsed_seconds": round(active.task.elapsed_seconds, 3),
+                    "request_timeout_seconds": active.request_timeout_seconds,
+                    "configured_model_retries": active.configured_model_retries,
+                    "run_timeout_seconds": active.run_timeout_seconds,
+                },
             )
             self._store_completed(
                 run_id,
@@ -507,6 +519,12 @@ class ChatRunRegistry:
                 user_id=active.user_id,
                 username=active.username,
                 directory=self.debug_directory,
+                metrics={
+                    "elapsed_seconds": round(float(active.task.elapsed_seconds), 3),
+                    "request_timeout_seconds": active.request_timeout_seconds,
+                    "configured_model_retries": active.configured_model_retries,
+                    "run_timeout_seconds": active.run_timeout_seconds,
+                },
             )
         finally:
             active.task.close()

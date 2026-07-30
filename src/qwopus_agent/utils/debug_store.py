@@ -28,6 +28,7 @@ def append_debug_record(
     user_id: str | None = None,
     username: str | None = None,
     directory: Path = DEFAULT_DEBUG_DIRECTORY,
+    metrics: dict[str, Any] | None = None,
 ) -> Path | None:
     """Persist one internal run without exposing it through the public HTTP response."""
     record_id = uuid4().hex
@@ -43,6 +44,10 @@ def append_debug_record(
         "result": result,
         "trace": _json_value(trace),
         "debug_runs": _json_value(debug_runs),
+        "metrics": {
+            **_debug_metrics(trace, debug_runs),
+            **(metrics or {}),
+        },
     }
     try:
         directory.mkdir(parents=True, exist_ok=True)
@@ -114,6 +119,52 @@ def _json_value(value: Any) -> Any:
     if isinstance(value, (list, tuple)):
         return [_json_value(item) for item in value]
     return value
+
+
+def _debug_metrics(trace: Any, debug_runs: Any) -> dict[str, Any]:
+    """Summarize bounded operational signals without parsing model reasoning."""
+    normalized_trace = _json_value(trace)
+    normalized_runs = _json_value(debug_runs)
+    trace_items = normalized_trace if isinstance(normalized_trace, list) else []
+    run_items = normalized_runs if isinstance(normalized_runs, list) else []
+    phase_durations: dict[str, float] = {}
+    tool_call_count = 0
+    for event in trace_items:
+        if not isinstance(event, dict):
+            continue
+        phase = event.get("phase")
+        duration = event.get("duration_seconds")
+        if isinstance(phase, str) and isinstance(duration, (int, float)):
+            phase_durations[phase] = round(
+                phase_durations.get(phase, 0.0) + float(duration),
+                3,
+            )
+        if phase == "tool_call" and event.get("status") == "completed":
+            tool_call_count += 1
+
+    step_count = 0
+    refinement_count = 0
+    max_steps_errors = 0
+    for run in run_items:
+        if not isinstance(run, dict):
+            continue
+        steps = run.get("steps")
+        if isinstance(steps, list):
+            step_count += len(steps)
+        label = str(run.get("label", "")).casefold()
+        if any(token in label for token in ("finalizer", "refinement", "retry")):
+            refinement_count += 1
+        if run.get("state") == "max_steps_error":
+            max_steps_errors += 1
+
+    return {
+        "phase_duration_seconds": phase_durations,
+        "agent_run_count": len(run_items),
+        "agent_step_count": step_count,
+        "refinement_run_count": refinement_count,
+        "max_steps_error_count": max_steps_errors,
+        "tool_call_count": tool_call_count,
+    }
 
 
 def _prune_debug_records(

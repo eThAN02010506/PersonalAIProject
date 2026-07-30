@@ -172,7 +172,10 @@ class SmolagentsRuntimeTests(unittest.TestCase):
         self.assertEqual(model.kwargs["model_id"], "gemma-4-12B-it-qat-OptiQ-4bit")
         self.assertEqual(model.kwargs["api_base"], "http://127.0.0.1:8080/v1")
         self.assertEqual(model.kwargs["api_key"], "local_token")
-        self.assertEqual(model.kwargs["client_kwargs"], {"timeout": 120})
+        self.assertEqual(
+            model.kwargs["client_kwargs"],
+            {"timeout": 120, "max_retries": 1},
+        )
         self.assertEqual(model.kwargs["max_tokens"], 128)
 
     def test_build_smolagents_code_agent_starts_without_tools(self) -> None:

@@ -101,11 +101,17 @@ class ModelRuntimeTests(unittest.TestCase):
         status = controller.configure_remote(
             "http://new.example:9000",
             ModelCapabilities(context_window_tokens=65536, agent_mode="code"),
+            timeout_seconds=45,
+            max_retries=2,
+            run_timeout_seconds=240,
         )
 
         self.assertEqual(status.settings.base_url, "http://new.example:9000/v1")
         self.assertEqual(status.settings.context_window_tokens, 65536)
         self.assertEqual(status.settings.capabilities.agent_mode, "code")
+        self.assertEqual(status.settings.timeout_seconds, 45)
+        self.assertEqual(status.settings.max_retries, 2)
+        self.assertEqual(status.settings.run_timeout_seconds, 240)
         self.assertEqual(status.mode, "remote")
         probe.assert_called_once()
 

@@ -129,6 +129,10 @@ class RuntimeModelController:
         self,
         base_url: str,
         capabilities: ModelCapabilities | None = None,
+        *,
+        timeout_seconds: int | None = None,
+        max_retries: int | None = None,
+        run_timeout_seconds: int | None = None,
     ) -> RuntimeModelStatus:
         """Switch to a reachable OpenAI-compatible server."""
         normalized_url = _normalize_base_url(base_url)
@@ -139,6 +143,21 @@ class RuntimeModelController:
                     self._settings,
                     base_url=normalized_url,
                     capabilities=capabilities or self._settings.capabilities,
+                    timeout_seconds=(
+                        timeout_seconds
+                        if timeout_seconds is not None
+                        else self._settings.timeout_seconds
+                    ),
+                    max_retries=(
+                        max_retries
+                        if max_retries is not None
+                        else self._settings.max_retries
+                    ),
+                    run_timeout_seconds=(
+                        run_timeout_seconds
+                        if run_timeout_seconds is not None
+                        else self._settings.run_timeout_seconds
+                    ),
                 )
             candidate, online, message = probe_model_settings(candidate)
             if not online:
@@ -158,6 +177,10 @@ class RuntimeModelController:
         self,
         model_path: str,
         capabilities: ModelCapabilities | None = None,
+        *,
+        timeout_seconds: int | None = None,
+        max_retries: int | None = None,
+        run_timeout_seconds: int | None = None,
     ) -> RuntimeModelStatus:
         """Start an MLX server for a local model directory and select it."""
         path = _validate_model_path(model_path)
@@ -184,6 +207,21 @@ class RuntimeModelController:
                 model_id=path.name,
                 base_url=base_url,
                 capabilities=capabilities or self._settings.capabilities,
+                timeout_seconds=(
+                    timeout_seconds
+                    if timeout_seconds is not None
+                    else self._settings.timeout_seconds
+                ),
+                max_retries=(
+                    max_retries
+                    if max_retries is not None
+                    else self._settings.max_retries
+                ),
+                run_timeout_seconds=(
+                    run_timeout_seconds
+                    if run_timeout_seconds is not None
+                    else self._settings.run_timeout_seconds
+                ),
             )
             process = self._start_local_process(executable, path, port)
             try:

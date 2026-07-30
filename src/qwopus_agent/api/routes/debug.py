@@ -73,6 +73,9 @@ def build_debug_router(
                     model_status.settings.capabilities.supports_structured_output
                 ),
                 supports_vision=model_status.settings.capabilities.supports_vision,
+                request_timeout_seconds=model_status.settings.timeout_seconds,
+                max_retries=model_status.settings.max_retries,
+                run_timeout_seconds=model_status.settings.run_timeout_seconds,
             ),
             active_runs=active_runs,
             completed_runs=completed_runs,

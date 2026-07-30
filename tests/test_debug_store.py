@@ -73,6 +73,50 @@ class DebugStoreTests(unittest.TestCase):
                 "raw evidence",
             )
 
+    def test_record_summarizes_stage_and_refinement_metrics(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            directory = Path(temporary_directory)
+            append_debug_record(
+                source="chat",
+                status="completed",
+                trace=(
+                    {
+                        "phase": "execution",
+                        "status": "completed",
+                        "duration_seconds": 1.25,
+                    },
+                    {
+                        "phase": "tool_call",
+                        "status": "completed",
+                        "tool": "rag_search",
+                    },
+                ),
+                debug_runs=(
+                    {
+                        "label": "chat",
+                        "state": "max_steps_error",
+                        "steps": [{"step_number": 1}, {"step_number": 2}],
+                    },
+                    {
+                        "label": "chat_finalizer",
+                        "state": "success",
+                        "steps": [{"step_number": 1}],
+                    },
+                ),
+                directory=directory,
+                metrics={"elapsed_seconds": 2.5, "configured_model_retries": 1},
+            )
+
+            metrics = load_debug_records(directory=directory)[0]["metrics"]
+
+        self.assertEqual(metrics["phase_duration_seconds"]["execution"], 1.25)
+        self.assertEqual(metrics["agent_run_count"], 2)
+        self.assertEqual(metrics["agent_step_count"], 3)
+        self.assertEqual(metrics["refinement_run_count"], 1)
+        self.assertEqual(metrics["max_steps_error_count"], 1)
+        self.assertEqual(metrics["tool_call_count"], 1)
+        self.assertEqual(metrics["elapsed_seconds"], 2.5)
+
     def test_loader_ignores_partial_or_invalid_files(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             directory = Path(temporary_directory)
@@ -92,6 +136,7 @@ class DebugStoreTests(unittest.TestCase):
             repository.list_messages.return_value = []
             task = MagicMock()
             task.refresh_phase.return_value = "completed"
+            task.elapsed_seconds = 1.75
             task.poll_result.return_value = ChatTaskResult(
                 status="completed",
                 content="final answer",
@@ -123,6 +168,8 @@ class DebugStoreTests(unittest.TestCase):
                 records[0]["debug_runs"][0]["steps"][0]["observations"],
                 "raw",
             )
+            self.assertEqual(records[0]["metrics"]["elapsed_seconds"], 1.75)
+            self.assertEqual(records[0]["metrics"]["configured_model_retries"], 1)
             task.close.assert_called_once_with()
 
     def test_completed_chat_run_persists_resolved_task_state(self) -> None:

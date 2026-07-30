@@ -220,7 +220,10 @@ def build_smolagents_model(settings: SmolagentsModelSettings | None = None) -> A
         model_id=settings.model_id,
         api_base=settings.base_url,
         api_key=settings.api_key,
-        client_kwargs={"timeout": settings.timeout_seconds},
+        client_kwargs={
+            "timeout": settings.timeout_seconds,
+            "max_retries": settings.max_retries,
+        },
         temperature=settings.temperature,
         # 原因：smolagents Agent.run 不会把应用层 max_tokens 自动传给模型。
         # 作用：长文档报告使用显式输出预算，不再由兼容服务的短默认值截成“略”。

@@ -73,6 +73,7 @@ class BackgroundChatTask:
     result_queue: Any
     progress_queue: Any
     started_at: float
+    timeout_seconds: float = 600.0
     phase: str = "connecting"
 
     @property
@@ -93,6 +94,17 @@ class BackgroundChatTask:
             payload = self.result_queue.get_nowait()
         except Empty:
             if self.process.is_alive():
+                if self.elapsed_seconds >= self.timeout_seconds:
+                    # 原因：单次 HTTP timeout 不能限制多步 Agent 的累计等待时间。
+                    # 作用：整轮超过截止时间时终止隔离 worker，避免 UI 永久轮询。
+                    self._terminate_process()
+                    return ChatTaskResult(
+                        status="failed",
+                        content=(
+                            "Agent run exceeded its configured timeout "
+                            f"({self.timeout_seconds:g} seconds)."
+                        ),
+                    )
                 return None
             self.process.join(timeout=0.1)
             return ChatTaskResult(
@@ -115,6 +127,11 @@ class BackgroundChatTask:
 
     def cancel(self) -> None:
         """Terminate the local worker so the UI stops waiting immediately."""
+        self._terminate_process()
+        self._close_queues(wait=False)
+
+    def _terminate_process(self) -> None:
+        """Stop a live worker without deciding when its queues should be released."""
         if self.process.is_alive():
             # 原因：线程无法中断正在等待的模型 HTTP 请求，停止按钮会形同虚设。
             # 作用：终止独立 Agent 进程并关闭其连接，让 Web UI 立即恢复交互。
@@ -123,7 +140,6 @@ class BackgroundChatTask:
             if self.process.is_alive():
                 self.process.kill()
                 self.process.join(timeout=1)
-        self._close_queues(wait=False)
 
     def close(self) -> None:
         """Release process and multiprocessing queue resources after a terminal run."""
@@ -209,6 +225,7 @@ def start_chat_task(
         result_queue=result_queue,
         progress_queue=progress_queue,
         started_at=time.monotonic(),
+        timeout_seconds=settings.run_timeout_seconds,
     )
 
 

@@ -308,6 +308,11 @@ function RecordDetail({ record }: { record: DebugRecord }) {
       </section>
 
       <section className="debug-section">
+        <h3>Run metrics</h3>
+        <pre>{JSON.stringify(record.metrics ?? {}, null, 2)}</pre>
+      </section>
+
+      <section className="debug-section">
         <h3>Orchestration trace</h3>
         <div className="trace-table">
           {(record.trace ?? []).map((event, index) => (

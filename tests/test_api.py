@@ -542,6 +542,9 @@ class ApiTests(unittest.TestCase):
         self.model_runtime.configure_remote.assert_called_once_with(
             "http://192.168.1.97:8001/v1",
             ModelCapabilities(),
+            timeout_seconds=120,
+            max_retries=1,
+            run_timeout_seconds=600,
         )
 
     def test_analysis_reads_uploaded_bytes_before_orchestration(self) -> None:

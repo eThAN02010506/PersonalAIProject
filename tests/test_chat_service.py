@@ -1,5 +1,6 @@
 import multiprocessing
 import queue
+import time
 import unittest
 from collections.abc import Callable
 from dataclasses import replace
@@ -203,6 +204,7 @@ class ChatServiceTests(unittest.TestCase):
         self.assertEqual(request.knowledge_root, Path("/tmp/conversation-knowledge"))
         self.assertEqual(request.workflow_specs, (workflow,))
         self.assertIs(task.process, process)
+        self.assertEqual(task.timeout_seconds, settings.run_timeout_seconds)
         process.start.assert_called_once_with()
 
     def test_spawned_worker_rejects_unknown_request_schema(self) -> None:
@@ -248,6 +250,26 @@ class ChatServiceTests(unittest.TestCase):
         process.terminate.assert_called_once_with()
         process.join.assert_called_once_with(timeout=2)
         process.kill.assert_not_called()
+
+    def test_poll_terminates_worker_after_total_run_timeout(self) -> None:
+        process = Mock()
+        process.is_alive.side_effect = [True, True, False]
+        task = BackgroundChatTask(
+            process=process,
+            result_queue=queue.Queue(),
+            progress_queue=queue.Queue(),
+            started_at=time.monotonic() - 11,
+            timeout_seconds=10,
+        )
+
+        result = task.poll_result()
+
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertEqual(result.status, "failed")
+        self.assertIn("configured timeout", result.content)
+        process.terminate.assert_called_once_with()
+        process.join.assert_called_once_with(timeout=2)
 
 
 if __name__ == "__main__":

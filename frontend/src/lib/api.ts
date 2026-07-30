@@ -131,6 +131,9 @@ export const api = {
     agent_mode: "tool_calling" | "code";
     supports_structured_output: boolean;
     supports_vision: boolean;
+    request_timeout_seconds: number;
+    max_retries: number;
+    run_timeout_seconds: number;
   }) =>
     request<Health>("/api/model-settings", {
       method: "PUT",
