@@ -46,6 +46,31 @@ class ApiStaticLLM(BaseLLM):
         )
 
 
+class ApiConversationSkillLLM(BaseLLM):
+    """Return one workflow draft followed by one independent approval."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def generate(
+        self,
+        messages: list[ChatMessage],
+        *,
+        temperature: float = 0.2,
+        max_tokens: int | None = None,
+    ) -> LLMResponse:
+        self.calls += 1
+        content = (
+            '{"name":"sourced_research","description":"Research current sources.",'
+            '"intent_examples":["research this topic"],'
+            '"steps":[{"skill_name":"web_search",'
+            '"query_template":"Research {query}","arguments":{}}]}'
+            if self.calls == 1
+            else '{"approved":true,"issues":[]}'
+        )
+        return LLMResponse(content=content, model="conversation-authoring-model")
+
+
 class ApiTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_directory = tempfile.TemporaryDirectory()
@@ -230,6 +255,7 @@ class ApiTests(unittest.TestCase):
         self.assertIn("/api/debug", schema["paths"])
         self.assertIn("/api/skills", schema["paths"])
         self.assertIn("/api/debug/skills/generate", schema["paths"])
+        self.assertIn("/api/debug/skills/from-runs", schema["paths"])
         self.assertIn("/api/debug/skills/{name}/{version}/test", schema["paths"])
 
     def test_skill_api_promotes_and_rolls_back_reviewed_versions(self) -> None:
@@ -340,6 +366,64 @@ class ApiTests(unittest.TestCase):
             "learned_spreadsheet_report",
             self.client.app.state.skill_registry.list_names(),
         )
+
+    def test_debug_console_generates_candidate_from_conversation_run(self) -> None:
+        conversation_id = self.client.post(
+            "/api/conversations",
+            json={"title": "Reusable research"},
+        ).json()["id"]
+        user_message = self.repository.add_message(
+            conversation_id,
+            "user",
+            "Research current rice prices",
+        )
+        assistant_message = self.repository.add_message(
+            conversation_id,
+            "assistant",
+            "Current rice price findings with cited sources.",
+        )
+        self.repository.save_conversation_run(
+            run_id="source-run-1",
+            conversation_id=conversation_id,
+            user_message_id=user_message.id,
+            assistant_message_id=assistant_message.id,
+            requested_by_user_id=self.user_id,
+            objective="Research current rice prices",
+            operational_objective="Find and summarize current rice price sources",
+            status="completed",
+            model_id="source-model",
+            reusable_skills=("web_search",),
+        )
+        llm = ApiConversationSkillLLM()
+        self.client.app.state.skill_authoring.llm_factory = lambda: llm
+
+        conversations = self.client.get(
+            "/api/debug/skills/source-conversations"
+        )
+        runs = self.client.get(
+            f"/api/debug/skills/source-conversations/{conversation_id}/runs"
+        )
+        generated = self.client.post(
+            "/api/debug/skills/from-runs",
+            json={
+                "conversation_id": conversation_id,
+                "run_ids": ["source-run-1"],
+                "requested_name": "current_research",
+            },
+        )
+
+        self.assertEqual(conversations.status_code, 200)
+        self.assertEqual(conversations.json()[0]["id"], conversation_id)
+        self.assertEqual(runs.status_code, 200)
+        self.assertEqual(runs.json()[0]["reusable_skills"], ["web_search"])
+        self.assertIn("cited sources", runs.json()[0]["answer_preview"])
+        self.assertEqual(generated.status_code, 200)
+        self.assertEqual(generated.json()["skill"]["status"], "candidate")
+        self.assertEqual(
+            generated.json()["skill"]["source_run_id"],
+            "conversation-runs:source-run-1",
+        )
+        self.assertEqual(llm.calls, 2)
 
     def test_spa_static_files_do_not_serve_parent_files(self) -> None:
         root = Path(self.temp_directory.name)

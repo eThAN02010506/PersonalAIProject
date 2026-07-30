@@ -65,6 +65,23 @@ class MessageRecord:
 
 
 @dataclass(frozen=True)
+class ConversationRunRecord:
+    """Persistent, sanitized provenance for one Agent run."""
+
+    run_id: str
+    conversation_id: str
+    user_message_id: str | None
+    assistant_message_id: str | None
+    requested_by_user_id: str | None
+    objective: str
+    operational_objective: str
+    status: Literal["completed", "failed", "cancelled"]
+    model_id: str
+    reusable_skills: tuple[str, ...]
+    created_at: str
+
+
+@dataclass(frozen=True)
 class ConversationMemoryRecord:
     """Compressed model context while full messages remain untouched."""
 
@@ -120,6 +137,23 @@ class ConversationRepository:
                 );
                 CREATE INDEX IF NOT EXISTS idx_messages_conversation
                     ON messages(conversation_id, created_at);
+                CREATE TABLE IF NOT EXISTS conversation_runs (
+                    run_id TEXT PRIMARY KEY,
+                    conversation_id TEXT NOT NULL
+                        REFERENCES conversations(id) ON DELETE CASCADE,
+                    user_message_id TEXT REFERENCES messages(id) ON DELETE SET NULL,
+                    assistant_message_id TEXT REFERENCES messages(id) ON DELETE SET NULL,
+                    requested_by_user_id TEXT,
+                    objective TEXT NOT NULL,
+                    operational_objective TEXT NOT NULL,
+                    status TEXT NOT NULL
+                        CHECK(status IN ('completed', 'failed', 'cancelled')),
+                    model_id TEXT NOT NULL,
+                    reusable_skills TEXT NOT NULL DEFAULT '[]',
+                    created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_conversation_runs_conversation
+                    ON conversation_runs(conversation_id, created_at);
                 CREATE TABLE IF NOT EXISTS conversation_memory (
                     conversation_id TEXT PRIMARY KEY
                         REFERENCES conversations(id) ON DELETE CASCADE,
@@ -199,6 +233,19 @@ class ConversationRepository:
                 _conversation_select()
                 + " "
                 "FROM conversations ORDER BY updated_at DESC"
+            ).fetchall()
+        return [_conversation_record(row) for row in rows]
+
+    def list_conversations_with_reusable_runs(self) -> list[ConversationRecord]:
+        """List conversations that contain at least one promotable run source."""
+        with self._connect() as connection:
+            rows = connection.execute(
+                _conversation_select()
+                + " FROM conversations WHERE EXISTS ("
+                "SELECT 1 FROM conversation_runs run "
+                "WHERE run.conversation_id = conversations.id "
+                "AND run.status = 'completed' AND run.reusable_skills <> '[]'"
+                ") ORDER BY conversations.updated_at DESC"
             ).fetchall()
         return [_conversation_record(row) for row in rows]
 
@@ -681,6 +728,99 @@ class ConversationRepository:
                 (now, conversation_id),
             )
         return record
+
+    def save_conversation_run(
+        self,
+        *,
+        run_id: str,
+        conversation_id: str,
+        user_message_id: str | None,
+        assistant_message_id: str | None,
+        requested_by_user_id: str | None,
+        objective: str,
+        operational_objective: str,
+        status: Literal["completed", "failed", "cancelled"],
+        model_id: str,
+        reusable_skills: tuple[str, ...] = (),
+    ) -> ConversationRunRecord:
+        """Persist only reusable Skill names and message references for one run."""
+        now = _now()
+        skills_json = json.dumps(list(reusable_skills), ensure_ascii=True)
+        with self._connect() as connection:
+            connection.execute(
+                "INSERT INTO conversation_runs("
+                "run_id, conversation_id, user_message_id, assistant_message_id, "
+                "requested_by_user_id, objective, operational_objective, status, "
+                "model_id, reusable_skills, created_at"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    run_id,
+                    conversation_id,
+                    user_message_id,
+                    assistant_message_id,
+                    requested_by_user_id,
+                    objective,
+                    operational_objective,
+                    status,
+                    model_id,
+                    skills_json,
+                    now,
+                ),
+            )
+        return ConversationRunRecord(
+            run_id=run_id,
+            conversation_id=conversation_id,
+            user_message_id=user_message_id,
+            assistant_message_id=assistant_message_id,
+            requested_by_user_id=requested_by_user_id,
+            objective=objective,
+            operational_objective=operational_objective,
+            status=status,
+            model_id=model_id,
+            reusable_skills=reusable_skills,
+            created_at=now,
+        )
+
+    def list_conversation_runs(
+        self,
+        conversation_id: str,
+    ) -> list[ConversationRunRecord]:
+        """List durable run provenance without loading raw Agent diagnostics."""
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT run_id, conversation_id, user_message_id, "
+                "assistant_message_id, requested_by_user_id, objective, "
+                "operational_objective, status, model_id, reusable_skills, "
+                "created_at FROM conversation_runs WHERE conversation_id = ? "
+                "ORDER BY created_at DESC, rowid DESC",
+                (conversation_id,),
+            ).fetchall()
+        return [
+            ConversationRunRecord(
+                run_id=str(row["run_id"]),
+                conversation_id=str(row["conversation_id"]),
+                user_message_id=(
+                    str(row["user_message_id"]) if row["user_message_id"] else None
+                ),
+                assistant_message_id=(
+                    str(row["assistant_message_id"])
+                    if row["assistant_message_id"]
+                    else None
+                ),
+                requested_by_user_id=(
+                    str(row["requested_by_user_id"])
+                    if row["requested_by_user_id"]
+                    else None
+                ),
+                objective=str(row["objective"]),
+                operational_objective=str(row["operational_objective"]),
+                status=row["status"],
+                model_id=str(row["model_id"]),
+                reusable_skills=tuple(json.loads(row["reusable_skills"])),
+                created_at=str(row["created_at"]),
+            )
+            for row in rows
+        ]
 
     def get_memory(self, conversation_id: str) -> ConversationMemoryRecord | None:
         with self._connect() as connection:

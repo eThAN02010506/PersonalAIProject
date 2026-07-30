@@ -171,6 +171,24 @@ class AgentArchitectureTests(unittest.TestCase):
 
         self.assertEqual(result.final_answer, "done: hello")
 
+    def test_production_planner_reviews_complex_single_source_request(self) -> None:
+        plan = asyncio.run(
+            Planner().plan(
+                AgentPlanningRequest(
+                    objective="Provide a detailed causal analysis",
+                    enable_local_knowledge=True,
+                    complexity="complex",
+                )
+            )
+        )
+
+        self.assertEqual(plan.route, "multi_agent")
+        self.assertEqual(
+            [task.task_id for task in plan.delegation.tasks],
+            ["knowledge", "review", "synthesis"],
+        )
+        self.assertEqual(plan.terminal_task_id, "synthesis")
+
     def test_production_planner_declares_single_and_report_terminals(self) -> None:
         single = asyncio.run(
             Planner().plan(AgentPlanningRequest(objective="hello"))

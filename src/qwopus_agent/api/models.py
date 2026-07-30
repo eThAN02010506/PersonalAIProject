@@ -257,6 +257,46 @@ class SkillAuthoringRequest(BaseModel):
     )
 
 
+class SkillSourceConversationView(BaseModel):
+    """One admin-visible conversation containing reusable successful runs."""
+
+    id: str
+    title: str
+    owner_username: str | None = None
+    updated_at: str
+
+
+class SkillSourceRunView(BaseModel):
+    """Sanitized conversation run shown before candidate authoring."""
+
+    run_id: str
+    conversation_id: str
+    objective: str
+    operational_objective: str
+    model_id: str
+    reusable_skills: list[str] = Field(default_factory=list)
+    answer_preview: str = ""
+    created_at: str
+
+
+class SkillFromRunsRequest(BaseModel):
+    """Exact compatible conversation runs selected for Skill extraction."""
+
+    conversation_id: str = Field(min_length=1, max_length=128)
+    run_ids: list[str] = Field(min_length=1, max_length=5)
+    requested_name: str | None = Field(
+        default=None,
+        max_length=90,
+        pattern=r"^[a-zA-Z0-9_]*$",
+    )
+
+    @model_validator(mode="after")
+    def validate_unique_runs(self) -> SkillFromRunsRequest:
+        if len(self.run_ids) != len(set(self.run_ids)):
+            raise ValueError("Selected run IDs must be unique.")
+        return self
+
+
 class SkillCandidateCheckView(BaseModel):
     """One validation check displayed before promotion."""
 

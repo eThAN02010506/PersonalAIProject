@@ -123,6 +123,11 @@ class AgentOrchestrator:
                     enable_browser=request.enable_browser,
                     enable_local_knowledge=request.enable_local_knowledge,
                     generate_report=request.generate_report,
+                    complexity=(
+                        request.resolved_intent.answer_contract.complexity
+                        if request.resolved_intent is not None
+                        else "standard"
+                    ),
                 )
             )
             agents = self._build_agents(request, trace, progress_callback)

@@ -55,6 +55,8 @@ class _ActiveRun:
     conversation_id: str
     user_id: str
     username: str
+    user_message_id: str
+    model_id: str
     task: BackgroundChatTask
     prepared: PreparedChatRequest
 
@@ -133,7 +135,7 @@ class ChatRunRegistry:
         if resolved_request.resolved_intent.requires_clarification:
             raise ValueError("A clarification request cannot start an Agent worker.")
         history = self.repository.build_model_history(conversation_id)
-        self.repository.add_message(conversation_id, "user", content)
+        user_message = self.repository.add_message(conversation_id, "user", content)
         task = start_chat_task(
             conversation_id=conversation_id,
             user_message=content,
@@ -156,6 +158,8 @@ class ChatRunRegistry:
                 conversation_id,
                 user_id,
                 username,
+                user_message.id,
+                settings.model_id,
                 task,
                 resolved_request,
             )
@@ -430,12 +434,19 @@ class ChatRunRegistry:
 
         try:
             public_trace = list(result.trace)
+            reusable_trace = (
+                _reusable_skill_trace(result.trace, result.content)
+                if result.status == "completed"
+                else None
+            )
+            assistant_message_id: str | None = None
             if result.status == "completed":
-                self.repository.add_message(
+                assistant_message = self.repository.add_message(
                     active.conversation_id,
                     "assistant",
                     result.content,
                 )
+                assistant_message_id = assistant_message.id
                 self.repository.set_task_state(
                     active.conversation_id,
                     _completed_task_state(active.prepared),
@@ -445,6 +456,7 @@ class ChatRunRegistry:
                         run_id,
                         active,
                         result,
+                        reusable_trace,
                     )
                 )
                 view = RunView(
@@ -463,6 +475,24 @@ class ChatRunRegistry:
                     error=result.content,
                     trace=public_trace,
                 )
+            self.repository.save_conversation_run(
+                run_id=run_id,
+                conversation_id=active.conversation_id,
+                user_message_id=active.user_message_id,
+                assistant_message_id=assistant_message_id,
+                requested_by_user_id=active.user_id,
+                objective=active.prepared.resolved_intent.original_request,
+                operational_objective=(
+                    active.prepared.resolved_intent.operational_objective
+                ),
+                status=result.status,
+                model_id=active.model_id,
+                reusable_skills=(
+                    tuple(step.skill_name for step in reusable_trace.steps)
+                    if reusable_trace is not None
+                    else ()
+                ),
+            )
             # 原因：正式 API 不能返回 raw debug_runs，但独立 Console 必须能观察正式请求。
             # 作用：即使浏览器放弃轮询，reap 仍会持久化终态和完整内部诊断。
             append_debug_record(
@@ -491,11 +521,11 @@ class ChatRunRegistry:
         run_id: str,
         active: _ActiveRun,
         result: ChatTaskResult,
+        trace: SkillRunTrace | None,
     ) -> list[dict[str, str]]:
         """Submit only safe reusable Tool names after a successful final answer."""
         if self.skill_growth is None:
             return []
-        trace = _reusable_skill_trace(result.trace, result.content)
         if trace is None:
             return []
         try:

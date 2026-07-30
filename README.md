@@ -369,11 +369,14 @@ required.
 
 Successful repeated workflows can become persistent declarative
 `WorkflowSkill` candidates. The Debug Console also supports model-assisted
-authoring:
+authoring from either an explicit goal or one to five compatible successful
+conversation runs:
 
 ```text
-goal + explicitly allowed Skills
-  -> current BaseLLM produces JSON
+goal + explicitly allowed Skills, or sanitized conversation Run traces
+  -> current BaseLLM produces a bounded JSON draft
+  -> conversation drafts receive an independent critique
+  -> one targeted repair is allowed when validation or critique fails
   -> strict Pydantic validation
   -> checksum-protected candidate
   -> spec, diff, checks, and inert dry run
@@ -385,6 +388,14 @@ Generated Skills cannot contain arbitrary Python, shell commands, credentials,
 file paths, unknown capabilities, or persistent arguments. Generation never
 promotes a candidate automatically. Promotion, rejection, and rollback remain
 explicit lifecycle actions.
+
+Conversation-derived candidates use durable SQLite provenance rather than
+rotating Debug files. Only the resolved objective, model identifier, message
+references, and allowlisted Skill sequence are retained; Tool Observations and
+document bodies are not copied into Skill storage. Simple and standard requests
+keep the lowest-cost Agent route, while a request classified as `complex`
+receives one bounded Review and Synthesis pass even when it has a single
+evidence source.
 
 ## Debug Console
 
@@ -399,6 +410,8 @@ main application:
 - downloadable JSON traces and a bounded runtime-log tail
 - Skill candidate generation, diff, validation, dry run, promotion, rejection,
   and rollback
+- account and conversation selection for extracting a candidate from compatible
+  successful Run traces
 
 It can display only reasoning text returned by the configured provider. Hidden
 provider reasoning is not available.

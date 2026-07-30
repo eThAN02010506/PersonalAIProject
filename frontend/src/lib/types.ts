@@ -113,6 +113,24 @@ export type SkillCapability = {
   description: string;
 };
 
+export type SkillSourceConversation = {
+  id: string;
+  title: string;
+  owner_username?: string;
+  updated_at: string;
+};
+
+export type SkillSourceRun = {
+  run_id: string;
+  conversation_id: string;
+  objective: string;
+  operational_objective: string;
+  model_id: string;
+  reusable_skills: string[];
+  answer_preview: string;
+  created_at: string;
+};
+
 export type SkillCandidateReview = {
   skill: SkillVersion;
   spec_json: string;

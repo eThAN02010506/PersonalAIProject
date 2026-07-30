@@ -13,6 +13,7 @@ import { api } from "../lib/api";
 import type { SkillCandidateReview, SkillVersion } from "../lib/types";
 import { SkillAuthoringForm } from "./SkillAuthoringForm";
 import { SkillCandidateReviewPanel } from "./SkillCandidateReview";
+import { ConversationSkillAuthoringForm } from "./ConversationSkillAuthoringForm";
 
 type SkillAction = "promote" | "reject" | "rollback";
 
@@ -26,6 +27,9 @@ export function SkillWorkspace({ enableAuthoring = false }: SkillWorkspaceProps)
   const [activeAction, setActiveAction] = useState<string | null>(null);
   const [reviewLoading, setReviewLoading] = useState<string | null>(null);
   const [review, setReview] = useState<SkillCandidateReview | null>(null);
+  const [authoringMode, setAuthoringMode] = useState<"manual" | "conversation">(
+    "conversation",
+  );
   const [error, setError] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
@@ -116,12 +120,41 @@ export function SkillWorkspace({ enableAuthoring = false }: SkillWorkspaceProps)
 
       {error && <div className="error-banner skill-error">{error}</div>}
       {enableAuthoring && (
-        <SkillAuthoringForm
-          onGenerated={(generated) => {
-            setReview(generated);
-            void refresh();
-          }}
-        />
+        <>
+          <div className="skill-authoring-mode" role="group" aria-label="Skill source">
+            <button
+              className={authoringMode === "conversation" ? "active" : ""}
+              onClick={() => setAuthoringMode("conversation")}
+              title="Extract a candidate from sanitized successful runs in one conversation."
+              type="button"
+            >
+              From conversation
+            </button>
+            <button
+              className={authoringMode === "manual" ? "active" : ""}
+              onClick={() => setAuthoringMode("manual")}
+              title="Describe a workflow and explicitly choose every capability the model may use."
+              type="button"
+            >
+              Manual
+            </button>
+          </div>
+          {authoringMode === "conversation" ? (
+            <ConversationSkillAuthoringForm
+              onGenerated={(generated) => {
+                setReview(generated);
+                void refresh();
+              }}
+            />
+          ) : (
+            <SkillAuthoringForm
+              onGenerated={(generated) => {
+                setReview(generated);
+                void refresh();
+              }}
+            />
+          )}
+        </>
       )}
       {enableAuthoring && review && (
         <SkillCandidateReviewPanel review={review} onClose={() => setReview(null)} />

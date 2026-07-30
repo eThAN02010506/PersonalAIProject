@@ -4,7 +4,10 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from qwopus_agent.llm import BaseLLM, ChatMessage, LLMResponse
-from qwopus_agent.services.skill_authoring_service import SkillAuthoringService
+from qwopus_agent.services.skill_authoring_service import (
+    ConversationSkillRun,
+    SkillAuthoringService,
+)
 from qwopus_agent.services.skill_growth_service import (
     SkillGrowthPolicy,
     SkillGrowthService,
@@ -64,6 +67,25 @@ class FlakyServerLLM(StaticLLM):
             temperature=temperature,
             max_tokens=max_tokens,
         )
+
+
+class SequenceLLM(StaticLLM):
+    def __init__(self, responses: list[str]) -> None:
+        super().__init__("")
+        self.responses = responses
+        self.calls = 0
+
+    def generate(
+        self,
+        messages: list[ChatMessage],
+        *,
+        temperature: float = 0.2,
+        max_tokens: int | None = None,
+    ) -> LLMResponse:
+        self.messages = messages
+        content = self.responses[self.calls]
+        self.calls += 1
+        return LLMResponse(content=content, model="runtime-model")
 
 
 class SkillAuthoringServiceTests(unittest.TestCase):
@@ -239,6 +261,114 @@ class SkillAuthoringServiceTests(unittest.TestCase):
 
             self.assertEqual(review.manifest.status, "candidate")
             self.assertEqual(flaky.calls, 2)
+
+    def test_conversation_runs_are_critiqued_before_candidate_persistence(self) -> None:
+        draft = (
+            '{"name":"research_sources","description":"Research then retrieve evidence.",'
+            '"intent_examples":["research this topic"],'
+            '"steps":['
+            '{"skill_name":"alpha","query_template":"Research {query}","arguments":{}},'
+            '{"skill_name":"beta","query_template":"Verify {query}","arguments":{}}]}'
+        )
+        with TemporaryDirectory() as tmpdir:
+            service, _llm = self._service(Path(tmpdir), draft)
+            sequence = SequenceLLM([draft, '{"approved":true,"issues":[]}'])
+            service.llm_factory = lambda: sequence
+
+            review = service.generate_candidate_from_runs(
+                (
+                    ConversationSkillRun(
+                        run_id="run-1",
+                        objective="Research rice prices",
+                        operational_objective="Research and verify current rice prices",
+                        model_id="source-model",
+                        reusable_skills=("alpha", "beta"),
+                    ),
+                )
+            )
+
+            self.assertEqual(sequence.calls, 2)
+            self.assertEqual(review.manifest.status, "candidate")
+            self.assertEqual(
+                review.manifest.source_run_id,
+                "conversation-runs:run-1",
+            )
+            self.assertNotIn(review.manifest.name, service.growth.registry.list_names())
+
+    def test_missing_query_placeholder_is_repaired_without_extra_model_call(self) -> None:
+        draft = (
+            '{"name":"research_sources","description":"Research current sources.",'
+            '"intent_examples":["research this topic"],'
+            '"steps":['
+            '{"skill_name":"alpha","query_template":"Research official sources",'
+            '"arguments":{}}]}'
+        )
+        with TemporaryDirectory() as tmpdir:
+            service, _llm = self._service(Path(tmpdir), draft)
+            sequence = SequenceLLM([draft, '{"approved":true,"issues":[]}'])
+            service.llm_factory = lambda: sequence
+
+            review = service.generate_candidate_from_runs(
+                (
+                    ConversationSkillRun(
+                        run_id="run-placeholder",
+                        objective="Research a current release",
+                        operational_objective="Search official release sources",
+                        model_id="source-model",
+                        reusable_skills=("alpha",),
+                    ),
+                )
+            )
+
+            self.assertEqual(sequence.calls, 2)
+            self.assertIn("Research official sources {query}", review.spec_json)
+
+    def test_conversation_candidate_repairs_rejected_draft_once(self) -> None:
+        first = (
+            '{"name":"research_sources","description":"Specific rice workflow.",'
+            '"intent_examples":["only rice"],'
+            '"steps":['
+            '{"skill_name":"alpha","query_template":"Research {query}","arguments":{}},'
+            '{"skill_name":"beta","query_template":"Verify {query}","arguments":{}}]}'
+        )
+        repaired = first.replace("Specific rice workflow.", "Reusable research workflow.")
+        with TemporaryDirectory() as tmpdir:
+            service, _llm = self._service(Path(tmpdir), first)
+            sequence = SequenceLLM(
+                [
+                    first,
+                    '{"approved":false,"issues":["description is overfitted"]}',
+                    repaired,
+                ]
+            )
+            service.llm_factory = lambda: sequence
+
+            review = service.generate_candidate_from_runs(
+                (
+                    ConversationSkillRun(
+                        run_id="run-2",
+                        objective="Research rice prices",
+                        operational_objective="Research and verify current rice prices",
+                        model_id="source-model",
+                        reusable_skills=("alpha", "beta"),
+                    ),
+                )
+            )
+
+            self.assertEqual(sequence.calls, 3)
+            self.assertIn("Reusable research workflow.", review.spec_json)
+
+    def test_conversation_runs_must_have_matching_reusable_sequences(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            service, _llm = self._service(Path(tmpdir), "{}")
+            runs = (
+                ConversationSkillRun("run-1", "one", "one", "model", ("alpha",)),
+                ConversationSkillRun("run-2", "two", "two", "model", ("beta",)),
+            )
+
+            with self.assertRaisesRegex(ValueError, "same reusable Skill sequence"):
+                service.generate_candidate_from_runs(runs)
+            self.assertEqual(service.growth.catalog.list(), [])
 
 
 if __name__ == "__main__":

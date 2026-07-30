@@ -206,7 +206,7 @@ def create_app(
     api.include_router(build_report_router(reports, repo))
     api.include_router(build_skill_router(skill_growth))
     api.include_router(
-        build_skill_authoring_router(skill_authoring)
+        build_skill_authoring_router(skill_authoring, repo)
     )
     api.include_router(
         build_debug_router(

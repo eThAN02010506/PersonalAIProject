@@ -14,6 +14,8 @@ import type {
   SkillCandidateReview,
   SkillCandidateTest,
   SkillCapability,
+  SkillSourceConversation,
+  SkillSourceRun,
   SkillVersion,
   UserAccount,
 } from "./types";
@@ -180,6 +182,14 @@ export const api = {
   listSkillCapabilities: () =>
     request<SkillCapability[]>("/api/debug/skills/capabilities"),
 
+  listSkillSourceConversations: () =>
+    request<SkillSourceConversation[]>("/api/debug/skills/source-conversations"),
+
+  listSkillSourceRuns: (conversationId: string) =>
+    request<SkillSourceRun[]>(
+      `/api/debug/skills/source-conversations/${encodeURIComponent(conversationId)}/runs`,
+    ),
+
   generateSkillCandidate: (payload: {
     goal: string;
     requestedName?: string;
@@ -194,6 +204,21 @@ export const api = {
         requested_name: payload.requestedName || null,
         intent_examples: payload.intentExamples,
         allowed_skills: payload.allowedSkills,
+      }),
+    }),
+
+  generateSkillCandidateFromRuns: (payload: {
+    conversationId: string;
+    runIds: string[];
+    requestedName?: string;
+  }) =>
+    request<SkillCandidateReview>("/api/debug/skills/from-runs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        conversation_id: payload.conversationId,
+        run_ids: payload.runIds,
+        requested_name: payload.requestedName || null,
       }),
     }),
 

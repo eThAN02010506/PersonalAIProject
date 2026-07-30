@@ -285,6 +285,7 @@ class AgentPlanningRequest:
     enable_browser: bool = False
     enable_local_knowledge: bool = False
     generate_report: bool = False
+    complexity: Literal["simple", "standard", "complex"] = "standard"
 
 
 @dataclass(frozen=True)
@@ -348,15 +349,19 @@ class Planner:
         )
         route: Literal["single_agent", "multi_agent"] = (
             "multi_agent"
-            if capability_count > 1 or request.generate_report
+            if (
+                capability_count > 1
+                or request.generate_report
+                or request.complexity == "complex"
+            )
             else "single_agent"
         )
         terminal_task_id = evidence_ids[-1]
         if route == "multi_agent":
             synthesis_dependencies = list(evidence_ids)
-            if len(evidence_ids) > 1:
-                # 原因：多个独立来源可能互相矛盾，直接综合会让最终答案静默选择一方。
-                # 作用：先由无工具 reviewer 标出一致点、冲突和证据缺口，再交给 synthesis。
+            if len(evidence_ids) > 1 or request.complexity == "complex":
+                # 原因：多来源可能冲突，复杂单来源也可能遗漏用户要求的关键维度。
+                # 作用：只为这些明确高价值场景增加一次 Review，再由 Synthesis 统一成最终答案。
                 tasks.append(
                     DelegatedTask(
                         "review",
