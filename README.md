@@ -70,6 +70,23 @@ UI and CLI -> API and services -> Agent contracts -> Skills and providers
   primary application receives the final answer, citations, safe progress events,
   and report links.
 
+Complex answer generation follows one bounded evidence pipeline:
+
+```text
+AnswerPlan
+  -> parallel Evidence Agents return typed EvidencePacket JSON
+  -> deduplicated EvidenceLedger
+  -> one structured conflict/gap Review
+  -> at most one targeted gap-fill when a detailed complex task has a real gap
+  -> final Synthesizer writes the only user-facing answer
+```
+
+Simple requests keep the direct single-Agent path. Detailed mode adds
+task-specific mechanisms, evidence, examples, edge cases, alternatives, risks,
+and actions when relevant; it does not impose a fixed word count. Non-JSON output
+from a weaker compatible model is converted into a bounded evidence fallback
+instead of being displayed as an intermediate answer.
+
 See [docs/architecture.md](docs/architecture.md) for module-level design notes.
 
 ## Requirements
@@ -395,7 +412,8 @@ references, and allowlisted Skill sequence are retained; Tool Observations and
 document bodies are not copied into Skill storage. Simple and standard requests
 keep the lowest-cost Agent route, while a request classified as `complex`
 receives one bounded Review and Synthesis pass even when it has a single
-evidence source.
+evidence source. A complex detailed request can perform one additional retrieval
+only when the structured Review names a material evidence gap.
 
 ## Debug Console
 

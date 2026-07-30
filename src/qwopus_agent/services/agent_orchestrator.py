@@ -24,7 +24,22 @@ from qwopus_agent.integrations.smolagents_runtime import (
     run_agent_chat_turn_with_debug,
 )
 from qwopus_agent.memory import DEFAULT_CONVERSATION_KNOWLEDGE_ROOT
+from qwopus_agent.services.answer_pipeline import (
+    build_answer_plan,
+    build_evidence_ledger,
+    parse_evidence_packet,
+    parse_evidence_review,
+    render_answer_plan,
+    render_evidence_ledger,
+    render_evidence_review,
+)
 from qwopus_agent.services.orchestration_models import (
+    AgentOutputRole,
+    AnswerContract,
+    AnswerPlan,
+    EvidenceLedger,
+    EvidencePacket,
+    EvidenceReview,
     OrchestrationRequest,
     OrchestrationResult,
     ProcessEvent,
@@ -68,6 +83,8 @@ class _CapabilityResult:
     report: GeneratedReport | None = None
     error: str | None = None
     debug_runs: tuple[AgentDebugRun, ...] = ()
+    evidence_packet: EvidencePacket | None = None
+    evidence_review: EvidenceReview | None = None
 
 
 @dataclass
@@ -115,6 +132,8 @@ class AgentOrchestrator:
                 if request.resolved_intent is not None
                 else request.objective
             )
+            answer_contract = _answer_contract(request)
+            answer_plan = build_answer_plan(planning_objective, answer_contract)
             plan = await self.planner.plan(
                 AgentPlanningRequest(
                     objective=planning_objective,
@@ -124,13 +143,18 @@ class AgentOrchestrator:
                     enable_local_knowledge=request.enable_local_knowledge,
                     generate_report=request.generate_report,
                     complexity=(
-                        request.resolved_intent.answer_contract.complexity
-                        if request.resolved_intent is not None
-                        else "standard"
+                        answer_contract.complexity
                     ),
+                    response_detail=answer_contract.response_detail,
                 )
             )
-            agents = self._build_agents(request, trace, progress_callback)
+            agents = self._build_agents(
+                request,
+                answer_plan,
+                evidence_mode=plan.route == "multi_agent",
+                trace=trace,
+                progress_callback=progress_callback,
+            )
             profiles = {
                 name: AgentProfile(
                     name=name,
@@ -148,13 +172,25 @@ class AgentOrchestrator:
                     message=f"Planned {len(plan.delegation.tasks)} task(s).",
                 )
             )
+            trace.append(
+                ProcessEvent(
+                    phase="answer_plan",
+                    status="completed",
+                    agent="planner",
+                    message=(
+                        f"Answer plan contains {len(answer_plan.required_sections)} section(s) "
+                        f"and {len(answer_plan.depth_questions)} depth question(s)."
+                    ),
+                )
+            )
             run = await self.executor.execute(
                 plan,
                 agents=agents,
                 profiles=profiles,
                 context={
                     "shared_state": {
-                        "request": request.model_dump(exclude={"uploaded_files"})
+                        "request": request.model_dump(exclude={"uploaded_files"}),
+                        "answer_plan": answer_plan,
                     }
                 },
             )
@@ -230,6 +266,9 @@ class AgentOrchestrator:
     def _build_agents(
         self,
         request: OrchestrationRequest,
+        answer_plan: AnswerPlan,
+        *,
+        evidence_mode: bool,
         trace: list[ProcessEvent],
         progress_callback: ProgressCallback | None,
     ) -> dict[str, RunnableAgent]:
@@ -243,6 +282,9 @@ class AgentOrchestrator:
             local: bool = False,
         ) -> _CapabilityResult:
             delegated_request = request.model_copy(update={"objective": question})
+            task_id = str(
+                context.get("multi_agent", {}).get("task_id", name)
+            )
             return await self._guarded(
                 name,
                 trace,
@@ -254,6 +296,9 @@ class AgentOrchestrator:
                     web=web,
                     browser=browser,
                     local=local,
+                    output_role="evidence" if evidence_mode else "final",
+                    answer_plan=answer_plan,
+                    task_id=task_id,
                 ),
             )
 
@@ -263,7 +308,12 @@ class AgentOrchestrator:
                 lambda _question, _context: self._guarded(
                     "document_agent",
                     trace,
-                    lambda: self._document_capability(request, trace, progress_callback),
+                    lambda: self._document_capability(
+                        request,
+                        trace,
+                        progress_callback,
+                        evidence_mode=evidence_mode,
+                    ),
                 )
             )
         if request.enable_web_search:
@@ -290,12 +340,37 @@ class AgentOrchestrator:
             )
         agents["review_agent"] = _FunctionAgent(
             lambda question, context: self._review_capability(
-                request, question, context, trace, progress_callback
+                request,
+                answer_plan,
+                question,
+                context,
+                trace,
+                progress_callback,
             )
         )
+        if evidence_mode and (
+            request.enable_web_search
+            or request.enable_browser
+            or request.enable_local_knowledge
+        ):
+            agents["gap_fill_agent"] = _FunctionAgent(
+                lambda question, context: self._gap_fill_capability(
+                    request,
+                    answer_plan,
+                    question,
+                    context,
+                    trace,
+                    progress_callback,
+                )
+            )
         agents["synthesis_agent"] = _FunctionAgent(
             lambda question, context: self._synthesis_capability(
-                request, question, context, trace, progress_callback
+                request,
+                answer_plan,
+                question,
+                context,
+                trace,
+                progress_callback,
             )
         )
         if request.generate_report:
@@ -316,6 +391,9 @@ class AgentOrchestrator:
         web: bool,
         browser: bool,
         local: bool,
+        output_role: AgentOutputRole = "final",
+        answer_plan: AnswerPlan | None = None,
+        task_id: str | None = None,
     ) -> _CapabilityResult:
         started = time.monotonic()
         trace.append(ProcessEvent(phase="execution", status="started", agent=agent_name))
@@ -344,10 +422,10 @@ class AgentOrchestrator:
                     else request.objective
                 ),
                 answer_contract=(
-                    request.resolved_intent.answer_contract
-                    if request.resolved_intent is not None
-                    else None
+                    _answer_contract(request)
                 ),
+                output_role=output_role,
+                answer_plan=answer_plan,
                 # 原因：worker 不应在执行中重读可变 Catalog，否则一次请求可能混用两个版本。
                 # 作用：把父进程已校验的 active WorkflowSpec 快照交给 smolagents 装配。
                 promoted_workflows=self.workflow_specs,
@@ -374,7 +452,29 @@ class AgentOrchestrator:
                 confidence=0.0,
                 error=technical_error,
             )
-        citations = _citations_from_chat(run)
+        citations = (
+            _citations_from_chat(run)
+            if output_role == "final"
+            else _parse_citations("\n".join(run.observations))
+        )
+        confidence = (0.72 if web or browser or local else 0.65) if run.success else 0.0
+        evidence_packet = (
+            parse_evidence_packet(
+                run.answer,
+                task_id=task_id or agent_name,
+                agent_name=agent_name,
+                citations=citations,
+                fallback_confidence=confidence,
+                trust_declared_sources=False,
+            )
+            if output_role == "evidence" and run.success
+            else None
+        )
+        evidence_review = (
+            parse_evidence_review(run.answer)
+            if output_role == "review" and run.success
+            else None
+        )
         for tool_name in run.tool_calls:
             if tool_name != "final_answer":
                 trace.append(
@@ -398,10 +498,12 @@ class AgentOrchestrator:
         return _CapabilityResult(
             content=run.answer,
             success=run.success,
-            confidence=(0.72 if web or browser or local else 0.65) if run.success else 0.0,
+            confidence=confidence,
             citations=citations,
             error=run.error,
             debug_runs=run.debug_runs,
+            evidence_packet=evidence_packet,
+            evidence_review=evidence_review,
         )
 
     async def _document_capability(
@@ -409,6 +511,8 @@ class AgentOrchestrator:
         request: OrchestrationRequest,
         trace: list[ProcessEvent],
         progress_callback: ProgressCallback | None,
+        *,
+        evidence_mode: bool,
     ) -> _CapabilityResult:
         direct_local_files = all(
             item.local_path is not None for item in request.uploaded_files
@@ -502,39 +606,49 @@ class AgentOrchestrator:
             citations=citations,
             analysis_result=outcome.result,
             debug_runs=tuple(getattr(outcome, "debug_runs", ())),
+            evidence_packet=(
+                parse_evidence_packet(
+                    answer,
+                    task_id="document",
+                    agent_name="document_agent",
+                    citations=citations,
+                    fallback_confidence=0.8,
+                    trust_declared_sources=False,
+                )
+                if evidence_mode
+                else None
+            ),
         )
 
     async def _review_capability(
         self,
         request: OrchestrationRequest,
+        answer_plan: AnswerPlan,
         question: str,
         context: dict[str, Any],
         trace: list[ProcessEvent],
         progress_callback: ProgressCallback | None,
     ) -> _CapabilityResult:
         """Review independent evidence without reopening any Tool."""
-        dependency_results = context.get("multi_agent", {}).get("dependency_results", {})
+        ledger = _evidence_ledger_from_context(context)
         budget = TokenBudgetManager(
             context_window=self.settings.context_window_tokens,
             output_reserve=min(self.settings.max_tokens, 1200),
         )
         evidence = truncate_to_tokens(
-            "\n\n".join(
-                f"[{task_id}]\n{content}"
-                for task_id, content in dependency_results.items()
-            ),
+            render_evidence_ledger(ledger),
             budget.synthesis_budget,
         )
         review_request = request.model_copy(
             update={
                 "objective": (
                     f"Original request: {question}\n\n"
-                    f"Independent evidence:\n{evidence}\n\n"
+                    f"Answer plan:\n{render_answer_plan(answer_plan)}\n\n"
+                    f"Independent evidence ledger:\n{evidence}\n\n"
                     "Audit this evidence for the final answering agent. Identify agreements, "
-                    "factual conflicts, unsupported claims, and the safest resolution. Do not "
-                    "call tools and do not answer the user directly."
+                    "factual conflicts, unsupported claims, material gaps, and the safest "
+                    "resolution."
                 ),
-                "resolved_intent": None,
                 "history": (),
                 "enable_web_search": False,
                 "enable_browser": False,
@@ -552,6 +666,9 @@ class AgentOrchestrator:
             web=False,
             browser=False,
             local=False,
+            output_role="review",
+            answer_plan=answer_plan,
+            task_id="review",
         )
         trace.append(
             ProcessEvent(
@@ -567,25 +684,91 @@ class AgentOrchestrator:
             confidence=0.85 if reviewed.success else 0.0,
             error=reviewed.error,
             debug_runs=reviewed.debug_runs,
+            evidence_review=reviewed.evidence_review,
         )
 
-    async def _synthesis_capability(
+    async def _gap_fill_capability(
         self,
         request: OrchestrationRequest,
+        answer_plan: AnswerPlan,
         question: str,
         context: dict[str, Any],
         trace: list[ProcessEvent],
         progress_callback: ProgressCallback | None,
     ) -> _CapabilityResult:
-        dependency_results = context.get("multi_agent", {}).get("dependency_results", {})
+        """Run at most one targeted evidence pass when Review names material gaps."""
+        review = _evidence_review_from_context(context)
+        if not review.gaps:
+            return _CapabilityResult(
+                content="Reviewer found no material evidence gaps.",
+                success=True,
+                confidence=1.0,
+                evidence_packet=EvidencePacket(
+                    task_id="gap_fill",
+                    agent_name="gap_fill_agent",
+                    limitations=("No gap-fill retrieval was required.",),
+                ),
+            )
+        gap_request = request.model_copy(
+            update={
+                "objective": (
+                    f"Original request: {question}\n\n"
+                    "Fill only these reviewed evidence gaps:\n"
+                    + "\n".join(f"- {gap}" for gap in review.gaps)
+                    + "\n\nReturn evidence for the gaps only; do not repeat established facts."
+                ),
+                "history": (),
+            }
+        )
+        result = await self._chat_capability(
+            "gap_fill_agent",
+            gap_request,
+            trace,
+            progress_callback,
+            web=request.enable_web_search,
+            browser=request.enable_browser,
+            local=request.enable_local_knowledge,
+            output_role="evidence",
+            answer_plan=answer_plan,
+            task_id="gap_fill",
+        )
+        if result.success:
+            return result
+        # 原因：补证是改进步骤而非原始证据的硬前提，单次零命中不应抹掉已审阅的有效材料。
+        # 作用：将失败记录为 limitation 并允许 Synthesizer 明示不确定性，不再循环重试。
+        return _CapabilityResult(
+            content="Targeted gap-fill did not return usable evidence.",
+            success=True,
+            confidence=0.0,
+            error=result.error,
+            debug_runs=result.debug_runs,
+            evidence_packet=EvidencePacket(
+                task_id="gap_fill",
+                agent_name="gap_fill_agent",
+                limitations=("Targeted gap-fill did not return usable evidence.",),
+            ),
+        )
+
+    async def _synthesis_capability(
+        self,
+        request: OrchestrationRequest,
+        answer_plan: AnswerPlan,
+        question: str,
+        context: dict[str, Any],
+        trace: list[ProcessEvent],
+        progress_callback: ProgressCallback | None,
+    ) -> _CapabilityResult:
+        ledger = _evidence_ledger_from_context(context)
+        review = _evidence_review_from_context(context)
         budget = TokenBudgetManager(
             context_window=self.settings.context_window_tokens,
             output_reserve=self.settings.max_tokens,
         )
         evidence = truncate_to_tokens(
-            "\n\n".join(
-                f"[{task_id}]\n{content}"
-                for task_id, content in dependency_results.items()
+            (
+                f"Answer plan:\n{render_answer_plan(answer_plan)}\n\n"
+                f"Evidence ledger:\n{render_evidence_ledger(ledger)}\n\n"
+                f"Evidence review:\n{render_evidence_review(review)}"
             ),
             budget.synthesis_budget,
         )
@@ -593,9 +776,13 @@ class AgentOrchestrator:
             update={
                 "objective": (
                     f"Original request: {question}\n\n"
-                    f"Agent evidence:\n{evidence}\n\n"
-                    "Synthesize one final answer. Resolve conflicts, preserve source citations, "
-                    "and do not mention internal agents or execution steps."
+                    f"Internal synthesis material:\n{evidence}\n\n"
+                    "Write one coherent final answer around the plan's central goal. Resolve "
+                    "reviewed conflicts, distinguish supported facts from uncertainty, preserve "
+                    "only citations present in the Evidence Ledger, and do not mention internal "
+                    "agents or execution steps. Empty-source facts are architectural reasoning, "
+                    "not verified studies; never invent publications, percentages, or benchmark "
+                    "measurements."
                 ),
                 "history": (),
                 "enable_web_search": False,
@@ -613,6 +800,9 @@ class AgentOrchestrator:
                 web=False,
                 browser=False,
                 local=False,
+                output_role="final",
+                answer_plan=answer_plan,
+                task_id="synthesis",
             )
             return _CapabilityResult(
                 content=result.content,
@@ -631,7 +821,11 @@ class AgentOrchestrator:
                 )
             )
             return _CapabilityResult(
-                content=evidence or f"No evidence was available: {exc}",
+                content=(
+                    render_evidence_ledger(ledger)
+                    if ledger.facts
+                    else f"No evidence was available: {exc}"
+                ),
                 success=False,
                 confidence=0.0,
                 error=str(exc),
@@ -712,6 +906,49 @@ class AgentOrchestrator:
                 confidence=0.0,
                 error=str(exc),
             )
+
+
+def _answer_contract(request: OrchestrationRequest) -> AnswerContract:
+    """Return one contract even when an older caller did not resolve intent."""
+    if request.resolved_intent is not None:
+        return request.resolved_intent.answer_contract
+    return AnswerContract(response_detail=request.response_detail)
+
+
+def _dependency_capability_results(
+    context: dict[str, Any],
+) -> tuple[_CapabilityResult, ...]:
+    """Read typed dependency artifacts without copying user-facing transcripts."""
+    multi_agent = context.get("multi_agent", {})
+    dependency_ids = set(multi_agent.get("dependency_results", {}))
+    contributions = multi_agent.get("shared_state", {}).get("contributions", {})
+    results: list[_CapabilityResult] = []
+    for task_id in dependency_ids:
+        contribution = contributions.get(task_id)
+        raw = getattr(contribution, "raw", None)
+        if isinstance(raw, _CapabilityResult) and raw.success:
+            results.append(raw)
+    return tuple(results)
+
+
+def _evidence_ledger_from_context(context: dict[str, Any]) -> EvidenceLedger:
+    # 原因：完整 Worker 文本会重复占用上下文，并让最终模型继承不同写作风格。
+    # 作用：Reviewer 和 Synthesizer 只接收已验证、去重且有长度边界的事实集合。
+    packets = tuple(
+        result.evidence_packet
+        for result in _dependency_capability_results(context)
+        if result.evidence_packet is not None
+    )
+    return build_evidence_ledger(packets)
+
+
+def _evidence_review_from_context(context: dict[str, Any]) -> EvidenceReview:
+    for result in _dependency_capability_results(context):
+        if result.evidence_review is not None:
+            return result.evidence_review
+    return EvidenceReview(
+        resolution="No separate evidence review was required or available."
+    )
 
 
 def _citations_from_chat(run: ChatAgentRun) -> tuple[SourceCitation, ...]:

@@ -30,6 +30,7 @@ _COMPARISON_PATTERN = re.compile(
     r"\b(?:similar|different|whereas|however|advantage|disadvantage|trade-off)\b",
     re.I,
 )
+_BULLET_LINE_PATTERN = re.compile(r"(?m)^\s*(?:[-*+]|\d+[.)、])\s+")
 
 
 class AnswerQualityReport(BaseModel):
@@ -95,6 +96,15 @@ class AnswerQualityEvaluator:
                 and _content_block_count(stripped) < 2
             ):
                 issues.append("missing_analysis_structure")
+            if (
+                contract.response_detail == "detailed"
+                and contract.task_type
+                in {"explain", "compare", "summarize", "analyze", "report"}
+                and _is_fragmented_bullet_answer(stripped)
+            ):
+                # 原因：达到长度门槛的短 bullet 堆叠仍可能没有论证主线，读起来像多份草稿拼接。
+                # 作用：只对非步骤型复杂回答触发一次修正，要求模型把事实组织成连贯解释。
+                issues.append("fragmented_answer")
 
         if (
             "source-grounded evidence" in contract.required_facets
@@ -131,3 +141,16 @@ def _has_repeated_paragraph(answer: str) -> bool:
         if len(" ".join(block.split())) >= 40
     ]
     return len(paragraphs) != len(set(paragraphs))
+
+
+def _is_fragmented_bullet_answer(answer: str) -> bool:
+    bullet_count = len(_BULLET_LINE_PATTERN.findall(answer))
+    if bullet_count < 6:
+        return False
+    prose_blocks = [
+        block
+        for block in re.split(r"\n\s*\n", answer)
+        if len(" ".join(block.split())) >= 80
+        and not _BULLET_LINE_PATTERN.match(block)
+    ]
+    return len(prose_blocks) < 2

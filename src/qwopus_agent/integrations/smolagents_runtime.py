@@ -26,7 +26,11 @@ from qwopus_agent.prompts import smolagents as smolagents_prompts
 from qwopus_agent.reports import contract as report_contract
 from qwopus_agent.reports import grounded
 from qwopus_agent.services.answer_quality import AnswerQualityEvaluator
-from qwopus_agent.services.orchestration_models import AnswerContract
+from qwopus_agent.services.orchestration_models import (
+    AgentOutputRole,
+    AnswerContract,
+    AnswerPlan,
+)
 from qwopus_agent.skills import SkillRegistry, WorkflowSpec
 from qwopus_agent.utils.token_budget import (
     TokenBudgetManager,
@@ -270,6 +274,8 @@ def run_agent_chat_turn(
     document_evidence_available: bool = False,
     response_language_source: str | None = None,
     answer_contract: AnswerContract | None = None,
+    output_role: AgentOutputRole = "final",
+    answer_plan: AnswerPlan | None = None,
     promoted_workflows: tuple[WorkflowSpec, ...] = (),
     progress_callback: Callable[[str], None] | None = None,
 ) -> str:
@@ -290,6 +296,8 @@ def run_agent_chat_turn(
         document_evidence_available=document_evidence_available,
         response_language_source=response_language_source,
         answer_contract=answer_contract,
+        output_role=output_role,
+        answer_plan=answer_plan,
         promoted_workflows=promoted_workflows,
         progress_callback=progress_callback,
     ).answer
@@ -311,6 +319,8 @@ def run_agent_chat_turn_with_debug(
     document_evidence_available: bool = False,
     response_language_source: str | None = None,
     answer_contract: AnswerContract | None = None,
+    output_role: AgentOutputRole = "final",
+    answer_plan: AnswerPlan | None = None,
     promoted_workflows: tuple[WorkflowSpec, ...] = (),
     progress_callback: Callable[[str], None] | None = None,
 ) -> ChatAgentRun:
@@ -411,11 +421,12 @@ def run_agent_chat_turn_with_debug(
             ),
         )
 
-    final_answer_checks = _build_answer_quality_checks(answer_contract)
+    # 原因：部分兼容模型只知道 final_answer_check 失败，却看不到具体问题，会原样重复短答。
+    # 作用：首轮不挂布尔检查，应用层随后携带明确 issues 进行最多一次无工具修正。
     agent = build_smolagents_tool_calling_agent(
         settings=effective_settings,
         tools=tools,
-        final_answer_checks=final_answer_checks,
+        final_answer_checks=[],
     )
     prompt = format_agent_chat_prompt(
         history=history,
@@ -429,6 +440,8 @@ def run_agent_chat_turn_with_debug(
         response_detail=response_detail,
         response_language_source=response_language_source,
         answer_contract=answer_contract,
+        output_role=output_role,
+        answer_plan=answer_plan,
     )
     if progress_callback is not None:
         progress_callback("planning")
@@ -443,9 +456,7 @@ def run_agent_chat_turn_with_debug(
             and knowledge_primary_scope == "private"
         )
     )
-    # 原因：原生 final_answer_checks 拒绝一次短答后，需要同一 Agent 再有一步完成修正。
-    # 作用：只为复杂任务增加一次机会，简单问答和明确简洁请求维持原延迟上限。
-    run_max_steps = (max_steps if tools else 2) + int(bool(final_answer_checks))
+    run_max_steps = max_steps if tools else 2
     run_result = agent.run(
         prompt,
         max_steps=run_max_steps,
@@ -465,6 +476,11 @@ def run_agent_chat_turn_with_debug(
     tool_calls = _extract_agent_tool_calls(steps)
     observations = _extract_agent_observations(steps)
     final_answer = _extract_final_answer(answer)
+    quality_issues = (
+        _answer_quality_issues(final_answer, answer_contract)
+        if output_role == "final"
+        else ()
+    )
 
     local_tool_used = bool(
         (_LOCAL_KNOWLEDGE_TOOLS | promoted_local_tools).intersection(tool_calls)
@@ -496,24 +512,26 @@ def run_agent_chat_turn_with_debug(
         or _looks_like_tool_observation(final_answer)
         or state == "max_steps_error"
         or (local_tool_used and len(final_answer) < 80)
+        or bool(quality_issues)
     )
     if needs_refinement:
-        evidence = "\n\n".join(observations) or final_answer or "No usable tool evidence."
+        evidence = "\n\n".join(
+            (
+                *observations,
+                f"Previous draft:\n{final_answer}" if final_answer else "",
+            )
+        ).strip() or "No usable tool evidence."
         # 原因：继续复用带 Tool 的 Agent 仍可能无视提示并再次检索，造成长时间循环。
         # 作用：把已取得的 Observation 交给无工具 finalizer，只允许它生成最终自然语言答案。
         finalizer = build_smolagents_tool_calling_agent(
             settings=effective_settings,
             tools=[],
         )
-        retry_prompt = (
-            f"Original user question:\n{user_message}\n\n"
-            "Available tool evidence:\n"
-            f"{truncate_to_tokens(evidence, budget.synthesis_budget)}\n\n"
-            "Answer the original user question now. Return only a complete "
-            "natural-language final answer in the user's language. State the conclusion, "
-            "explain the relevant relationship or evidence, and explicitly cite every "
-            "available local source file and page. Never expose Observation, Thought, tool "
-            "logs, or drafts."
+        retry_prompt = _role_refinement_prompt(
+            output_role=output_role,
+            user_message=user_message,
+            evidence=truncate_to_tokens(evidence, budget.synthesis_budget),
+            quality_issues=quality_issues,
         )
         retry_result = finalizer.run(
             retry_prompt,
@@ -552,6 +570,49 @@ def run_agent_chat_turn_with_debug(
     )
 
 
+def _role_refinement_prompt(
+    *,
+    output_role: AgentOutputRole,
+    user_message: str,
+    evidence: str,
+    quality_issues: tuple[str, ...] = (),
+) -> str:
+    """Finish a stalled Tool run without changing its orchestration role."""
+    common = (
+        f"Original task:\n{user_message}\n\n"
+        f"Available tool evidence:\n{evidence}\n\n"
+    )
+    if output_role == "evidence":
+        return common + (
+            "Convert only this evidence into one JSON object and return it through final_answer. "
+            'Use exactly: {"facts":[{"claim":"...","support":"...","sources":["..."],'
+            '"confidence":"low|medium|high"}],"limitations":["..."]}. '
+            "Do not write a user-facing answer or expose Observation, Thought, logs, or drafts."
+        )
+    if output_role == "review":
+        return common + (
+            "Review only this evidence and return one JSON object through final_answer. Use "
+            'exactly: {"agreements":["..."],"conflicts":["..."],'
+            '"unsupported_claims":["..."],"gaps":["..."],"resolution":"..."}. '
+            "Do not write a user-facing answer or expose Thought or drafts."
+        )
+    issue_instruction = (
+        "Correct these detected answer defects exactly once: "
+        + ", ".join(quality_issues)
+        + ". "
+        if quality_issues
+        else ""
+    )
+    return common + issue_instruction + (
+        "Answer the original user question now. Return only a complete natural-language final "
+        "answer in the user's language. State the conclusion, explain the relevant relationship "
+        "or evidence, and explicitly cite every available local source file and page. Never "
+        "invent citations, measurements, or study results. If no source evidence is available, "
+        "frame claims as architectural reasoning. Never expose Observation, Thought, tool logs, "
+        "or drafts."
+    )
+
+
 def _build_answer_quality_checks(
     contract: AnswerContract | None,
 ) -> list[Callable[..., bool]]:
@@ -580,6 +641,24 @@ def _build_answer_quality_checks(
         return report.passed
 
     return [qwopus_answer_quality]
+
+
+def _answer_quality_issues(
+    answer: str,
+    contract: AnswerContract | None,
+) -> tuple[str, ...]:
+    if (
+        not answer
+        or contract is None
+        or contract.response_detail == "concise"
+        or contract.complexity == "simple"
+    ):
+        return ()
+    return AnswerQualityEvaluator().evaluate(
+        answer,
+        contract,
+        has_citations=_answer_contains_source(answer),
+    ).issues
 
 
 def _answer_contains_source(answer: str) -> bool:

@@ -189,6 +189,30 @@ class AgentArchitectureTests(unittest.TestCase):
         )
         self.assertEqual(plan.terminal_task_id, "synthesis")
 
+    def test_detailed_complex_search_allows_one_review_driven_gap_fill(self) -> None:
+        plan = asyncio.run(
+            Planner().plan(
+                AgentPlanningRequest(
+                    objective="Investigate a disputed current claim",
+                    enable_web_search=True,
+                    complexity="complex",
+                    response_detail="detailed",
+                )
+            )
+        )
+
+        # 原因：复杂详细任务需要补证能力，但每个任务都自动循环会造成不可控延迟。
+        # 作用：锁定唯一一次 gap_fill 位于 Review 之后、Synthesis 之前。
+        self.assertEqual(
+            [task.task_id for task in plan.delegation.tasks],
+            ["research", "review", "gap_fill", "synthesis"],
+        )
+        self.assertEqual(plan.delegation.tasks[2].dependencies, ("review",))
+        self.assertEqual(
+            plan.delegation.tasks[-1].dependencies,
+            ("research", "review", "gap_fill"),
+        )
+
     def test_production_planner_declares_single_and_report_terminals(self) -> None:
         single = asyncio.run(
             Planner().plan(AgentPlanningRequest(objective="hello"))

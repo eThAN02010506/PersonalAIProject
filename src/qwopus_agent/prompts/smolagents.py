@@ -5,7 +5,11 @@ from __future__ import annotations
 import re
 from typing import Literal
 
-from qwopus_agent.services.orchestration_models import AnswerContract
+from qwopus_agent.services.orchestration_models import (
+    AgentOutputRole,
+    AnswerContract,
+    AnswerPlan,
+)
 from qwopus_agent.utils.token_budget import estimate_tokens, truncate_to_tokens
 
 ChatMessage = dict[str, str]
@@ -134,46 +138,56 @@ def format_agent_chat_prompt(
     response_detail: Literal["concise", "balanced", "detailed"] = "detailed",
     response_language_source: str | None = None,
     answer_contract: AnswerContract | None = None,
+    output_role: AgentOutputRole = "final",
+    answer_plan: AnswerPlan | None = None,
 ) -> str:
     """Build one bounded, capability-aware task prompt for Agent chat."""
     language_source = response_language_source or user_message
     resolved_knowledge_scope = knowledge_primary_scope or (
         "private" if enable_local_knowledge else "none"
     )
-    lines = [
-        "You are Qwopus-Agent's local office assistant.",
-        "Return only the final answer. Do not expose Tool logs, Observation, Thought, or drafts.",
-        # 原因：历史或系统提示的语言可能让模型忽略当前问题的语言。
-        # 作用：仅以当前问题决定最终回答语言。
-        (
-            "The final answer MUST use the same language as the CURRENT USER QUESTION below. "
-            "Determine it only from that question, not from this prompt or conversation history. "
-            "Do not default to Chinese or English. For mixed-language input, use its dominant "
-            "language unless the user explicitly requests another language."
-        ),
-        _response_detail_instruction(response_detail),
-    ]
+    lines = _output_role_instructions(output_role)
+    if output_role == "final":
+        lines.extend(
+            [
+                # 原因：历史或系统提示的语言可能让模型忽略当前问题的语言。
+                # 作用：仅以当前问题决定最终回答语言。
+                (
+                    "The final answer MUST use the same language as the CURRENT USER QUESTION "
+                    "below. Determine it only from that question, not from this prompt or "
+                    "conversation history. Do not default to Chinese or English. For "
+                    "mixed-language input, use its dominant language unless the user explicitly "
+                    "requests another language."
+                ),
+                _response_detail_instruction(response_detail),
+            ]
+        )
     if answer_contract is not None:
         lines.append(_answer_contract_instruction(answer_contract))
+    if answer_plan is not None:
+        # 原因：各 Agent 自行猜测内容结构会产生重复和互不衔接的小节。
+        # 作用：Evidence 围绕同一问题收集材料，Synthesizer 再按同一主线组织最终答案。
+        lines.extend(
+            [
+                "ANSWER PLAN (internal; never mention it to the user):",
+                answer_plan.model_dump_json(indent=2),
+            ]
+        )
     if enable_web_search:
         lines.append(
-            "Use tavily_search when current or external information is needed, then synthesize "
-            "the evidence into the final answer. Unless brevity was requested, organize the "
-            "answer into substantial sections covering the direct answer, how it works, key "
-            "features or evidence, practical uses, limitations or cautions, and 2-5 actual "
-            "source URLs when they are useful. Match the depth and length to the question; do "
-            "not enforce a fixed minimum length, and respect explicit requests for a shorter "
-            "or longer response. For a simple question, call tavily_search only once; after a "
-            "successful Observation, use that evidence and call final_answer instead of "
-            "repeating the search."
+            "Use tavily_search when current or external information is needed. For a simple "
+            "question, call tavily_search only once; after a successful Observation, use that "
+            f"evidence and {_role_completion_instruction(output_role)} instead of repeating the "
+            "search. Match depth to the task and do not enforce a fixed minimum length."
         )
     else:
         lines.append("Internet search is disabled; do not claim that you searched the web.")
     if enable_browser:
         lines.append(
             "Use browser_open only for a specific public HTTP(S) page or when JavaScript "
-            "rendering is necessary. Read its rendered text once, then produce final_answer; "
-            "do not retry blocked private/local URLs."
+            "rendering is necessary. Read its rendered text once, then "
+            f"{_role_completion_instruction(output_role)}; do not retry blocked private/local "
+            "URLs."
         )
     else:
         lines.append("Browser automation is disabled; do not claim that you opened a page.")
@@ -183,6 +197,7 @@ def format_agent_chat_prompt(
         enable_local_knowledge=enable_local_knowledge,
         include_global_knowledge=include_global_knowledge,
         resolved_knowledge_scope=resolved_knowledge_scope,
+        output_role=output_role,
     )
     if history:
         lines.append("\nRECENT CONVERSATION:")
@@ -211,10 +226,64 @@ def format_agent_chat_prompt(
     lines.extend(
         [
             "",
-            "Now produce the complete final answer in that same language.",
+            _role_final_instruction(output_role),
         ]
     )
     return "\n".join(lines)
+
+
+def _output_role_instructions(output_role: AgentOutputRole) -> list[str]:
+    """Give each orchestration role one non-conflicting output contract."""
+    if output_role == "evidence":
+        return [
+            "You are a Qwopus-Agent evidence worker, not the final answer writer.",
+            "Use authorized tools when needed, then return only one JSON object through "
+            "final_answer. Do not write a user-facing answer, introduction, conclusion, "
+            "Markdown, Thought, Observation, or drafts.",
+            'Required schema: {"facts":[{"claim":"...","support":"...","sources":["..."],'
+            '"confidence":"low|medium|high"}],"limitations":["..."]}.',
+            "Include only evidence relevant to the objective. Preserve source names, page "
+            "numbers, and URLs from actual Tool Observations in sources. If no Tool supplied a "
+            "source, use an empty sources list. Distinguish source evidence from inference and "
+            "never invent citations, measurements, or missing facts.",
+        ]
+    if output_role == "review":
+        return [
+            "You are Qwopus-Agent's evidence reviewer, not the final answer writer.",
+            "Inspect the supplied evidence for agreement, conflict, unsupported claims, and "
+            "material gaps. Return only one JSON object through final_answer. Do not write the "
+            "user-facing answer, use tools, or expose Thought, Observation, and drafts.",
+            'Required schema: {"agreements":["..."],"conflicts":["..."],'
+            '"unsupported_claims":["..."],"gaps":["..."],"resolution":"..."}.',
+            "A gap must name specific missing evidence that could change the answer. Keep gaps "
+            "empty when the available evidence is sufficient. Treat empirical claims, named "
+            "studies, measurements, or percentages without Tool-grounded sources as unsupported; "
+            "source-free architectural reasoning is allowed only when identified as inference.",
+        ]
+    return [
+        "You are Qwopus-Agent's final answer synthesizer.",
+        "Return only the complete user-facing final answer. Do not expose Tool logs, "
+        "Observation, Thought, internal plans, evidence JSON, review JSON, or drafts.",
+        "Cite only sources present in the supplied evidence. Treat facts with empty sources as "
+        "architectural reasoning, not verified studies or measurements; never invent citations, "
+        "percentages, benchmark results, or publication details.",
+    ]
+
+
+def _role_completion_instruction(output_role: AgentOutputRole) -> str:
+    if output_role == "evidence":
+        return "convert it into the required evidence JSON and call final_answer"
+    if output_role == "review":
+        return "return the required review JSON through final_answer"
+    return "synthesize it into the complete user-facing answer and call final_answer"
+
+
+def _role_final_instruction(output_role: AgentOutputRole) -> str:
+    if output_role == "evidence":
+        return "Now return only the required evidence JSON through final_answer."
+    if output_role == "review":
+        return "Now return only the required review JSON through final_answer."
+    return "Now produce the complete final answer in that same language."
 
 
 def _response_detail_instruction(
@@ -260,6 +329,7 @@ def _append_knowledge_instructions(
     enable_local_knowledge: bool,
     include_global_knowledge: bool,
     resolved_knowledge_scope: Literal["private", "global", "none"],
+    output_role: AgentOutputRole,
 ) -> None:
     """Append only the instructions matching the knowledge capability installed this turn."""
     if enable_local_knowledge and resolved_knowledge_scope == "private":
@@ -267,10 +337,10 @@ def _append_knowledge_instructions(
             "Local knowledge uploaded in this conversation is available. Use rag_search for "
             "semantic document evidence. Use graph_search for named-entity relationships, "
             "cross-document links, or multi-hop paths. Do not call both unless both evidence "
-            "types are necessary. After a successful Observation, synthesize it into the final "
-            "answer and cite available local source names or pages; never expose raw Observation "
-            "text. If the knowledge tools return no relevant evidence, do not answer from "
-            "general knowledge."
+            "types are necessary. After a successful Observation, "
+            f"{_role_completion_instruction(output_role)}. Preserve available local source "
+            "names or pages and never expose raw Observation text. If the knowledge tools return "
+            "no relevant evidence, do not answer from general knowledge."
         )
         if include_global_knowledge:
             lines.append(

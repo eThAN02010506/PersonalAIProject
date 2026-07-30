@@ -29,6 +29,16 @@ The agent layer is split into:
 - `MultiAgentSupervisor`: delegates dependency-aware tasks, executes independent waves in parallel,
   shares state, runs result debate, and returns one arbitrated final answer.
 
+Production answer orchestration separates evidence from writing. `AnswerPlan` defines the central
+goal and task-specific depth questions. Capability workers return typed `EvidencePacket` objects,
+which are deduplicated into an `EvidenceLedger`; they never write user-facing answers. The reviewer
+returns only structured agreements, conflicts, unsupported claims, and material gaps. For complex
+detailed requests, one `gap_fill` task may reuse already authorized search tools when the review
+contains a concrete gap. The final Synthesizer is the only role prompted to write natural language
+for the user. Weaker compatible models that fail JSON formatting use bounded deterministic
+fallbacks, so the architecture remains independent from one model family's structured-output
+quality.
+
 ### Memory
 
 `MiniRAG` exposes only `insert(document)` and `search(query)`. Original Markdown documents are

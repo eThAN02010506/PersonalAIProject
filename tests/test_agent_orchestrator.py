@@ -170,6 +170,8 @@ class AgentOrchestratorTests(unittest.TestCase):
 
     def test_web_and_local_knowledge_use_supervisor_and_merge_citations(self) -> None:
         calls: list[tuple[bool, bool, str]] = []
+        output_roles: list[str] = []
+        synthesis_materials: list[str] = []
 
         def fake_chat(**kwargs):
             web = bool(kwargs["enable_web_search"])
@@ -178,6 +180,7 @@ class AgentOrchestratorTests(unittest.TestCase):
             self.assertEqual(bool(kwargs["include_global_knowledge"]), local)
             question = str(kwargs["user_message"])
             calls.append((web, local, question))
+            output_roles.append(str(kwargs["output_role"]))
             if web:
                 return ChatAgentRun(
                     answer="current external fact",
@@ -200,6 +203,7 @@ class AgentOrchestratorTests(unittest.TestCase):
                     state="success",
                 )
             self.assertIn("differ in recency", question)
+            synthesis_materials.append(question)
             return ChatAgentRun(answer="combined final answer", state="success")
 
         result = asyncio.run(
@@ -238,6 +242,13 @@ class AgentOrchestratorTests(unittest.TestCase):
             )
         )
         self.assertEqual(len(calls), 4)
+        # 原因：能得到综合答案并不能证明中间 Agent 没有各自生成一篇用户答案。
+        # 作用：锁定两路 Worker 只产证据、Reviewer 只审证据、最后一次模型调用才负责写作。
+        self.assertEqual(output_roles[:2].count("evidence"), 2)
+        self.assertEqual(output_roles[-2:], ["review", "final"])
+        self.assertIn("Evidence ledger", synthesis_materials[0])
+        self.assertIn("Evidence review", synthesis_materials[0])
+        self.assertNotIn("Agent evidence:", synthesis_materials[0])
 
     def test_final_answer_citations_exclude_unused_retrieval_candidates(self) -> None:
         run = ChatAgentRun(
@@ -258,6 +269,74 @@ class AgentOrchestratorTests(unittest.TestCase):
         self.assertEqual(len(citations), 1)
         self.assertEqual(citations[0].kind, "local")
         self.assertEqual(citations[0].source, "README.md")
+
+    def test_complex_detailed_route_fills_one_structured_review_gap(self) -> None:
+        calls: list[tuple[str, str]] = []
+
+        def fake_chat(**kwargs):
+            role = str(kwargs["output_role"])
+            question = str(kwargs["user_message"])
+            calls.append((role, question))
+            if role == "review":
+                return ChatAgentRun(
+                    answer=(
+                        '{"agreements":["Base evidence is usable"],"conflicts":[],'
+                        '"unsupported_claims":[],"gaps":["Find an independent deployment '
+                        'measurement"],"resolution":"Verify the missing measurement."}'
+                    ),
+                    state="success",
+                )
+            if role == "evidence" and "Fill only these reviewed evidence gaps" in question:
+                return ChatAgentRun(
+                    answer=(
+                        '{"facts":[{"claim":"Independent measurement exists",'
+                        '"support":"A second source measured deployment.",'
+                        '"sources":["https://example.com/measurement"],'
+                        '"confidence":"high"}],"limitations":[]}'
+                    ),
+                    state="success",
+                )
+            if role == "evidence":
+                return ChatAgentRun(
+                    answer=(
+                        '{"facts":[{"claim":"Base finding","support":"Primary evidence",'
+                        '"sources":["https://example.com/base"],'
+                        '"confidence":"medium"}],"limitations":[]}'
+                    ),
+                    state="success",
+                )
+            self.assertIn("Independent measurement exists", question)
+            return ChatAgentRun(answer="Integrated detailed answer", state="success")
+
+        intent = ResolvedIntent(
+            original_request="Investigate this claim in detail",
+            operational_objective="Investigate this claim in detail",
+            task_type="analyze",
+            answer_contract=AnswerContract(
+                task_type="analyze",
+                complexity="complex",
+                response_detail="detailed",
+            ),
+        )
+        result = asyncio.run(
+            AgentOrchestrator(self.settings, chat_runner=fake_chat).run(
+                OrchestrationRequest(
+                    objective=intent.original_request,
+                    resolved_intent=intent,
+                    enable_web_search=True,
+                )
+            )
+        )
+
+        self.assertTrue(result.success)
+        self.assertEqual(
+            [role for role, _question in calls],
+            ["evidence", "review", "evidence", "final"],
+        )
+        self.assertEqual(
+            [task.task_id for task in result.multi_agent_run.delegation_plan.tasks],
+            ["research", "review", "gap_fill", "synthesis"],
+        )
 
     def test_plain_filename_reference_excludes_observation_urls(self) -> None:
         run = ChatAgentRun(

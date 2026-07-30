@@ -23,7 +23,7 @@ from qwopus_agent.integrations.smolagents_runtime import (
     run_smolagents_chat_turn,
     run_smolagents_file_analysis_with_debug,
 )
-from qwopus_agent.services.orchestration_models import AnswerContract
+from qwopus_agent.services.orchestration_models import AnswerContract, AnswerPlan
 from qwopus_agent.skills import (
     BaseSkill,
     SkillRegistry,
@@ -897,6 +897,119 @@ class SmolagentsRuntimeTests(unittest.TestCase):
         self.assertIn("thorough, information-dense final answer", detailed)
         self.assertIn("practical steps or examples", detailed)
         self.assertIn("fixed length", detailed)
+
+    def test_role_prompts_keep_evidence_and_review_out_of_final_writing(self) -> None:
+        answer_plan = AnswerPlan(
+            objective="Compare two implementations.",
+            task_type="compare",
+            response_detail="detailed",
+            central_goal="Identify the material trade-offs.",
+            required_sections=("direct answer", "trade-offs"),
+            depth_questions=("When should each option be preferred?",),
+        )
+
+        evidence = format_agent_chat_prompt(
+            history=[],
+            user_message="Compare them",
+            enable_web_search=True,
+            output_role="evidence",
+            answer_plan=answer_plan,
+        )
+        review = format_agent_chat_prompt(
+            history=[],
+            user_message="Review supplied evidence",
+            enable_web_search=False,
+            output_role="review",
+            answer_plan=answer_plan,
+        )
+
+        # 原因：共享“完整最终答案”指令会让 Worker 先写多份散乱文章，再由综合器重复压缩。
+        # 作用：锁定 Worker/Reviewer 只返回内部 JSON，用户语言与详细写作规则仅属于最终综合器。
+        self.assertIn("evidence worker, not the final answer writer", evidence)
+        self.assertIn('"facts"', evidence)
+        self.assertIn("ANSWER PLAN", evidence)
+        self.assertNotIn("thorough, information-dense final answer", evidence)
+        self.assertIn("evidence reviewer, not the final answer writer", review)
+        self.assertIn('"unsupported_claims"', review)
+        self.assertIn("without Tool-grounded sources as unsupported", review)
+        self.assertNotIn("Now produce the complete final answer", review)
+
+    def test_evidence_role_skips_user_facing_answer_quality_check(self) -> None:
+        contract = AnswerContract(
+            task_type="analyze",
+            complexity="complex",
+            response_detail="detailed",
+        )
+        FakeToolCallingAgent.queued_results = [
+            types.SimpleNamespace(
+                output=(
+                    '{"facts":[{"claim":"Finding","support":"Evidence",'
+                    '"sources":[],"confidence":"medium"}],"limitations":[]}'
+                ),
+                state="success",
+                steps=[],
+            )
+        ]
+
+        result = run_agent_chat_turn_with_debug(
+            user_message="Analyze the evidence",
+            history=[],
+            settings=SmolagentsModelSettings(
+                model_id="any-model",
+                base_url="http://127.0.0.1:8080/v1",
+            ),
+            answer_contract=contract,
+            output_role="evidence",
+        )
+
+        self.assertTrue(result.success)
+        self.assertEqual(FakeToolCallingAgent.last_instance.kwargs["final_answer_checks"], [])
+        self.assertIn("evidence worker", FakeToolCallingAgent.last_instance.prompt)
+
+    def test_detailed_short_answer_gets_one_issue_aware_refinement(self) -> None:
+        contract = AnswerContract(
+            task_type="analyze",
+            complexity="complex",
+            response_detail="detailed",
+            required_facets=("findings", "risks", "actions"),
+        )
+        FakeToolCallingAgent.queued_results = [
+            types.SimpleNamespace(
+                output="结论：方案可行。",
+                state="success",
+                steps=[],
+            ),
+            types.SimpleNamespace(
+                output=(
+                    "## 结论\n\n方案可行，但前提是职责边界、失败恢复和权限模型都被明确。"
+                    "\n\n## 分析\n\n规划与执行分离让每个阶段可独立测试，结构化证据则减少"
+                    "重复上下文。主要风险是额外模型调用、状态同步和来源可信度；应通过"
+                    "有界步骤、失败降级和引用校验控制。\n\n## 行动\n\n先验证直接路径，"
+                    "再测试证据审查和一次修正，最后用真实断线与多来源案例验收。"
+                ),
+                state="success",
+                steps=[],
+            ),
+        ]
+
+        result = run_agent_chat_turn_with_debug(
+            user_message="详细分析这个方案",
+            history=[],
+            settings=SmolagentsModelSettings(
+                model_id="any-model",
+                base_url="http://127.0.0.1:8080/v1",
+            ),
+            answer_contract=contract,
+            output_role="final",
+        )
+
+        # 原因：原生布尔 final_answer_check 会让弱模型看不到原因并重复同一句短答。
+        # 作用：锁定首轮最多两步，随后只有一次包含具体问题和首稿的无工具修正。
+        self.assertEqual(len(result.debug_runs), 2)
+        self.assertEqual(result.debug_runs[0].max_steps, 2)
+        self.assertIn("insufficient_depth", result.debug_runs[1].prompt)
+        self.assertIn("Previous draft", result.debug_runs[1].prompt)
+        self.assertIn("职责边界", result.answer)
 
     def test_format_agent_chat_prompt_separates_language_source_and_resolved_task(
         self,

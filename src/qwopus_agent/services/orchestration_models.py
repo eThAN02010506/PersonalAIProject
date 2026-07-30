@@ -25,6 +25,7 @@ class ConversationTurn(BaseModel):
 
 
 InterpretationMode = Literal["precise", "contextual", "exploratory"]
+AgentOutputRole = Literal["final", "evidence", "review"]
 TaskType = Literal[
     "answer",
     "explain",
@@ -70,6 +71,20 @@ class AnswerContract(BaseModel):
     response_language: str = "auto"
     output_format: str = "adaptive"
     required_facets: tuple[str, ...] = ()
+
+
+class AnswerPlan(BaseModel):
+    """Compact writing plan shared by evidence workers and the final synthesizer."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    objective: str = Field(min_length=1)
+    task_type: TaskType
+    response_detail: Literal["concise", "balanced", "detailed"]
+    central_goal: str = Field(min_length=1)
+    required_sections: tuple[str, ...] = ()
+    depth_questions: tuple[str, ...] = ()
+    style_rules: tuple[str, ...] = ()
 
 
 class ResolvedIntent(BaseModel):
@@ -177,6 +192,51 @@ class SourceCitation(BaseModel):
     source: str
     page: str | None = None
     url: str | None = None
+
+
+class EvidenceFact(BaseModel):
+    """One query-relevant claim and its support, independent of model backend."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    claim: str = Field(min_length=1, max_length=1_000)
+    support: str = Field(min_length=1, max_length=4_000)
+    sources: tuple[str, ...] = Field(default=(), max_length=12)
+    confidence: Literal["low", "medium", "high"] = "medium"
+
+
+class EvidencePacket(BaseModel):
+    """Bounded evidence returned by one worker instead of a user-facing essay."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    task_id: str = Field(min_length=1)
+    agent_name: str = Field(min_length=1)
+    # 原因：一次定向补证可能合法地得到零命中，不能把“没有证据”伪造成事实。
+    # 作用：空 facts 搭配 limitations 表达可审计的零结果，并允许最终综合安全降级。
+    facts: tuple[EvidenceFact, ...] = Field(default=(), max_length=16)
+    limitations: tuple[str, ...] = Field(default=(), max_length=8)
+
+
+class EvidenceLedger(BaseModel):
+    """Deduplicated evidence set presented to Reviewer and Synthesizer."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    facts: tuple[EvidenceFact, ...] = Field(default=(), max_length=32)
+    limitations: tuple[str, ...] = Field(default=(), max_length=16)
+
+
+class EvidenceReview(BaseModel):
+    """Reviewer findings used to resolve conflicts and optionally fill gaps."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    agreements: tuple[str, ...] = Field(default=(), max_length=12)
+    conflicts: tuple[str, ...] = Field(default=(), max_length=12)
+    unsupported_claims: tuple[str, ...] = Field(default=(), max_length=12)
+    gaps: tuple[str, ...] = Field(default=(), max_length=8)
+    resolution: str = Field(default="", max_length=2_000)
 
 
 class ProcessEvent(BaseModel):

@@ -286,6 +286,7 @@ class AgentPlanningRequest:
     enable_local_knowledge: bool = False
     generate_report: bool = False
     complexity: Literal["simple", "standard", "complex"] = "standard"
+    response_detail: Literal["concise", "balanced", "detailed"] = "balanced"
 
 
 @dataclass(frozen=True)
@@ -359,6 +360,7 @@ class Planner:
         terminal_task_id = evidence_ids[-1]
         if route == "multi_agent":
             synthesis_dependencies = list(evidence_ids)
+            review_added = False
             if len(evidence_ids) > 1 or request.complexity == "complex":
                 # 原因：多来源可能冲突，复杂单来源也可能遗漏用户要求的关键维度。
                 # 作用：只为这些明确高价值场景增加一次 Review，再由 Synthesis 统一成最终答案。
@@ -371,6 +373,28 @@ class Planner:
                     )
                 )
                 synthesis_dependencies.append("review")
+                review_added = True
+            if (
+                review_added
+                and request.complexity == "complex"
+                and request.response_detail == "detailed"
+                and (
+                    request.enable_web_search
+                    or request.enable_browser
+                    or request.enable_local_knowledge
+                )
+            ):
+                # 原因：详细复杂任务可能在审阅后发现决定结论的证据缺口，但无条件重试会显著增大延迟。
+                # 作用：只安排一个依赖 Review 的定向补证任务；是否真正调用 Tool 由结构化 gaps 决定。
+                tasks.append(
+                    DelegatedTask(
+                        "gap_fill",
+                        request.objective,
+                        "gap_fill_agent",
+                        ("review",),
+                    )
+                )
+                synthesis_dependencies.append("gap_fill")
             tasks.append(
                 DelegatedTask(
                     "synthesis",
