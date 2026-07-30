@@ -319,7 +319,13 @@ class AnalysisServiceTests(unittest.TestCase):
             # 作用：证明服务层注入正确 Tool，且沙箱只把本地聚合结果交回 Agent。
             self.assertEqual(
                 captured["tool_names"],
-                ["excel_schema", "excel_analysis", "rag_search"],
+                [
+                    "excel_schema",
+                    "excel_statistics",
+                    "excel_modeling",
+                    "excel_analysis",
+                    "rag_search",
+                ],
             )
             self.assertIn("Sample: East 10", captured["schema"])
             self.assertIn("40", captured["analysis"])

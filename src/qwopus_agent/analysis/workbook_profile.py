@@ -294,7 +294,17 @@ def _profile_region(
                 row_number,
             )
         )
-    best_score, best_row = max(candidates, default=(0.0, min_row))
+    best_score = max((candidate[0] for candidate in candidates), default=0.0)
+    # 原因：首条数据偶尔缺值时，真实表头会比后续全字符串数据行少一分。
+    # 作用：在最高分一分以内优先最早候选；明显低分的标题仍会让位给后续字段行。
+    best_row = next(
+        (
+            row_number
+            for score, row_number in candidates
+            if score >= best_score - 1.0
+        ),
+        min_row,
+    )
     confidence = min(1.0, max(0.0, best_score / max(1.0, width * 5.0)))
     header_rows: tuple[int, ...] = ()
     if confidence >= 0.45:
@@ -355,6 +365,15 @@ def _header_score(
 ) -> float:
     values = [_normalize_cell(value) for value in row]
     non_empty = [value for value in values if value]
+    if (
+        len(non_empty) == 1
+        and min_column == max_column
+        and not _looks_numeric(non_empty[0])
+        and any(_looks_numeric(_normalize_cell(value)) for value in next_row)
+    ):
+        # 原因：合法的单列数值表只有一个字段名，不能满足多列表头的“至少两个文本”规则。
+        # 作用：仅在下一行出现数值时识别单列表头，避免普通单列文字清单被误删首项。
+        return 5.0
     if len(non_empty) < 2:
         return 0.0
     text_count = sum(not _looks_numeric(value) for value in non_empty)

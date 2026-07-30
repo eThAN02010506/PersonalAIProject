@@ -22,7 +22,9 @@ from qwopus_agent.integrations.smolagents_tools import (
     build_document_section_tool,
     build_document_summary_tool,
     build_excel_analysis_tool,
+    build_excel_modeling_tool,
     build_excel_schema_tool,
+    build_excel_statistics_tool,
     build_graph_search_tool,
     build_minirag_search_tool,
     build_tavily_search_tool,
@@ -351,8 +353,33 @@ class SmolagentsToolsTests(unittest.TestCase):
                     'df = pd.read_excel("sales.xlsx")\nresult = df',
                 )
 
-        self.assertIn("East", result)
-        self.assertIn("40", result)
+                self.assertIn("East", result)
+                self.assertIn("40", result)
+
+    def test_excel_analysis_uses_single_line_names_for_multiline_headers(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "multiline.xlsx"
+            pd.DataFrame(
+                [
+                    ["Area", "Working households\n(per cent)"],
+                    ["North", 60.0],
+                    ["South", 40.0],
+                ]
+            ).to_excel(path, index=False, header=False)
+
+            tool = build_excel_analysis_tool({"multiline.xlsx": path})
+            result = tool.forward(
+                file_name="multiline.xlsx",
+                code=(
+                    'df = dfs["Sheet1"]\n'
+                    'result = df[["Area", "Working households (per cent)"]]'
+                ),
+            )
+
+            # 原因：模型只能复制 schema 中可见的单行列名，无法可靠重建隐藏换行。
+            # 作用：锁定多行 Excel 表头在 schema 与执行边界使用同一名称。
+            self.assertIn("Working households (per cent)", result)
+            self.assertIn("60", result)
         self.assertIn('df = dfs["exact sheet or table name"]', tool.description)
 
     def test_excel_analysis_tool_exposes_secondary_table_regions(self) -> None:
@@ -381,6 +408,85 @@ class SmolagentsToolsTests(unittest.TestCase):
 
         self.assertIn("| result |", result)
         self.assertIn("| 7 |", result)
+
+    def test_excel_statistics_tool_uses_only_approved_workbook_names(self) -> None:
+        fake_module = types.SimpleNamespace(Tool=FakeTool)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "scores.xlsx"
+            pd.DataFrame(
+                {
+                    "student": ["A", "B", "C", "D", "E"],
+                    "score": [10, 11, 12, 13, 100],
+                }
+            ).to_excel(path, index=False)
+
+            with patch.dict(sys.modules, {"smolagents": fake_module}):
+                tool = build_excel_statistics_tool({"scores.xlsx": path})
+
+            result = tool.forward(
+                file_name="scores.xlsx",
+                table_name="Sheet1",
+                method="iqr_outliers",
+                value_columns=["score"],
+                label_columns=["student"],
+                group_column=None,
+                scope_table_name=None,
+                scope_data_key=None,
+                scope_lookup_key=None,
+                scope_required_columns=None,
+                top_n=20,
+                threshold=1.5,
+            )
+
+            # 原因：统计 Skill 复用本地路径时不能扩大 Agent 的文件访问范围。
+            # 作用：确认模型只提交获准文件名，适配器负责注入真实路径。
+            self.assertIn("| E |", result)
+            self.assertIn("1.5 x IQR", result)
+            with self.assertRaisesRegex(ValueError, "Unknown file_name"):
+                tool.forward(
+                    file_name="../secret.xlsx",
+                    table_name="Sheet1",
+                    method="describe",
+                    value_columns=["score"],
+                    label_columns=[],
+                    group_column=None,
+                    scope_table_name=None,
+                    scope_data_key=None,
+                    scope_lookup_key=None,
+                    scope_required_columns=None,
+                    top_n=20,
+                    threshold=1.5,
+                )
+
+    def test_excel_modeling_tool_runs_reviewed_regression_locally(self) -> None:
+        fake_module = types.SimpleNamespace(Tool=FakeTool)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "regression.xlsx"
+            pd.DataFrame(
+                {
+                    "x": [1, 2, 3, 4, 5, 6],
+                    "y": [3.1, 4.9, 7.2, 8.8, 11.1, 12.9],
+                }
+            ).to_excel(path, index=False)
+            with patch.dict(sys.modules, {"smolagents": fake_module}):
+                tool = build_excel_modeling_tool({"regression.xlsx": path})
+
+            result = tool.forward(
+                file_name="regression.xlsx",
+                table_name="Sheet1",
+                method="linear_regression",
+                outcome_column="y",
+                predictor_columns=["x"],
+                group_column=None,
+                confidence_level=0.95,
+                include_posthoc=None,
+            )
+
+        # 原因：自动发现 Skill 不代表文件 Agent 已获得受控 Tool 入口。
+        # 作用：验证获准文件名可执行 OLS，并把系数与模型指标表返回 smolagents。
+        self.assertIn("Model summary", result)
+        self.assertIn("Coefficients", result)
+        self.assertIn("| x |", result)
 
     def test_minirag_tool_returns_bounded_search_results(self) -> None:
         fake_module = types.SimpleNamespace(Tool=FakeTool)

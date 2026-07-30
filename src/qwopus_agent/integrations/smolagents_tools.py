@@ -10,7 +10,9 @@ from typing import Any
 from qwopus_agent.documents import DocumentStructure, HierarchicalDocumentSummary
 from qwopus_agent.integrations.smolagents_data_tools import (
     build_excel_analysis_tool,
+    build_excel_modeling_tool,
     build_excel_schema_tool,
+    build_excel_statistics_tool,
 )
 from qwopus_agent.integrations.smolagents_knowledge_tools import (
     build_graph_search_tool,
@@ -38,7 +40,9 @@ __all__ = [
     "build_document_summary_tool",
     "build_browser_open_tool",
     "build_excel_analysis_tool",
+    "build_excel_modeling_tool",
     "build_excel_schema_tool",
+    "build_excel_statistics_tool",
     "build_graph_search_tool",
     "build_minirag_search_tool",
     "build_tavily_search_tool",

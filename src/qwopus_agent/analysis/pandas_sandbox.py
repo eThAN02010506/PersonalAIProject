@@ -32,14 +32,18 @@ class SandboxExecutionResult:
 PANDAS_SANDBOX_CODE_GUIDANCE = (
     "Sandbox code contract: the workbook is already loaded in dfs; start with "
     'df = dfs["exact sheet or table name"]. Do not import, read files, call '
-    "pd.read_excel, use loops/lambdas/comprehensions, mutate df[...] columns, or "
-    "call output methods such as to_markdown. Assign only simple approved variables: "
-    "data, df, grouped, mask, result, rows, series, summary, table, value, values. "
+    "pd.read_excel, use loops/lambdas/comprehensions, mutate dfs itself, or call "
+    "output methods such as to_markdown. You may add computed columns to a local "
+    "DataFrame copy. Assign intermediate results only to plain local variable names; "
+    "never overwrite dfs, pd, or builtins. "
     "Always assign the final scalar, Series, or DataFrame to result. Safe pattern: "
     'df = dfs["Table 1"]\\n'
     'values = df.iloc[:, 1:].apply(pd.to_numeric, errors="coerce")\\n'
     'result = pd.DataFrame({"label": df.iloc[:, 0], '
-    '"mean": values.mean(axis=1).round(3)})'
+    '"mean": values.mean(axis=1).round(3)}). '
+    "For row-level IQR outliers, set series = values.mean(axis=1), "
+    "summary = series.quantile([0.25, 0.75]), derive a boolean mask from "
+    "summary.iloc[0] and summary.iloc[1], then filter one result DataFrame."
 )
 
 
@@ -67,19 +71,6 @@ _ALLOWED_BUILTINS = {
 }
 
 _ALLOWED_ROOT_NAMES = set(_ALLOWED_BUILTINS) | {"dfs", "pd", "result"}
-_ALLOWED_ASSIGN_NAMES = {
-    "data",
-    "df",
-    "grouped",
-    "mask",
-    "result",
-    "rows",
-    "series",
-    "summary",
-    "table",
-    "value",
-    "values",
-}
 _BLOCKED_CALLS = {
     "__import__",
     "compile",
@@ -137,6 +128,7 @@ _ALLOWED_METHOD_CALLS = {
     "idxmax",
     "idxmin",
     "isin",
+    "isna",
     "join",
     "last",
     "len",
@@ -150,6 +142,7 @@ _ALLOWED_METHOD_CALLS = {
     "min",
     "nlargest",
     "nsmallest",
+    "notna",
     "nunique",
     "pivot",
     "pivot_table",
@@ -159,7 +152,9 @@ _ALLOWED_METHOD_CALLS = {
     "reset_index",
     "round",
     "set_index",
+    "select_dtypes",
     "size",
+    "stack",
     "sort_index",
     "sort_values",
     "split",
@@ -182,7 +177,9 @@ _ALLOWED_METHOD_CALLS = {
     "var",
 }
 _MAX_CODE_CHARS = 4000
-_MAX_AST_NODES = 200
+# 原因：多列描述统计即使不含循环也会自然超过 200 个 AST 节点。
+# 作用：容纳真实工作簿分析，同时继续用代码长度、节点数和执行超时限制复杂度。
+_MAX_AST_NODES = 500
 _MAX_NUMERIC_LITERAL = 1_000_000
 _MAX_RESULT_MARKDOWN_TOKENS = 3000
 _SANDBOX_TIMEOUT_SECONDS = 8.0
@@ -372,6 +369,13 @@ def _validate_ast(tree: ast.AST) -> None:
     nodes = list(ast.walk(tree))
     if len(nodes) > _MAX_AST_NODES:
         raise ValueError("Pandas sandbox code is too complex.")
+    assigned_names = {
+        target.id
+        for node in nodes
+        if isinstance(node, ast.Assign)
+        for target in node.targets
+        if isinstance(target, ast.Name)
+    }
     for node in nodes:
         if isinstance(
             node,
@@ -406,7 +410,7 @@ def _validate_ast(tree: ast.AST) -> None:
         if isinstance(node, ast.AugAssign):
             raise ValueError("Augmented assignment is not allowed in pandas sandbox.")
         if isinstance(node, ast.Name):
-            _validate_name(node)
+            _validate_name(node, assigned_names)
         if isinstance(node, ast.Attribute):
             _validate_attribute(node)
         if isinstance(node, ast.Call):
@@ -423,20 +427,60 @@ def _validate_ast(tree: ast.AST) -> None:
 
 
 def _validate_assignment(node: ast.Assign) -> None:
-    """Allow assignments only to simple local variables."""
+    """Allow local variables and columns on isolated dataframe copies."""
     for target in node.targets:
-        if not isinstance(target, ast.Name) or target.id not in _ALLOWED_ASSIGN_NAMES:
-            raise ValueError("Sandbox assignments must use approved local variable names.")
+        if isinstance(target, ast.Name) and _is_safe_assignment_name(target.id):
+            continue
+        if isinstance(target, ast.Subscript):
+            root_name = _assignment_root_name(target)
+            if root_name is not None and _is_safe_assignment_name(root_name):
+                continue
+        if (
+            isinstance(target, ast.Attribute)
+            and target.attr in {"columns", "index", "name"}
+            and (root_name := _assignment_root_name(target)) is not None
+            and _is_safe_assignment_name(root_name)
+        ):
+            continue
+        if not isinstance(target, ast.Name):
+            raise ValueError(
+                "Sandbox assignments may only target local variables or their columns."
+            )
+        else:
+            raise ValueError("Sandbox assignments must use safe local variable names.")
 
 
-def _validate_name(node: ast.Name) -> None:
+def _assignment_root_name(node: ast.AST) -> str | None:
+    """Return the local object mutated by a subscript assignment."""
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Subscript):
+        return _assignment_root_name(node.value)
+    if isinstance(node, ast.Attribute):
+        return _assignment_root_name(node.value)
+    return None
+
+
+def _is_safe_assignment_name(name: str) -> bool:
+    """Keep model-selected local names while protecting runtime capabilities."""
+    return (
+        name.isidentifier()
+        and not name.startswith("_")
+        and name not in _BLOCKED_NAMES
+        and name not in _BLOCKED_CALLS
+        and name not in _ALLOWED_BUILTINS
+        and name not in {"dfs", "pd"}
+    )
+
+
+def _validate_name(node: ast.Name, assigned_names: set[str]) -> None:
     """Block dangerous names and unknown root reads."""
     if node.id in _BLOCKED_NAMES or node.id.startswith("__"):
         raise ValueError(f"Blocked sandbox name: {node.id}")
     if (
         isinstance(node.ctx, ast.Load)
         and node.id not in _ALLOWED_ROOT_NAMES
-        and node.id not in _ALLOWED_ASSIGN_NAMES
+        and node.id not in assigned_names
     ):
         raise ValueError(f"Unknown sandbox name: {node.id}")
 
@@ -489,9 +533,12 @@ def _validate_call(node: ast.Call) -> None:
         root_name = _call_root_name(func)
         if root_name in _BLOCKED_CALLS:
             raise ValueError(f"Blocked sandbox call: {root_name}")
+        # 原因：pd.DataFrame(...).reset_index() 的根名称也是 pd，但 reset_index 是
+        # DataFrame 方法，不是 pandas 顶层函数。
+        # 作用：仅直接 pd.xxx 调用使用 pandas 白名单，链式对象调用继续受方法白名单约束。
         allowed_calls = (
             _ALLOWED_PANDAS_CALLS
-            if root_name == "pd"
+            if isinstance(func.value, ast.Name) and func.value.id == "pd"
             else _ALLOWED_METHOD_CALLS
         )
         if func.attr not in allowed_calls:

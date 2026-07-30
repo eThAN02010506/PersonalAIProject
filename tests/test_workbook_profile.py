@@ -2,6 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import pandas as pd
 from openpyxl import Workbook
 from openpyxl.chart import BarChart, Reference
 
@@ -10,6 +11,36 @@ from qwopus_agent.analysis.workbook_profile import inspect_workbook
 
 
 class WorkbookProfileTests(unittest.TestCase):
+    def test_detects_single_numeric_column_header(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "scores.xlsx"
+            pd.DataFrame({"score": [8, 9, 10]}).to_excel(path, index=False)
+
+            result = read_spreadsheet(path)
+
+        # 原因：单列样本是置信区间和单样本 t 检验的常见输入。
+        # 作用：确认字段名不会被当作首条数据，统计 Skill 可以按真实列名取数。
+        self.assertEqual(list(result.analysis_frames()["Sheet1"].columns), ["score"])
+        self.assertEqual(result.analysis_frames()["Sheet1"]["score"].tolist(), [8, 9, 10])
+
+    def test_equal_header_scores_prefer_the_earliest_row(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "metadata.xlsx"
+            pd.DataFrame(
+                [
+                    ["Country Code", "Region", "Income Group"],
+                    ["AAA", "Region A", "High income"],
+                    ["BBB", "Region B", "Low income"],
+                    ["CCC", "Region C", "Middle income"],
+                ]
+            ).to_excel(path, index=False, header=False)
+
+            profile = inspect_workbook(path)
+
+        # 原因：全字符串数据行可与字段行同分，后部行不能覆盖真正的首行表头。
+        # 作用：确保元数据字段可被 Agent 识别并用于同层级筛选。
+        self.assertEqual(profile.sheets[0].primary_region().header_rows, (1,))
+
     def test_detects_and_flattens_two_row_header(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             path = Path(temporary_directory) / "multi_header.xlsx"

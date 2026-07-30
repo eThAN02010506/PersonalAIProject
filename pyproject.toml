@@ -35,6 +35,12 @@ dependencies = [
   # 原因：PDF 是报告模块的正式输出，不能只在开发测试环境偶然拥有生成依赖。
   # 作用：使用 Unicode 字体和自动分页生成完整、可搜索的多语言 PDF。
   "reportlab>=4,<6",
+  # 原因：t 检验和小样本均值置信区间需要准确的 Student-t 分布分位数与尾概率。
+  # 作用：统计 Skill 使用经过验证的 SciPy 实现，避免自行近似 p 值或临界值。
+  "scipy>=1.12,<2",
+  # 原因：R summary(lm()) 风格回归需要经过验证的 OLS 拟合、系数推断和整体模型统计量。
+  # 作用：建模 Skill 复用 Statsmodels，模型无需生成或执行任意回归代码。
+  "statsmodels>=0.14,<1",
   # 原因：运行时依赖 smolagents 1.x 的 RunResult、ToolCallingAgent 和 CodeAgent 合同。
   # 作用：允许兼容的 1.x 修复版本，同时避免未来 2.x 被静默安装并破坏 Agent 执行。
   "smolagents>=1.26.0,<2",
@@ -111,5 +117,5 @@ packages = ["qwopus_agent"]
 [[tool.mypy.overrides]]
 # 原因：smolagents 与 MiniRAG 当前发行包没有 py.typed 标记或公开 stubs。
 # 作用：只跳过这两个外部边界的内部类型，项目自身调用代码仍接受 strict 检查。
-module = ["smolagents.*", "minirag.*"]
+module = ["smolagents.*", "minirag.*", "scipy.*", "statsmodels.*"]
 ignore_missing_imports = true

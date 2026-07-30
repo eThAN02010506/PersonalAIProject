@@ -78,6 +78,46 @@ def extract_agent_tool_calls(steps: list[dict[str, Any]]) -> list[str]:
     return names
 
 
+def extract_successful_agent_tool_calls(steps: list[dict[str, Any]]) -> list[str]:
+    """Extract Tool names only when execution produced a usable observation."""
+    names: list[str] = []
+    for step in steps:
+        if (
+            not isinstance(step, dict)
+            or step.get("error")
+            or not isinstance(step.get("observations"), str)
+            or not step["observations"].strip()
+        ):
+            continue
+        names.extend(extract_agent_tool_calls([step]))
+    return names
+
+
+def has_successful_tool_method(
+    steps: list[dict[str, Any]],
+    *,
+    tool_name: str,
+    method: str,
+) -> bool:
+    """Return whether one successful Tool call used the requested method."""
+    for step in steps:
+        if tool_name not in extract_successful_agent_tool_calls([step]):
+            continue
+        for tool_call in step.get("tool_calls") or []:
+            function = tool_call.get("function") if isinstance(tool_call, dict) else None
+            if not isinstance(function, dict) or function.get("name") != tool_name:
+                continue
+            arguments = function.get("arguments")
+            if isinstance(arguments, str):
+                try:
+                    arguments = json.loads(arguments)
+                except json.JSONDecodeError:
+                    continue
+            if isinstance(arguments, dict) and arguments.get("method") == method:
+                return True
+    return False
+
+
 def extract_agent_observations(steps: list[dict[str, Any]]) -> list[str]:
     """Return observations produced by non-final tools without model thoughts."""
     observations: list[str] = []
@@ -104,6 +144,7 @@ def extract_tool_observations(
     for step in steps:
         if (
             isinstance(step, dict)
+            and not step.get("error")
             and tool_name in extract_agent_tool_calls([step])
             and isinstance(step.get("observations"), str)
             and step["observations"].strip()
@@ -121,6 +162,8 @@ def extract_inspected_file_names(steps: list[dict[str, Any]]) -> set[str]:
         "document_summary",
         "excel_schema",
         "excel_analysis",
+        "excel_modeling",
+        "excel_statistics",
     }
     for step in steps:
         if not isinstance(step, dict):
@@ -172,10 +215,30 @@ def required_file_tools(spreadsheet_names: list[str]) -> set[str]:
     """Return the minimum Tool chain required before a file answer is accepted."""
     required: set[str] = set()
     if spreadsheet_names:
-        # 原因：模型可能直接根据 sample 心算，绕过本地 pandas 沙箱。
-        # 作用：所有 Excel 回答必须先看 schema，再执行本地代码；完整表格始终不进入 LLM。
-        required.update({"excel_schema", "excel_analysis"})
+        # 原因：模型可能直接根据 sample 心算，并猜测不存在的字段或单位。
+        # 作用：所有 Excel 回答必须先看 schema；计算工具的“二选一”由下方独立检查。
+        required.add("excel_schema")
     return required
+
+
+def missing_required_file_tools(
+    *,
+    spreadsheet_names: list[str],
+    required_tools: set[str],
+    successful_tool_calls: list[str],
+) -> set[str]:
+    """Resolve fixed requirements plus the spreadsheet computation alternative."""
+    missing = required_tools.difference(successful_tool_calls)
+    if (
+        spreadsheet_names
+        and {"excel_statistics", "excel_modeling", "excel_analysis"}.isdisjoint(
+            successful_tool_calls
+        )
+    ):
+        # 原因：Tool 名出现在失败步骤中不代表本地计算产生了可信结果。
+        # 作用：要求至少一次带 Observation 的真实计算，阻止模型用猜测表格冒充 Skill 输出。
+        missing.add("excel_statistics")
+    return missing
 
 
 def agent_debug_steps(

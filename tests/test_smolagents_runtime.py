@@ -1268,6 +1268,7 @@ class SmolagentsRuntimeTests(unittest.TestCase):
                 steps=[
                     {
                         "step_number": 1,
+                        "observations": "Schema result",
                         "tool_calls": [
                             {
                                 "function": {
@@ -2099,6 +2100,7 @@ class SmolagentsRuntimeTests(unittest.TestCase):
                 steps=[
                     {
                         "step_number": 1,
+                        "observations": "Schema result",
                         "tool_calls": [
                             {
                                 "function": {
@@ -2122,6 +2124,12 @@ class SmolagentsRuntimeTests(unittest.TestCase):
                 steps=[
                     {
                         "step_number": 2,
+                        "observations": (
+                            "| region | revenue |\n"
+                            "| --- | --- | --- |\n"
+                            "| East | 40 |\n"
+                            "| West | 20 |"
+                        ),
                         "tool_calls": [
                             {
                                 "function": {
@@ -2150,6 +2158,196 @@ class SmolagentsRuntimeTests(unittest.TestCase):
         self.assertIn("| region | revenue |", result.answer)
         self.assertTrue(any("excel_analysis" in step for step in result.debug_steps))
 
+    def test_file_analysis_accepts_reviewed_statistics_skill_after_schema(self) -> None:
+        settings = SmolagentsModelSettings(
+            model_id="any-model",
+            base_url="http://127.0.0.1:8080/v1",
+        )
+        FakeToolCallingAgent.queued_results = [
+            types.SimpleNamespace(
+                output=(
+                    "IQR 异常值：\n\n"
+                    "| student | metric | upper_bound |\n"
+                    "| --- | --- | --- |\n"
+                    "| E | 100 | 16 |"
+                ),
+                state="success",
+                steps=[
+                    {
+                        "step_number": 1,
+                        "observations": "Schema result",
+                        "tool_calls": [
+                            {
+                                "function": {
+                                    "name": "excel_schema",
+                                    "arguments": {"file_name": "scores.xlsx"},
+                                }
+                            }
+                        ],
+                    },
+                    {
+                        "step_number": 2,
+                        "observations": (
+                            "| student | metric | upper_bound |\n"
+                            "| --- | --- | --- |\n"
+                            "| E | 100 | 16 |"
+                        ),
+                        "tool_calls": [
+                            {
+                                "function": {
+                                    "name": "excel_statistics",
+                                    "arguments": {
+                                        "file_name": "scores.xlsx",
+                                        "method": "iqr_outliers",
+                                    },
+                                }
+                            }
+                        ],
+                    },
+                ],
+            )
+        ]
+
+        result = run_smolagents_file_analysis_with_debug(
+            file_names=["scores.xlsx"],
+            spreadsheet_names=["scores.xlsx"],
+            user_question="outlier 是什么",
+            tools=[object(), object(), object()],
+            settings=settings,
+        )
+
+        # 原因：常规统计不应为了满足完成条件再执行一次任意 pandas 代码。
+        # 作用：锁定 schema + reviewed statistics 是完整且可接受的 Excel 工具链。
+        self.assertEqual(result.tool_calls, ["excel_schema", "excel_statistics"])
+        self.assertIn("| E | 100 | 16 |", result.answer)
+
+    def test_file_analysis_accepts_modeling_skill_after_schema(self) -> None:
+        settings = SmolagentsModelSettings(
+            model_id="any-model",
+            base_url="http://127.0.0.1:8080/v1",
+        )
+        FakeToolCallingAgent.queued_results = [
+            types.SimpleNamespace(
+                output=(
+                    "回归结果：\n\n"
+                    "| term | estimate | p_value |\n"
+                    "| --- | --- | --- |\n"
+                    "| x | 1.97 | 0.0001 |"
+                ),
+                state="success",
+                steps=[
+                    {
+                        "step_number": 1,
+                        "observations": "Schema result",
+                        "tool_calls": [
+                            {
+                                "function": {
+                                    "name": "excel_schema",
+                                    "arguments": {"file_name": "model.xlsx"},
+                                }
+                            }
+                        ],
+                    },
+                    {
+                        "step_number": 2,
+                        "observations": (
+                            "| term | estimate | p_value |\n"
+                            "| --- | --- | --- |\n"
+                            "| x | 1.97 | 0.0001 |"
+                        ),
+                        "tool_calls": [
+                            {
+                                "function": {
+                                    "name": "excel_modeling",
+                                    "arguments": {
+                                        "file_name": "model.xlsx",
+                                        "method": "linear_regression",
+                                    },
+                                }
+                            }
+                        ],
+                    },
+                ],
+            )
+        ]
+
+        result = run_smolagents_file_analysis_with_debug(
+            file_names=["model.xlsx"],
+            spreadsheet_names=["model.xlsx"],
+            user_question="做 y 对 x 的回归",
+            tools=[object(), object(), object(), object()],
+            settings=settings,
+        )
+
+        # 原因：回归已经由审核 Skill 完成，不应再强制执行任意 pandas 代码。
+        # 作用：锁定 schema + excel_modeling 是合法完整的 Excel 工具链。
+        self.assertEqual(result.tool_calls, ["excel_schema", "excel_modeling"])
+        self.assertIn("| x | 1.97 | 0.0001 |", result.answer)
+
+    def test_file_analysis_rejects_failed_regression_even_with_model_table(self) -> None:
+        settings = SmolagentsModelSettings(
+            model_id="any-model",
+            base_url="http://127.0.0.1:8080/v1",
+        )
+        failed_steps = [
+            {
+                "step_number": 1,
+                "observations": "Schema result",
+                "tool_calls": [
+                    {
+                        "function": {
+                            "name": "excel_schema",
+                            "arguments": {"file_name": "model.xlsx"},
+                        }
+                    }
+                ],
+            },
+            {
+                "step_number": 2,
+                "error": "SVD did not converge",
+                "tool_calls": [
+                    {
+                        "function": {
+                            "name": "excel_modeling",
+                            "arguments": {
+                                "file_name": "model.xlsx",
+                                "method": "linear_regression",
+                            },
+                        }
+                    }
+                ],
+            },
+        ]
+        fabricated_answer = (
+            "| term | estimate |\n"
+            "| --- | --- |\n"
+            "| x | 999 |"
+        )
+        FakeToolCallingAgent.queued_results = [
+            types.SimpleNamespace(
+                output=fabricated_answer,
+                state="success",
+                steps=failed_steps,
+            ),
+            types.SimpleNamespace(
+                output=fabricated_answer,
+                state="success",
+                steps=failed_steps,
+            ),
+        ]
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "did not call required file tools: excel_modeling",
+        ):
+            run_smolagents_file_analysis_with_debug(
+                file_names=["model.xlsx"],
+                spreadsheet_names=["model.xlsx"],
+                user_question="做 summary(lm()) 回归",
+                tools=[object(), object()],
+                settings=settings,
+            )
+
     def test_format_file_analysis_prompt_explains_excel_tool_order(self) -> None:
         prompt = format_file_analysis_agent_prompt(
             file_names=["sales.xlsx"],
@@ -2158,6 +2356,7 @@ class SmolagentsRuntimeTests(unittest.TestCase):
         )
 
         self.assertIn("excel_schema first", prompt)
+        self.assertIn("excel_statistics", prompt)
         self.assertIn("excel_analysis", prompt)
         self.assertIn("already loaded in dfs", prompt)
         self.assertIn("Do not import, read files", prompt)
@@ -2179,6 +2378,7 @@ class SmolagentsRuntimeTests(unittest.TestCase):
         tool_steps = [
             {
                 "step_number": 1,
+                "observations": "Schema result",
                 "tool_calls": [
                     {
                         "function": {

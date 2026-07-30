@@ -17,7 +17,7 @@ chat owner can explicitly share that chat and its attached files.
 | Model layer | `BaseLLM`, provider registry, `LocalMLXLLM`, and a generic OpenAI-compatible adapter |
 | Agent runtime | smolagents-driven chat, separate Planner and Executor, DAG execution, supervised Multi-Agent delegation, shared state, debate, and arbitration |
 | Documents | Multi-file PDF, DOCX, Markdown, TXT, PNG, and JPEG analysis with Markdown normalization |
-| Spreadsheets | CSV, XLSX, and legacy XLS intake, workbook structure profiling, bounded samples, LLM-generated pandas, and local restricted execution |
+| Spreadsheets | CSV, XLSX, and legacy XLS intake, workbook profiling, reviewed descriptive/inferential statistics and modeling Skills, plus restricted pandas for custom calculations |
 | Knowledge | Persistent conversation-scoped MiniRAG vectors plus an evidence-bound knowledge graph and bounded multi-hop search |
 | Web research | Optional Tavily search plus separately authorized, isolated Playwright page rendering |
 | Reports | Unified Markdown, Excel, PNG/SVG chart, and complete paginated Unicode PDF artifacts |
@@ -42,7 +42,7 @@ flowchart TD
     SMOL --> REG["SkillRegistry"]
 
     REG --> DOC["MinerU / document parser"]
-    REG --> XLS["Excel profile / pandas sandbox"]
+    REG --> XLS["Excel profile / statistics / modeling / pandas sandbox"]
     REG --> WEB["Tavily web search"]
     REG --> BROWSER["Restricted Playwright browser"]
     REG --> MEM["MiniRAG facade"]
@@ -356,27 +356,40 @@ model:
 workbook
   -> local sheet and table-region profile
   -> schema, dtypes, and bounded sample rows
-  -> model-generated restricted pandas code
-  -> AST validation
-  -> child-process validation and resource limits
-  -> macOS Seatbelt: no network, writes, fork, or sensitive-path reads
+  -> reviewed excel_statistics or excel_modeling Skill for supported methods
+  -> restricted model-generated pandas only for custom calculations
+  -> AST validation, child-process limits, and macOS Seatbelt
   -> inert JSON plus a bounded GitHub-Flavored Markdown table
 ```
 
+`excel_statistics` performs deterministic local calculations for R
+`summary()`-style numeric summaries, categorical frequencies, missingness, IQR
+and Z-score outliers, grouped summaries, correlations, Student-t confidence
+intervals, one-sample t-tests, and Welch two-sample t-tests. `excel_modeling`
+provides ordinary least-squares regression with coefficient confidence
+intervals and model diagnostics, plus one-way ANOVA with group summaries,
+effect sizes, a Levene variance diagnostic, and optional Tukey HSD comparisons.
+These Skills use SciPy and statsmodels directly; the LLM selects a method and
+explains the verified result but does not calculate coefficients or p-values.
+
 General workbook analysis reports verifiable per-column statistics such as
-count, mean, standard deviation, minimum, quartiles, median, maximum, and
-missing values, together with relevant categorical counts. Group or item
-questions return one row per requested group or item. Highly fragmented report
-sheets fall back to a cleaned full-sheet view so labels are not separated from
-their numeric values; only a bounded number of secondary table regions remains
-available to the Agent.
+count, mean, standard deviation, standard error, minimum, quartiles, median,
+maximum, variance, skewness, kurtosis, and missing values, together with
+relevant categorical counts. Group or item questions return one row per
+requested group or item. Highly fragmented report sheets fall back to a cleaned
+full-sheet view so labels are not separated from their numeric values; only a
+bounded number of secondary table regions remains available to the Agent.
 
 When **Knowledge** is enabled for a chat, attached CSV/XLS/XLSX originals from
 that conversation are made available to the same Excel Skills. MiniRAG still
 stores only searchable document knowledge: later averages, grouped totals, and
 other calculations are performed against the authorized local original in the
 pandas sandbox. The computed result is rendered as a Markdown table in both
-document analysis and chat responses.
+document analysis and chat responses. A spreadsheet answer is accepted only
+after schema inspection and a successful local computation Observation; merely
+attempting a failed Tool call or emitting a model-written table does not satisfy
+the runtime contract. Explicit regression and ANOVA requests must successfully
+run their matching `excel_modeling` method.
 
 The pandas runner blocks imports, file access, network modules, unsafe builtins,
 unknown method calls, oversized syntax trees, and unbounded results. On macOS,
@@ -446,6 +459,8 @@ Built-in modules expose `create_skill()` and are loaded by
 
 - `document_parser`
 - `excel_schema`
+- `excel_statistics`
+- `excel_modeling`
 - `excel_analysis`
 - `rag_search`
 - `graph_search`

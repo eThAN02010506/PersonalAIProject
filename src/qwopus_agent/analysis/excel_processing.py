@@ -256,8 +256,10 @@ def _looks_like_label(value: str) -> bool:
 
 def _clean_loaded_dataframe(dataframe: pd.DataFrame) -> pd.DataFrame:
     dataframe = dataframe.dropna(axis=0, how="all").dropna(axis=1, how="all")
+    # 原因：Excel 多行表头会把换行带入真实列名，而 Markdown schema 会把它显示为空格。
+    # 作用：让 Agent 从 schema 复制的列名可直接用于沙箱计算，避免同列产生两种表示。
     dataframe.columns = [
-        str(column).strip()
+        " ".join(str(column).split())
         for column in dataframe.columns
     ]
     # 原因：header=None 会让包含表头文字的原始列先变成 object，切掉表头后不会自动恢复数字类型。

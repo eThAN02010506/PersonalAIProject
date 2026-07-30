@@ -38,7 +38,9 @@ from qwopus_agent.integrations.smolagents_tools import (
     build_document_section_tool,
     build_document_summary_tool,
     build_excel_analysis_tool,
+    build_excel_modeling_tool,
     build_excel_schema_tool,
+    build_excel_statistics_tool,
     build_minirag_search_tool,
 )
 from qwopus_agent.memory import MiniRAG
@@ -456,6 +458,13 @@ def _run_model_analysis(
                     minirag is not None and "rag_search" in analysis_run.tool_calls
                 ),
                 "pandas_sandbox_used": "excel_analysis" in analysis_run.tool_calls,
+                "statistics_skill_used": "excel_statistics" in analysis_run.tool_calls,
+                "modeling_skill_used": "excel_modeling" in analysis_run.tool_calls,
+                "local_spreadsheet_computation_used": bool(
+                    {"excel_statistics", "excel_modeling", "excel_analysis"}.intersection(
+                        analysis_run.tool_calls
+                    )
+                ),
                 "smolagents_tool_calls": analysis_run.tool_calls,
                 "generation_mode": analysis_run.generation_mode,
                 "source_coverage": {
@@ -588,6 +597,8 @@ def _build_analysis_tools(
                     spreadsheet_contexts,
                     budget_manager=budget_manager,
                 ),
+                build_excel_statistics_tool(spreadsheet_paths),
+                build_excel_modeling_tool(spreadsheet_paths),
                 build_excel_analysis_tool(spreadsheet_paths),
             ]
         )

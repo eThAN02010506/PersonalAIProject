@@ -64,7 +64,12 @@ _extract_tool_observations = smolagents_debug.extract_tool_observations
 _extract_agent_tool_calls = smolagents_debug.extract_agent_tool_calls
 _extract_final_answer = smolagents_debug.extract_final_answer
 _extract_inspected_file_names = smolagents_debug.extract_inspected_file_names
+_extract_successful_agent_tool_calls = (
+    smolagents_debug.extract_successful_agent_tool_calls
+)
+_has_successful_tool_method = smolagents_debug.has_successful_tool_method
 _looks_like_tool_observation = smolagents_debug.looks_like_tool_observation
+_missing_required_file_tools = smolagents_debug.missing_required_file_tools
 _required_file_tools = smolagents_debug.required_file_tools
 _unpack_agent_run_result = smolagents_debug.unpack_agent_run_result
 _document_evidence_required_answer = (
@@ -931,6 +936,7 @@ def run_smolagents_file_analysis_with_debug(
         )
     ]
     tool_calls = _extract_agent_tool_calls(steps)
+    successful_tool_calls = _extract_successful_agent_tool_calls(steps)
     all_steps = list(steps)
     debug_steps = _agent_debug_steps(state=state, steps=steps, tool_calls=tool_calls)
     required_tools = _required_file_tools(
@@ -940,7 +946,22 @@ def run_smolagents_file_analysis_with_debug(
         # 原因：逐文件调用受 Agent 步数限制，提示语不能保证大型文档集合真的全部进入上下文。
         # 作用：多文档任务必须执行一次带 coverage manifest 的平衡证据 Tool。
         required_tools.add("document_collection_summary")
-    missing_tools = required_tools.difference(tool_calls)
+    missing_tools = _missing_required_file_tools(
+        spreadsheet_names=spreadsheet_names,
+        required_tools=required_tools,
+        successful_tool_calls=successful_tool_calls,
+    )
+    required_spreadsheet_method = _required_spreadsheet_method(user_question)
+    if (
+        spreadsheet_names
+        and required_spreadsheet_method is not None
+        and not _has_successful_tool_method(
+            all_steps,
+            tool_name=required_spreadsheet_method[0],
+            method=required_spreadsheet_method[1],
+        )
+    ):
+        missing_tools.add(required_spreadsheet_method[0])
     inspected_files = _extract_inspected_file_names(steps)
     inspected_files.update(_extract_collection_covered_file_names(steps))
     missing_files = set(file_names).difference(inspected_files)
@@ -1008,6 +1029,11 @@ def run_smolagents_file_analysis_with_debug(
         else:
             debug_steps.append("Agent 尚未形成最终答案，保留工具上下文后触发收敛步骤。")
         missing_tool_instruction = ", ".join(sorted(missing_tools)) or "none"
+        required_method_instruction = (
+            ".".join(required_spreadsheet_method)
+            if required_spreadsheet_method is not None
+            else "infer the appropriate reviewed method from the user question"
+        )
         missing_file_instruction = ", ".join(sorted(missing_files)) or "none"
         missing_section_instruction = (
             ", ".join(
@@ -1052,11 +1078,15 @@ def run_smolagents_file_analysis_with_debug(
                 "Continue from the existing tool observations and answer the original "
                 "user question now. "
                 f"Before answering, call every missing required tool: {missing_tool_instruction}. "
+                f"Required spreadsheet computation: {required_method_instruction}. "
                 "Inspect every missing file with document_search, document_read_section, "
                 f"or document_collection_summary: "
                 f"{missing_file_instruction}. "
-                "For each missing spreadsheet, call excel_schema and excel_analysis with that "
-                "file name; generate restricted pandas code from its schema observation. "
+                "For each missing spreadsheet, call excel_schema, then prefer "
+                "excel_statistics for a supported common method, or excel_modeling for "
+                "regression and ANOVA; use excel_analysis only for a custom computation. "
+                "Generate restricted pandas code only when using "
+                "excel_analysis. "
                 f"{PANDAS_SANDBOX_CODE_GUIDANCE} "
                 "The final answer for spreadsheet work must include at least one GitHub-Flavored "
                 "Markdown table containing the locally computed metrics or item details. "
@@ -1114,6 +1144,9 @@ def run_smolagents_file_analysis_with_debug(
         retry_tool_calls = _extract_agent_tool_calls(retry_steps)
         tool_calls.extend(retry_tool_calls)
         all_steps.extend(retry_steps)
+        successful_tool_calls.extend(
+            _extract_successful_agent_tool_calls(retry_steps)
+        )
         inspected_files.update(_extract_inspected_file_names(retry_steps))
         inspected_files.update(_extract_collection_covered_file_names(retry_steps))
         debug_steps.extend(
@@ -1160,7 +1193,21 @@ def run_smolagents_file_analysis_with_debug(
             collection_evidence=collection_evidence,
         )
 
-    missing_tools = required_tools.difference(tool_calls)
+    missing_tools = _missing_required_file_tools(
+        spreadsheet_names=spreadsheet_names,
+        required_tools=required_tools,
+        successful_tool_calls=successful_tool_calls,
+    )
+    if (
+        spreadsheet_names
+        and required_spreadsheet_method is not None
+        and not _has_successful_tool_method(
+            all_steps,
+            tool_name=required_spreadsheet_method[0],
+            method=required_spreadsheet_method[1],
+        )
+    ):
+        missing_tools.add(required_spreadsheet_method[0])
     if missing_tools:
         missing_names = ", ".join(sorted(missing_tools))
         raise RuntimeError(f"smolagents did not call required file tools: {missing_names}.")
@@ -1192,7 +1239,7 @@ def run_smolagents_file_analysis_with_debug(
                 "smolagents did not include a computed spreadsheet table in the final answer."
             )
         # 原因：较弱模型可能正确调用 pandas，却在最终改写时漏掉可核对的表格。
-        # 作用：仅复用 excel_analysis 的受限 GFM 表格，不暴露代码、Thought 或完整 Observation。
+        # 作用：仅复用统计 Skill 或 pandas 沙箱的 GFM 表格，不暴露代码、Thought 或完整 Observation。
         rendered_tables = "\n\n".join(computed_tables)
         final_answer = (
             f"{final_answer.rstrip()}\n\n"
@@ -1294,19 +1341,30 @@ def format_file_analysis_agent_prompt(
                 f"Spreadsheets: {spreadsheet_list}.",
                 (
                     "For a spreadsheet, call excel_schema first. If computation is needed, "
-                    "then call excel_analysis."
+                    "prefer excel_statistics for R summary()-style describe, categorical "
+                    "frequency tables, missing values, IQR or Z-score outliers, "
+                    "group summaries, correlations, mean confidence intervals, and one- or "
+                    "two-sample t-tests. Treat confidence as a statistical confidence level, "
+                    "not the probability that one realized interval or conclusion is correct. "
+                    "Use excel_modeling for linear regression or one-way ANOVA with Tukey HSD. "
+                    "Use excel_analysis only for a custom calculation that excel_statistics "
+                    "cannot express. When entity rows are mixed "
+                    "with regional, income, or total aggregates, use a metadata table and the "
+                    "excel_statistics scope arguments so each comparison population is homogeneous."
                 ),
                 (
                     PANDAS_SANDBOX_CODE_GUIDANCE
                 ),
                 (
                     "Every spreadsheet final answer must contain at least one GitHub-Flavored "
-                    "Markdown table based on excel_analysis output."
+                    "Markdown table based on excel_statistics, excel_modeling, "
+                    "or excel_analysis output."
                 ),
                 (
-                    "For a general or full analysis, calculate a per-numeric-column table with "
-                    "count, mean, standard deviation, minimum, quartiles, median, maximum, and "
-                    "missing values; include relevant categorical item counts."
+                    "Only when the user requests a general workbook profile without specifying "
+                    "another computation, calculate a per-numeric-column table with count, mean, "
+                    "standard deviation, minimum, quartiles, median, maximum, and missing values; "
+                    "include relevant categorical item counts."
                 ),
                 (
                     "For a group or item question, return one row per requested group or item "
@@ -1337,11 +1395,25 @@ def _contains_markdown_table(content: str) -> bool:
     )
 
 
+def _required_spreadsheet_method(user_question: str) -> tuple[str, str] | None:
+    """Map explicit modeling requests to the deterministic local Skill method."""
+    normalized = user_question.casefold()
+    if any(marker in normalized for marker in ("anova", "方差分析")):
+        return ("excel_modeling", "one_way_anova")
+    if any(
+        marker in normalized
+        for marker in ("regression", "回归", "summary(lm", "linear model")
+    ):
+        return ("excel_modeling", "linear_regression")
+    return None
+
+
 def _spreadsheet_result_tables(steps: list[dict[str, Any]]) -> list[str]:
-    """Extract only bounded Markdown tables returned by excel_analysis."""
+    """Extract only bounded Markdown tables returned by spreadsheet compute tools."""
     tables: list[str] = []
-    for observation in _extract_tool_observations(steps, "excel_analysis"):
-        tables.extend(_extract_markdown_tables(observation))
+    for tool_name in ("excel_statistics", "excel_modeling", "excel_analysis"):
+        for observation in _extract_tool_observations(steps, tool_name):
+            tables.extend(_extract_markdown_tables(observation))
     return list(dict.fromkeys(tables))
 
 

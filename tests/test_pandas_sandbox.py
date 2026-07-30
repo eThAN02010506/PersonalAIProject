@@ -70,6 +70,120 @@ class PandasSandboxTests(unittest.TestCase):
         self.assertEqual(result.value[0]["mean"], 2.0)
         self.assertIn("| mean |", result.markdown)
 
+    def test_allows_descriptive_local_names_and_safe_missing_value_methods(self) -> None:
+        dataframes = {
+            "Report": pd.DataFrame(
+                {
+                    "label": ["First", "Second"],
+                    "value": [10.0, None],
+                    "other": [20.0, 30.0],
+                }
+            )
+        }
+
+        result = execute_pandas_code(
+            (
+                'source_frame = dfs["Report"]\n'
+                'numeric_columns = source_frame.select_dtypes(include="number")\n'
+                "missing_counts = numeric_columns.isna().sum()\n"
+                "result = pd.DataFrame({"
+                '"mean": numeric_columns.mean(), "missing": missing_counts'
+                "}).reset_index()"
+            ),
+            dataframes,
+        )
+
+        # 原因：模型会为复杂统计生成有语义的中间变量名，名称本身不是逃逸能力。
+        # 作用：确认沙箱允许正常 pandas 表达，同时结果仍只能来自已加载 DataFrame。
+        self.assertEqual([row["mean"] for row in result.value], [10.0, 25.0])
+        self.assertEqual([row["missing"] for row in result.value], [1, 0])
+
+    def test_rejects_overwriting_sandbox_capabilities(self) -> None:
+        dataframes = {"Sheet1": pd.DataFrame({"value": [1]})}
+
+        with self.assertRaisesRegex(ValueError, "safe local variable"):
+            execute_pandas_code("pd = 1\nresult = pd", dataframes)
+        with self.assertRaisesRegex(ValueError, "safe local variable"):
+            execute_pandas_code("open = 1\nresult = open", dataframes)
+
+    def test_allows_local_columns_but_rejects_mutating_workbook_mapping(self) -> None:
+        dataframes = {"Sheet1": pd.DataFrame({"value": [1, 2]})}
+
+        result = execute_pandas_code(
+            (
+                'analysis_frame = dfs["Sheet1"].copy()\n'
+                'analysis_frame["doubled"] = analysis_frame["value"] * 2\n'
+                'result = analysis_frame[["value", "doubled"]]'
+            ),
+            dataframes,
+        )
+
+        # 原因：模型常用列赋值表达派生指标，而 worker 中的工作簿已深拷贝。
+        # 作用：允许实用的数据变换，同时锁定共享 dfs 映射仍不可被替换。
+        self.assertEqual(result.value[1]["doubled"], 4)
+        with self.assertRaisesRegex(ValueError, "local variables or their columns"):
+            execute_pandas_code(
+                'dfs["Sheet1"] = pd.DataFrame()\nresult = 1',
+                dataframes,
+            )
+
+    def test_allows_vectorized_stack_and_local_axis_labels(self) -> None:
+        dataframes = {
+            "Sheet1": pd.DataFrame(
+                {"first": [1, 100], "second": [2, 200]},
+                index=["A", "B"],
+            )
+        }
+
+        result = execute_pandas_code(
+            (
+                'df = dfs["Sheet1"]\n'
+                "stacked = df.stack().reset_index()\n"
+                'stacked.columns = ["item", "metric", "value"]\n'
+                "result = stacked.sort_values(\"value\", ascending=False).head(2)"
+            ),
+            dataframes,
+        )
+
+        # 原因：跨多列异常值分析需要把宽表向量化成长表，避免开放 Python 循环。
+        # 作用：允许局部表的轴标签整理，但不开放任意对象属性修改。
+        self.assertEqual([row["value"] for row in result.value], [200, 100])
+        with self.assertRaisesRegex(ValueError, "local variables or their columns"):
+            execute_pandas_code(
+                'df = dfs["Sheet1"]\ndf.encoding = "utf-8"\nresult = df',
+                dataframes,
+            )
+
+    def test_executes_vectorized_row_level_iqr_outlier_pattern(self) -> None:
+        dataframes = {
+            "Sheet1": pd.DataFrame(
+                {
+                    "label": ["A", "B", "C", "D", "Outlier"],
+                    "first": [1, 2, 2, 3, 100],
+                    "second": [1, 2, 2, 3, 100],
+                }
+            )
+        }
+
+        result = execute_pandas_code(
+            (
+                'df = dfs["Sheet1"]\n'
+                'values = df[["first", "second"]]\n'
+                "series = values.mean(axis=1)\n"
+                "summary = series.quantile([0.25, 0.75])\n"
+                "mask = (series < summary.iloc[0] - 1.5 * "
+                "(summary.iloc[1] - summary.iloc[0])) | "
+                "(series > summary.iloc[1] + 1.5 * "
+                "(summary.iloc[1] - summary.iloc[0]))\n"
+                'result = pd.DataFrame({"label": df["label"], "value": series})[mask]'
+            ),
+            dataframes,
+        )
+
+        # 原因：抽象异常值问题应由向量化 pandas 完成，不能诱导模型请求 Python 循环。
+        # 作用：锁定 Prompt 中提供的 IQR 范式与实际沙箱能力完全一致。
+        self.assertEqual(result.value, [{"label": "Outlier", "value": 100.0}])
+
     def test_rejects_imports(self) -> None:
         with self.assertRaisesRegex(ValueError, "Unsupported sandbox syntax"):
             execute_pandas_code("import os\nresult = 1", {"Sheet1": pd.DataFrame()})

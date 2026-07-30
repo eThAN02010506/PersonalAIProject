@@ -11,6 +11,10 @@ from qwopus_agent.analysis.pandas_sandbox import (
     PANDAS_SANDBOX_CODE_GUIDANCE,
     execute_pandas_code,
 )
+from qwopus_agent.integrations.skill_tools import build_skill_tool
+from qwopus_agent.skills.base import SkillRequest
+from qwopus_agent.skills.excel_modeling import ExcelModelingSkill
+from qwopus_agent.skills.excel_statistics import ExcelStatisticsSkill
 from qwopus_agent.utils.token_budget import (
     TokenBudgetManager,
     estimate_tokens,
@@ -113,6 +117,212 @@ def build_excel_analysis_tool(spreadsheets: Mapping[str, str | Path]) -> Any:
             return str(execution.markdown)
 
     return ExcelAnalysisTool()
+
+
+def build_excel_statistics_tool(spreadsheets: Mapping[str, str | Path]) -> Any:
+    """Expose common deterministic statistics for only the approved spreadsheets."""
+    spreadsheet_paths = {
+        str(file_name): Path(file_path) for file_name, file_path in spreadsheets.items()
+    }
+    if not spreadsheet_paths:
+        raise ValueError("spreadsheets must not be empty.")
+    available_files = ", ".join(spreadsheet_paths)
+
+    def request_factory(values: Mapping[str, Any]) -> SkillRequest:
+        file_name = str(values.get("file_name", "")).strip()
+        path = _lookup_file_value(spreadsheet_paths, file_name)
+        arguments = {
+            key: value
+            for key, value in values.items()
+            if key != "file_name"
+        }
+        arguments["file_path"] = str(path)
+        return SkillRequest(query="", arguments=arguments)
+
+    # 原因：正式 Agent 只能使用本轮上传文件名，不能让通用 Skill 接收任意本地路径。
+    # 作用：复用 Skill 业务逻辑，同时由 Tool 适配器完成批准文件名到路径的注入。
+    return build_skill_tool(
+        ExcelStatisticsSkill(),
+        tool_name="excel_statistics",
+        description=(
+            "Run a reviewed local statistical method after excel_schema. Supported methods: "
+            "describe, frequency, missing, iqr_outliers, zscore_outliers, group_summary, "
+            "correlation, "
+            "mean_confidence_interval, one_sample_t_test, and two_sample_t_test. "
+            "Use describe for an R summary()-style numeric profile and frequency for "
+            "R table()-style categorical counts. "
+            "Use exact table and column names from excel_schema. For abstract outlier questions, "
+            "prefer one interpretable business metric. Select multiple value columns only when "
+            "they are repeated measurements of that same metric and unit, such as years; never "
+            "mix counts, percentages, currencies, totals, or hierarchy levels in one row mean. "
+            "If rows mix entities and aggregate groups, use the scope_* arguments to retain only "
+            "entities classified by a metadata table before calculating statistics. "
+            f"Available files: {available_files}."
+        ),
+        inputs={
+            "file_name": {
+                "type": "string",
+                "description": "Exact uploaded spreadsheet file name.",
+            },
+            "table_name": {
+                "type": "string",
+                "description": "Exact sheet or table name from excel_schema.",
+            },
+            "method": {
+                "type": "string",
+                "description": "One supported statistical method name.",
+            },
+            "value_columns": {
+                "type": "array",
+                "description": "Exact comparable value column names.",
+                "items": {"type": "string"},
+            },
+            "label_columns": {
+                "type": "array",
+                "description": "Exact identifier columns to return with each result row.",
+                "items": {"type": "string"},
+                "nullable": True,
+            },
+            "group_column": {
+                "type": "string",
+                "description": (
+                    "Exact grouping column for group_summary or two_sample_t_test, otherwise null."
+                ),
+                "nullable": True,
+            },
+            "group_values": {
+                "type": "array",
+                "description": (
+                    "Exactly two group labels for two_sample_t_test; null when the column "
+                    "already contains exactly two groups or for other methods."
+                ),
+                "items": {"type": "string"},
+                "nullable": True,
+            },
+            "confidence_level": {
+                "type": "number",
+                "description": (
+                    "Confidence level between 0 and 1 for intervals and t-tests; normally 0.95."
+                ),
+                "nullable": True,
+            },
+            "hypothesized_mean": {
+                "type": "number",
+                "description": (
+                    "Population mean in the one_sample_t_test null hypothesis, otherwise null."
+                ),
+                "nullable": True,
+            },
+            "scope_table_name": {
+                "type": "string",
+                "description": (
+                    "Metadata table used to define a comparable population, otherwise null."
+                ),
+                "nullable": True,
+            },
+            "scope_data_key": {
+                "type": "string",
+                "description": "Key column in table_name matched to the scope table.",
+                "nullable": True,
+            },
+            "scope_lookup_key": {
+                "type": "string",
+                "description": "Matching key column in scope_table_name.",
+                "nullable": True,
+            },
+            "scope_required_columns": {
+                "type": "array",
+                "description": (
+                    "Scope-table columns that must all be non-null, such as Region."
+                ),
+                "items": {"type": "string"},
+                "nullable": True,
+            },
+            "top_n": {
+                "type": "integer",
+                "description": "Maximum result rows, normally 20.",
+                "nullable": True,
+            },
+            "threshold": {
+                "type": "number",
+                "description": "IQR multiplier (normally 1.5) or Z-score cutoff.",
+                "nullable": True,
+            },
+        },
+        request_factory=request_factory,
+    )
+
+
+def build_excel_modeling_tool(spreadsheets: Mapping[str, str | Path]) -> Any:
+    """Expose reviewed regression and ANOVA models for approved spreadsheets."""
+    spreadsheet_paths = {
+        str(file_name): Path(file_path) for file_name, file_path in spreadsheets.items()
+    }
+    if not spreadsheet_paths:
+        raise ValueError("spreadsheets must not be empty.")
+    available_files = ", ".join(spreadsheet_paths)
+
+    def request_factory(values: Mapping[str, Any]) -> SkillRequest:
+        file_name = str(values.get("file_name", "")).strip()
+        path = _lookup_file_value(spreadsheet_paths, file_name)
+        arguments = {key: value for key, value in values.items() if key != "file_name"}
+        arguments["file_path"] = str(path)
+        return SkillRequest(query="", arguments=arguments)
+
+    # 原因：回归和 ANOVA 的参数合同不同于描述统计，独立 Tool 可避免弱模型混用字段。
+    # 作用：模型只选择获准文件、表和列，模型拟合与检验始终在本地 Skill 内完成。
+    return build_skill_tool(
+        ExcelModelingSkill(),
+        tool_name="excel_modeling",
+        description=(
+            "Fit reviewed local spreadsheet models after excel_schema. Use linear_regression "
+            "for an R summary(lm())-style OLS result, or one_way_anova for group means, "
+            "ANOVA, effect sizes, variance diagnostics, and optional Tukey HSD. "
+            f"Available files: {available_files}."
+        ),
+        inputs={
+            "file_name": {
+                "type": "string",
+                "description": "Exact uploaded spreadsheet file name.",
+            },
+            "table_name": {
+                "type": "string",
+                "description": "Exact sheet or table name from excel_schema.",
+            },
+            "method": {
+                "type": "string",
+                "description": "linear_regression or one_way_anova.",
+            },
+            "outcome_column": {
+                "type": "string",
+                "description": "Exact numeric response column.",
+            },
+            "predictor_columns": {
+                "type": "array",
+                "description": (
+                    "Numeric or categorical predictors for linear_regression, otherwise null."
+                ),
+                "items": {"type": "string"},
+                "nullable": True,
+            },
+            "group_column": {
+                "type": "string",
+                "description": "Categorical group for one_way_anova, otherwise null.",
+                "nullable": True,
+            },
+            "confidence_level": {
+                "type": "number",
+                "description": "Confidence level between 0 and 1; normally 0.95.",
+                "nullable": True,
+            },
+            "include_posthoc": {
+                "type": "boolean",
+                "description": "Whether ANOVA should include Tukey HSD; normally true.",
+                "nullable": True,
+            },
+        },
+        request_factory=request_factory,
+    )
 
 
 def _smolagents_tool_class() -> Any:

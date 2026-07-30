@@ -677,7 +677,9 @@ export function DocumentWorkspace({
                 </ul>
               </details>
             )}
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>{result.answer}</ReactMarkdown>
+            <div className="message-markdown analysis-markdown">
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>{result.answer}</ReactMarkdown>
+            </div>
             {result.reports.length > 0 && (
               <div className="report-downloads">
                 {result.reports.map((report) => (
