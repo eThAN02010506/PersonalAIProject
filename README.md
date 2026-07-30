@@ -601,6 +601,15 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for change scope and verification,
 The source may be viewed for evaluation, but no open-source license is granted.
 All rights are reserved by the project owner.
 
+## Third-Party Software
+
+Qwopus-Agent uses third-party components under their own licenses. In
+particular, document parsing is powered by
+[MinerU](vendor/mineru), whose license is based on Apache-2.0 with additional
+commercial thresholds and an attribution requirement for third-party online
+services. See [docs/third-party-software.md](docs/third-party-software.md)
+before distributing or operating the project for other users.
+
 ## Current Boundaries
 
 - A new model backend needs an adapter unless it already exposes an

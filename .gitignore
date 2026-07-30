@@ -9,7 +9,29 @@ htmlcov/
 *.egg-info/
 .DS_Store
 .idea/
-.env.local
+
+# 原因：本地模型、搜索和 LAN 配置可能包含真实凭据，公开可见仓库也不能提交这些值。
+# 作用：保留可审查的示例配置，同时隔离所有开发者自己的环境文件和私钥。
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+
+# 原因：数据库、日志和模型权重包含用户数据或大型本地资产，不属于可复现源码。
+# 作用：即使文件被放到标准 storage 目录外，也会阻止常见敏感运行产物进入 Git。
+*.db
+*.sqlite
+*.sqlite3
+*.log
+*.gguf
+*.safetensors
+*.ckpt
+*.pt
+*.pth
+*.onnx
 
 # 原因：前端依赖和 Vite 构建产物可由锁文件稳定重建，不应进入 Git。
 # 作用：只提交 React 源码与 pnpm 锁文件，避免仓库被本地平台文件污染。
