@@ -967,9 +967,6 @@ def run_smolagents_file_analysis_with_debug(
     missing_files = set(file_names).difference(inspected_files)
 
     final_answer = _extract_final_answer(answer)
-    spreadsheet_table_missing = bool(
-        spreadsheet_names and not _contains_markdown_table(final_answer)
-    )
     if _is_model_generation_failure_output(final_answer):
         # 原因：smolagents 在最终模型请求失败时会把错误包装成普通 text content。
         # 作用：保留完整 debug run 和已检查来源，但不让 transport error 成为用户答案。
@@ -1008,7 +1005,6 @@ def run_smolagents_file_analysis_with_debug(
         or missing_tools
         or missing_files
         or refinement_sections
-        or spreadsheet_table_missing
     ):
         # 原因：少数模型会把最后一次 Tool Observation 当作回答，或者在步数内没有调用 final_answer。
         # 作用：保留同一个 Agent memory 再收敛一轮，禁止原始工具输出进入 Streamlit 主结果。
@@ -1089,7 +1085,8 @@ def run_smolagents_file_analysis_with_debug(
                 "excel_analysis. "
                 f"{PANDAS_SANDBOX_CODE_GUIDANCE} "
                 "The final answer for spreadsheet work must include at least one GitHub-Flavored "
-                "Markdown table containing the locally computed metrics or item details. "
+                "Markdown table, which the runtime will append from successful local Tool "
+                "output. Do not transcribe or reformat numeric Tool results into a new table. "
                 "Rewrite the complete answer and fully deliver every requested numbered section; "
                 f"missing or underdeveloped sections: {missing_section_instruction}. "
                 "Correct every grounded-deliverable defect listed here: "
@@ -1232,20 +1229,28 @@ def run_smolagents_file_analysis_with_debug(
             "smolagents did not satisfy the grounded report contract: "
             f"{issue_names}."
         )
-    if spreadsheet_names and not _contains_markdown_table(final_answer):
+    if spreadsheet_names:
         computed_tables = _spreadsheet_result_tables(all_steps)
         if not computed_tables:
             raise RuntimeError(
                 "smolagents did not include a computed spreadsheet table in the final answer."
             )
-        # 原因：较弱模型可能正确调用 pandas，却在最终改写时漏掉可核对的表格。
-        # 作用：仅复用统计 Skill 或 pandas 沙箱的 GFM 表格，不暴露代码、Thought 或完整 Observation。
-        rendered_tables = "\n\n".join(computed_tables)
-        final_answer = (
-            f"{final_answer.rstrip()}\n\n"
-            "## Computed spreadsheet results\n\n"
-            f"{rendered_tables}"
+        # 原因：较弱模型会在抄写 Tool 数值时改变区间端点、自由度或 p 值。
+        # 作用：移除模型重排的表格并呈现本地 Skill 原表；解释仍由 Agent 生成。
+        narrative = _sanitize_spreadsheet_narrative(
+            _remove_markdown_tables(final_answer),
+            required_method=required_spreadsheet_method,
+            use_chinese=any("\u4e00" <= character <= "\u9fff" for character in user_question),
+        ).strip()
+        rendered_tables = "\n\n".join(
+            f"### Verified table {index}\n\n{table}"
+            for index, table in enumerate(computed_tables, start=1)
         )
+        final_answer = (
+            f"{narrative}\n\n"
+            "## Verified local computation\n\n"
+            f"{rendered_tables}"
+        ).strip()
     if not final_answer or _looks_like_tool_observation(final_answer):
         raise RuntimeError("smolagents did not produce a final answer after tool execution.")
 
@@ -1356,9 +1361,14 @@ def format_file_analysis_agent_prompt(
                     PANDAS_SANDBOX_CODE_GUIDANCE
                 ),
                 (
-                    "Every spreadsheet final answer must contain at least one GitHub-Flavored "
-                    "Markdown table based on excel_statistics, excel_modeling, "
-                    "or excel_analysis output."
+                    "Interpret successful spreadsheet Tool results in prose without copying "
+                    "their numbers into a new table; the runtime appends the exact local "
+                    "GitHub-Flavored Markdown tables to the final answer."
+                ),
+                (
+                    "Never describe Tukey HSD as an unequal-variance procedure. If Levene's "
+                    "test questions equal variances, state that Tukey is exploratory and that "
+                    "an unequal-variance post-hoc test was not computed."
                 ),
                 (
                     "Only when the user requests a general workbook profile without specifying "
@@ -1382,17 +1392,6 @@ def format_file_analysis_agent_prompt(
         ]
     )
     return "\n".join(lines)
-
-
-def _contains_markdown_table(content: str) -> bool:
-    """Return whether text contains a valid GFM-style header and delimiter row."""
-    lines = content.splitlines()
-    return any(
-        line.strip().startswith("|")
-        and line.strip().endswith("|")
-        and _is_markdown_table_delimiter(lines[index + 1])
-        for index, line in enumerate(lines[:-1])
-    )
 
 
 def _required_spreadsheet_method(user_question: str) -> tuple[str, str] | None:
@@ -1440,6 +1439,71 @@ def _extract_markdown_tables(content: str) -> list[str]:
             continue
         index += 1
     return tables
+
+
+def _remove_markdown_tables(content: str) -> str:
+    """Remove model-authored GFM tables before trusted local tables are attached."""
+    lines = content.splitlines()
+    retained: list[str] = []
+    index = 0
+    while index < len(lines):
+        if (
+            index + 1 < len(lines)
+            and lines[index].strip().startswith("|")
+            and lines[index].strip().endswith("|")
+            and _is_markdown_table_delimiter(lines[index + 1])
+        ):
+            index += 2
+            while (
+                index < len(lines)
+                and lines[index].strip().startswith("|")
+                and lines[index].strip().endswith("|")
+            ):
+                index += 1
+            continue
+        retained.append(lines[index])
+        index += 1
+    return "\n".join(retained)
+
+
+def _sanitize_spreadsheet_narrative(
+    content: str,
+    *,
+    required_method: tuple[str, str] | None,
+    use_chinese: bool,
+) -> str:
+    """Remove known method contradictions and add one deterministic limitation."""
+    blocked = re.compile(
+        r"(不等方差.{0,24}Tukey|Tukey.{0,24}不等方差|"
+        r"unequal[- ]variance.{0,24}Tukey|Tukey.{0,24}unequal[- ]variance|"
+        r"Welch[-\N{NON-BREAKING HYPHEN}\N{EN DASH} ]Tukey|"
+        r"来自模型输出|from (?:the )?model output|1\.96\s*[×*]\s*SE)",
+        flags=re.IGNORECASE,
+    )
+    retained = [line for line in content.splitlines() if not blocked.search(line)]
+    if required_method == ("excel_modeling", "one_way_anova"):
+        note = (
+            "方法限制：Tukey HSD 假设组内方差近似相等；若 Levene 检验显著，"
+            "其比较只能作为探索性结果，本次未计算 Games-Howell。"
+            if use_chinese
+            else (
+                "Method limit: Tukey HSD assumes similar within-group variances. "
+                "When Levene's test is significant, treat it as exploratory; "
+                "Games-Howell was not computed."
+            )
+        )
+        retained.extend(["", f"> {note}"])
+    elif required_method == ("excel_modeling", "linear_regression"):
+        note = (
+            "方法限制：原始回归系数受变量量纲影响，不能单独作为变量重要性排名。"
+            if use_chinese
+            else (
+                "Method limit: raw regression coefficients depend on variable scale "
+                "and are not a standalone variable-importance ranking."
+            )
+        )
+        retained.extend(["", f"> {note}"])
+    return "\n".join(retained)
 
 
 def _is_markdown_table_delimiter(line: str) -> bool:

@@ -286,6 +286,9 @@ def _one_way_anova(
         / (sum_squares_total + mean_square_within)
     )
     levene = stats.levene(*[sample.to_numpy() for sample in samples], center="median")
+    equal_variance_supported = bool(
+        levene.pvalue >= 1.0 - confidence_level
+    )
 
     group_rows = []
     for group_name, group in grouped:
@@ -373,6 +376,16 @@ def _one_way_anova(
         "omega_squared": round(omega_squared, 6),
         "levene_statistic": round(float(levene.statistic), 6),
         "levene_p_value": round(float(levene.pvalue), 6),
+        "equal_variance_supported": equal_variance_supported,
+        "posthoc_interpretation": (
+            "Tukey HSD assumes similar within-group variances."
+            if equal_variance_supported
+            else (
+                "Levene's test questions equal variances. Tukey HSD still assumes "
+                "equal variances and must be treated as exploratory; this Skill did "
+                "not compute an unequal-variance post-hoc test."
+            )
+        ),
         "assumptions": (
             "independent observations, approximately normal residuals, "
             "and similar within-group variances"

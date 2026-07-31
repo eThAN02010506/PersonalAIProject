@@ -502,6 +502,8 @@ class BuiltinSkillTests(unittest.TestCase):
         self.assertGreater(response.data["details"]["eta_squared"], 0.8)
         self.assertEqual(len(response.data["tables"]["Tukey HSD"]), 3)
         self.assertIn("levene_p_value", response.content)
+        self.assertIn("equal_variance_supported", response.content)
+        self.assertIn("Tukey HSD assumes", response.content)
 
     def test_rag_search_skill_uses_injected_minirag(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

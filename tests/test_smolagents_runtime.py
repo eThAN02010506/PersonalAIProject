@@ -2422,8 +2422,137 @@ class SmolagentsRuntimeTests(unittest.TestCase):
             settings=settings,
         )
 
-        self.assertIn("## Computed spreadsheet results", result.answer)
+        self.assertIn("## Verified local computation", result.answer)
         self.assertIn(computed_table, result.answer)
+
+    def test_file_analysis_replaces_model_table_with_verified_tool_table(self) -> None:
+        settings = SmolagentsModelSettings(
+            model_id="any-model",
+            base_url="http://127.0.0.1:8080/v1",
+        )
+        verified_table = (
+            "| group | ci_upper |\n"
+            "| --- | --- |\n"
+            "| virginica | 6.768715 |"
+        )
+        FakeToolCallingAgent.queued_results = [
+            types.SimpleNamespace(
+                output=(
+                    "The groups differ.\n\n"
+                    "| group | ci_upper |\n"
+                    "| --- | --- |\n"
+                    "| virginica | 6.589 |"
+                ),
+                state="success",
+                steps=[
+                    {
+                        "step_number": 1,
+                        "observations": "Schema result",
+                        "tool_calls": [
+                            {
+                                "function": {
+                                    "name": "excel_schema",
+                                    "arguments": {"file_name": "iris.xlsx"},
+                                }
+                            }
+                        ],
+                    },
+                    {
+                        "step_number": 2,
+                        "observations": verified_table,
+                        "tool_calls": [
+                            {
+                                "function": {
+                                    "name": "excel_modeling",
+                                    "arguments": {
+                                        "file_name": "iris.xlsx",
+                                        "method": "one_way_anova",
+                                    },
+                                }
+                            }
+                        ],
+                    },
+                ],
+            )
+        ]
+
+        result = run_smolagents_file_analysis_with_debug(
+            file_names=["iris.xlsx"],
+            spreadsheet_names=["iris.xlsx"],
+            user_question="Run ANOVA.",
+            tools=[object(), object()],
+            settings=settings,
+        )
+
+        # 原因：模型可能在最终排版时改动一个数字，肉眼仍很难发现。
+        # 作用：最终答案只保留受信任 Tool 表，错误的模型重抄表不会进入 UI。
+        self.assertNotIn("6.589", result.answer)
+        self.assertIn("6.768715", result.answer)
+        self.assertIn("Tukey HSD assumes", result.answer)
+
+    def test_file_analysis_removes_invalid_unequal_variance_tukey_claim(self) -> None:
+        settings = SmolagentsModelSettings(
+            model_id="any-model",
+            base_url="http://127.0.0.1:8080/v1",
+        )
+        verified_table = (
+            "| source | f_statistic |\n"
+            "| --- | --- |\n"
+            "| between_groups | 119.264502 |"
+        )
+        FakeToolCallingAgent.queued_results = [
+            types.SimpleNamespace(
+                output=(
+                    "方差不齐，但使用了不等方差的 Tukey HSD。\n\n"
+                    "ANOVA 显示组间存在差异。\n\n"
+                    "可考虑 Welch‑Tukey 或 Games-Howell。"
+                ),
+                state="success",
+                steps=[
+                    {
+                        "step_number": 1,
+                        "observations": "Schema result",
+                        "tool_calls": [
+                            {
+                                "function": {
+                                    "name": "excel_schema",
+                                    "arguments": {"file_name": "iris.xlsx"},
+                                }
+                            }
+                        ],
+                    },
+                    {
+                        "step_number": 2,
+                        "observations": verified_table,
+                        "tool_calls": [
+                            {
+                                "function": {
+                                    "name": "excel_modeling",
+                                    "arguments": {
+                                        "file_name": "iris.xlsx",
+                                        "method": "one_way_anova",
+                                    },
+                                }
+                            }
+                        ],
+                    },
+                ],
+            )
+        ]
+
+        result = run_smolagents_file_analysis_with_debug(
+            file_names=["iris.xlsx"],
+            spreadsheet_names=["iris.xlsx"],
+            user_question="进行方差分析",
+            tools=[object(), object()],
+            settings=settings,
+        )
+
+        # 原因：Tukey HSD 没有“不等方差版本”，弱模型可能将其与 Games-Howell 混淆。
+        # 作用：删除错误方法声明，并用不可变限制说明保留正确的解释边界。
+        self.assertNotIn("不等方差的 Tukey", result.answer)
+        self.assertNotIn("Welch‑Tukey", result.answer)
+        self.assertIn("本次未计算 Games-Howell", result.answer)
 
     def test_file_analysis_prompt_applies_requested_detail_level(self) -> None:
         concise = format_file_analysis_agent_prompt(
