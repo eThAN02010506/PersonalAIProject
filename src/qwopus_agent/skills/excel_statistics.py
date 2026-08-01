@@ -57,10 +57,14 @@ class ExcelStatisticsSkill(BaseSkill):
             method = str(request.arguments["method"]).strip()
             value_columns = _column_list(request.arguments.get("value_columns"))
             label_columns = _column_list(request.arguments.get("label_columns"))
-            group_column = str(request.arguments.get("group_column") or "").strip()
+            group_column = _optional_text_argument(
+                request.arguments.get("group_column")
+            )
             group_values = _column_list(request.arguments.get("group_values"))
             category_columns = _column_list(request.arguments.get("category_columns"))
-            lookup_value = str(request.arguments.get("lookup_value") or "").strip()
+            lookup_value = _optional_text_argument(
+                request.arguments.get("lookup_value")
+            )
             confidence_level_argument = request.arguments.get("confidence_level")
             confidence_level = (
                 0.95
@@ -73,13 +77,15 @@ class ExcelStatisticsSkill(BaseSkill):
                 if hypothesized_mean_argument is not None
                 else None
             )
-            scope_table_name = str(
-                request.arguments.get("scope_table_name") or ""
-            ).strip()
-            scope_data_key = str(request.arguments.get("scope_data_key") or "").strip()
-            scope_lookup_key = str(
-                request.arguments.get("scope_lookup_key") or ""
-            ).strip()
+            scope_table_name = _optional_text_argument(
+                request.arguments.get("scope_table_name")
+            )
+            scope_data_key = _optional_text_argument(
+                request.arguments.get("scope_data_key")
+            )
+            scope_lookup_key = _optional_text_argument(
+                request.arguments.get("scope_lookup_key")
+            )
             scope_required_columns = _column_list(
                 request.arguments.get("scope_required_columns")
             )
@@ -1051,6 +1057,18 @@ def _column_list(value: Any) -> list[str]:
             if str(column).strip()
         )
     )
+
+
+def _optional_text_argument(value: Any) -> str:
+    """Normalize optional text arguments produced by weaker tool-calling models.
+
+    原因：部分 OpenAI-compatible 本地模型会把可选空字段序列化成字符串 "null"。
+    作用：让可选参数保持空值语义，避免把 "null" 误当成真实列名或表名。
+    """
+    if value is None:
+        return ""
+    text = str(value).strip()
+    return "" if text.casefold() in {"", "null", "none"} else text
 
 
 def create_skill() -> BaseSkill:

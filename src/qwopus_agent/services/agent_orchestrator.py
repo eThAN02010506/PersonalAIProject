@@ -139,13 +139,17 @@ class AgentOrchestrator:
                 raise ValueError("Planning objective must not be blank.")
             answer_contract = _answer_contract(request)
             answer_plan = build_answer_plan(planning_objective, answer_contract)
+            planner_local_knowledge = (
+                request.enable_local_knowledge
+                and not _is_spreadsheet_only_local_computation_request(request)
+            )
             plan = await self.planner.plan(
                 AgentPlanningRequest(
                     objective=planning_objective,
                     has_documents=bool(request.uploaded_files),
                     enable_web_search=request.enable_web_search,
                     enable_browser=request.enable_browser,
-                    enable_local_knowledge=request.enable_local_knowledge,
+                    enable_local_knowledge=planner_local_knowledge,
                     generate_report=request.generate_report,
                     complexity=(
                         answer_contract.complexity
@@ -892,8 +896,16 @@ class AgentOrchestrator:
                     error=error,
                     debug_runs=result.debug_runs,
                 )
+            final_content = _fallback_from_dependencies_for_empty_answer(
+                result.content,
+                context,
+            )
             return _CapabilityResult(
-                content=result.content,
+                content=_preserve_requested_table_output(
+                    final_content,
+                    request.objective,
+                    context,
+                ),
                 success=result.success,
                 confidence=0.95 if result.success else 0.0,
                 citations=(
@@ -1006,6 +1018,63 @@ def _answer_contract(request: OrchestrationRequest) -> AnswerContract:
     return AnswerContract(response_detail=request.response_detail)
 
 
+def _is_spreadsheet_only_local_computation_request(
+    request: OrchestrationRequest,
+) -> bool:
+    """Return whether local spreadsheet tools can fully answer the request.
+
+    原因：Excel 计算已由 document_agent 的本地 Tool 完成，
+    再进 MiniRAG/Review/Synthesis 会变慢且可能改差。
+    作用：纯表格计算问题规划为单 Agent；Web、Browser、Report、全局知识仍走完整编排。
+    """
+    if (
+        not request.uploaded_files
+        or request.enable_web_search
+        or request.enable_browser
+        or request.generate_report
+        or request.include_global_knowledge
+    ):
+        return False
+    if not all(_is_spreadsheet_file(file.name) for file in request.uploaded_files):
+        return False
+    normalized = request.objective.casefold()
+    return any(
+        term in normalized
+        for term in (
+            "anova",
+            "average",
+            "calculate",
+            "correlation",
+            "covariance",
+            "describe",
+            "excel",
+            "mean",
+            "median",
+            "outlier",
+            "regression",
+            "spreadsheet",
+            "table",
+            "t-test",
+            "variance",
+            "workbook",
+            "z-score",
+            "异常",
+            "表格",
+            "方差",
+            "回归",
+            "均值",
+            "离群",
+            "平均",
+            "统计",
+        )
+    )
+
+
+def _is_spreadsheet_file(name: str) -> bool:
+    """Detect spreadsheet files by extension at the orchestration boundary."""
+    return Path(name).suffix.casefold() in {".csv", ".xls", ".xlsx"}
+
+
 def _dependency_capability_results(
     context: dict[str, Any],
 ) -> tuple[_CapabilityResult, ...]:
@@ -1022,6 +1091,101 @@ def _dependency_capability_results(
         if isinstance(raw, _CapabilityResult) and raw.success:
             results.append(raw)
     return tuple(results)
+
+
+def _preserve_requested_table_output(
+    answer: str,
+    objective: str,
+    context: dict[str, Any],
+) -> str:
+    """Append verified local computation tables when synthesis drops them.
+
+    原因：多 Agent synthesis 有时把 document_agent 的 Markdown 表格改写成纯文字。
+    作用：用户明确要求表格时，最终答案仍保留本地 Tool 产生的可核验计算表。
+    """
+    if not _requests_table_output(objective) or _contains_markdown_table(answer):
+        return answer
+    table_block = _verified_table_block_from_dependencies(context)
+    if not table_block:
+        return answer
+    return f"{answer.rstrip()}\n\n{table_block}".strip()
+
+
+def _fallback_from_dependencies_for_empty_answer(
+    answer: str,
+    context: dict[str, Any],
+) -> str:
+    """Use verified dependency prose when synthesis returns only empty scaffolding.
+
+    原因：弱模型偶尔会输出空标题而丢掉已经通过 Tool 验证的实质答案。
+    作用：保留 synthesis 的正常结果；只在内容近似为空时回退到成功依赖输出。
+    """
+    if not _is_empty_scaffold_answer(answer):
+        return answer
+    fallback = _first_substantive_dependency_answer(context)
+    return fallback or answer
+
+
+def _is_empty_scaffold_answer(answer: str) -> bool:
+    """Detect heading-only answers without penalizing short but real answers."""
+    substantive_lines = [
+        line.strip()
+        for line in answer.splitlines()
+        if line.strip() and not _looks_like_markdown_heading(line.strip())
+    ]
+    substantive_text = " ".join(
+        re.sub(r"[*_`>\\-]", "", line).strip()
+        for line in substantive_lines
+    ).strip()
+    return len(substantive_text) < 40 and "|" not in answer
+
+
+def _looks_like_markdown_heading(line: str) -> bool:
+    """Treat common section labels as structure, not user-facing substance."""
+    if line.startswith("#"):
+        return True
+    return re.fullmatch(r"\*{1,2}[^*\n]{1,80}\*{1,2}", line) is not None
+
+
+def _first_substantive_dependency_answer(context: dict[str, Any]) -> str:
+    """Prefer the first successful worker answer that already contains real content."""
+    for result in _dependency_capability_results(context):
+        if not _is_empty_scaffold_answer(result.content):
+            return result.content
+    return ""
+
+
+def _requests_table_output(objective: str) -> bool:
+    """Detect explicit table-output requests without invoking another model."""
+    normalized = objective.casefold()
+    return any(
+        term in normalized
+        for term in ("table", "markdown table", "表格", "列表")
+    )
+
+
+def _contains_markdown_table(answer: str) -> bool:
+    """Return true when answer already contains a GitHub-Flavored Markdown table."""
+    lines = answer.splitlines()
+    for index, line in enumerate(lines[:-1]):
+        if "|" not in line:
+            continue
+        separator = lines[index + 1].strip()
+        if "|" in separator and set(separator.replace("|", "").strip()) <= {"-", ":"}:
+            return True
+    return False
+
+
+def _verified_table_block_from_dependencies(context: dict[str, Any]) -> str:
+    """Use successful capability output as the source of deterministic table blocks."""
+    for result in _dependency_capability_results(context):
+        content = result.content
+        marker = "## Verified local computation"
+        if marker in content:
+            return content[content.index(marker):].strip()
+        if _contains_markdown_table(content):
+            return content.strip()
+    return ""
 
 
 def _evidence_ledger_from_context(

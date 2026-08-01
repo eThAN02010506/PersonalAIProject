@@ -388,6 +388,34 @@ class BuiltinSkillTests(unittest.TestCase):
         }
         self.assertEqual(counts, {"A": 2, "B": 2, "<missing>": 1})
 
+    def test_excel_statistics_treats_string_null_optional_arguments_as_empty(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "summary.xlsx"
+            pd.DataFrame({"score": [10, 20, 30]}).to_excel(path, index=False)
+
+            response = asyncio.run(
+                ExcelStatisticsSkill().run(
+                    SkillRequest(
+                        query="mean score",
+                        arguments={
+                            "file_path": str(path),
+                            "table_name": "Sheet1",
+                            "method": "describe",
+                            "value_columns": ["score"],
+                            "group_column": "null",
+                            "scope_table_name": "none",
+                            "scope_data_key": "null",
+                            "scope_lookup_key": "none",
+                        },
+                    )
+                )
+            )
+
+        # 原因：弱 tool-calling 模型会把 JSON null 错序列化成字符串。
+        # 作用：可选参数继续按空值处理，不会被误认为真实列名。
+        self.assertTrue(response.success)
+        self.assertEqual(response.data["rows"][0]["mean"], 20.0)
+
     def test_excel_statistics_lookup_answers_single_item_questions(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "character.xlsx"

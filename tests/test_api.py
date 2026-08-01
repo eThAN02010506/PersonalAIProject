@@ -723,11 +723,20 @@ class ApiTests(unittest.TestCase):
                 },
             )
             disabled_files = start_task.call_args.kwargs["uploaded_files"]
+            knowledge_only = self.client.post(
+                f"/api/conversations/{conversation_id}/runs",
+                json={
+                    "content": "What is the uploaded note about?",
+                    "enable_local_knowledge": True,
+                },
+            )
+            knowledge_only_files = start_task.call_args.kwargs["uploaded_files"]
 
         # 原因：MiniRAG 中的摘要不能支持聊天时才提出的任意表格计算。
-        # 作用：开启知识权限时交给本地 Excel Tool 原文件，关闭时则不泄露附件路径。
+        # 作用：只有计算型表格问题交给本地 Excel Tool，普通知识问答避免无关表格污染证据。
         self.assertEqual(enabled.status_code, 200)
         self.assertEqual(disabled.status_code, 200)
+        self.assertEqual(knowledge_only.status_code, 200)
         self.assertEqual(len(enabled_files), 1)
         self.assertEqual(enabled_files[0].name, "sales.xlsx")
         self.assertEqual(
@@ -735,6 +744,7 @@ class ApiTests(unittest.TestCase):
             store.load_original_path(structure.document_id),
         )
         self.assertEqual(disabled_files, ())
+        self.assertEqual(knowledge_only_files, ())
 
     def test_debug_overview_exposes_complete_local_diagnostics(self) -> None:
         self.runtime_log_path.write_text(

@@ -16,8 +16,12 @@ from qwopus_agent.integrations.smolagents_runtime import (
 )
 from qwopus_agent.services.agent_orchestrator import (
     AgentOrchestrator,
+    _CapabilityResult,
     _citations_from_chat,
+    _fallback_from_dependencies_for_empty_answer,
     _file_analysis_citations,
+    _is_spreadsheet_only_local_computation_request,
+    _preserve_requested_table_output,
 )
 from qwopus_agent.services.orchestration_models import (
     AnswerContract,
@@ -84,6 +88,88 @@ class AgentOrchestratorTests(unittest.TestCase):
         # 作用：锁定单 Agent 快速路径不会丢失调试步骤或把草稿拼进 final_answer。
         self.assertEqual(result.debug_runs[0].steps[0]["model_output"], "raw planner draft")
         self.assertNotIn("raw planner draft", result.final_answer)
+
+    def test_synthesis_preserves_requested_verified_table(self) -> None:
+        table_answer = (
+            "The mean Sepal.Length is 5.843333.\n\n"
+            "## Verified local computation\n\n"
+            "| column | mean |\n"
+            "| --- | --- |\n"
+            "| Sepal.Length | 5.843333 |"
+        )
+        context = {
+            "multi_agent": {
+                "dependency_results": {"document": table_answer},
+                "shared_state": {
+                    "contributions": {
+                        "document": SimpleNamespace(
+                            raw=_CapabilityResult(content=table_answer, success=True)
+                        )
+                    }
+                },
+            }
+        }
+
+        result = _preserve_requested_table_output(
+            "The mean Sepal.Length is 5.843333.",
+            "Calculate the mean Sepal.Length and return a table.",
+            context,
+        )
+
+        # 原因：Synthesizer 会把本地计算表压成纯文字，正式聊天页因此看不到用户要求的表格。
+        # 作用：只在用户明确要表格且最终答案缺表时，从成功依赖中补回 verified table。
+        self.assertIn("## Verified local computation", result)
+        self.assertIn("| Sepal.Length | 5.843333 |", result)
+
+    def test_synthesis_empty_scaffold_falls_back_to_dependency_answer(self) -> None:
+        dependency_answer = (
+            "The mean Sepal.Length is 5.843333.\n\n"
+            "| column | mean |\n"
+            "| --- | --- |\n"
+            "| Sepal.Length | 5.843333 |"
+        )
+        context = {
+            "multi_agent": {
+                "dependency_results": {"document": dependency_answer},
+                "shared_state": {
+                    "contributions": {
+                        "document": SimpleNamespace(
+                            raw=_CapabilityResult(
+                                content=dependency_answer,
+                                success=True,
+                            )
+                        )
+                    }
+                },
+            }
+        }
+
+        result = _fallback_from_dependencies_for_empty_answer(
+            "**Direct answer**\n\n**Supporting explanation**\n\n**Practical implication**",
+            context,
+        )
+
+        # 原因：真实模型偶尔只输出章节壳，直接发布会让用户看到空答案。
+        # 作用：锁定这种失败形态会回退到已成功执行的 Tool/Worker 结果。
+        self.assertIn("The mean Sepal.Length is 5.843333.", result)
+        self.assertIn("| Sepal.Length | 5.843333 |", result)
+
+    def test_spreadsheet_computation_can_skip_local_knowledge_planning(self) -> None:
+        request = OrchestrationRequest(
+            objective="Calculate the mean score and return a table.",
+            uploaded_files=(
+                OrchestrationFile(name="scores.xlsx", content=b"placeholder"),
+            ),
+            enable_local_knowledge=True,
+        )
+        global_request = request.model_copy(update={"include_global_knowledge": True})
+
+        # 原因：Excel 本地 Tool 已经能给出可核验计算结果，继续 RAG 综合会明显拖慢回答。
+        # 作用：只让纯表格计算走快速 document_agent 路径，显式全局知识请求仍保留完整链路。
+        self.assertTrue(_is_spreadsheet_only_local_computation_request(request))
+        self.assertFalse(
+            _is_spreadsheet_only_local_computation_request(global_request)
+        )
 
     def test_active_workflow_snapshot_reaches_smolagents_runtime(self) -> None:
         calls: list[dict[str, object]] = []

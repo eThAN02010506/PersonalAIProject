@@ -82,6 +82,34 @@ _REUSABLE_TOOL_SKILLS = {
     "graph_search": "graph_search",
 }
 _SPREADSHEET_EXTENSIONS = {"csv", "xls", "xlsx"}
+_SPREADSHEET_ANALYSIS_TERMS = (
+    "anova",
+    "average",
+    "calculate",
+    "correlation",
+    "covariance",
+    "describe",
+    "excel",
+    "mean",
+    "median",
+    "outlier",
+    "regression",
+    "spreadsheet",
+    "summary",
+    "table",
+    "t-test",
+    "variance",
+    "workbook",
+    "z-score",
+    "异常",
+    "表格",
+    "方差",
+    "回归",
+    "均值",
+    "离群",
+    "平均",
+    "统计",
+)
 
 
 class ChatRunRegistry:
@@ -163,7 +191,10 @@ class ChatRunRegistry:
             workflow_specs=self._active_workflow_specs(),
             uploaded_files=self._attached_spreadsheets(
                 conversation_id,
-                enabled=enable_local_knowledge,
+                enabled=(
+                    enable_local_knowledge
+                    and _requires_attached_spreadsheet_analysis(content)
+                ),
             ),
         )
         run_id = uuid4().hex
@@ -643,6 +674,16 @@ class ChatRunRegistry:
             # 作用：TTL 和容量共同限制常驻内存，不影响已经持久化的聊天消息。
             while len(self._completed) > self.max_completed_runs:
                 self._completed.popitem(last=False)
+
+
+def _requires_attached_spreadsheet_analysis(content: str) -> bool:
+    """Return whether chat needs original workbook files in addition to MiniRAG.
+
+    原因：会话知识检索可以回答普通文档问题，盲目附加全部 Excel 会污染多 Agent 证据。
+    作用：只有统计、表格、Excel 计算类问题才把已授权原工作簿交给本地 Tool。
+    """
+    normalized = content.casefold()
+    return any(term in normalized for term in _SPREADSHEET_ANALYSIS_TERMS)
 
 
 def _completed_task_state(prepared: PreparedChatRequest) -> ConversationTaskState:
