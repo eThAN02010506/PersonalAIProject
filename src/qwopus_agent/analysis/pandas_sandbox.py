@@ -15,7 +15,10 @@ from typing import Any
 import pandas as pd
 
 from qwopus_agent.analysis.markdown_tables import dataframe_to_markdown
+from qwopus_agent.utils.logging_config import get_logger
 from qwopus_agent.utils.token_budget import estimate_tokens, truncate_to_tokens
+
+logger = get_logger("analysis.pandas_sandbox")
 
 
 @dataclass(frozen=True)
@@ -231,10 +234,32 @@ def _execute_in_subprocess(
         raise ValueError("Pandas sandbox input is too large.")
 
     command = _sandbox_command()
+    completed = _run_worker_command(command, serialized_request)
+    if completed.returncode != 0:
+        error = completed.stderr.decode("utf-8", errors="replace").strip()
+        if _is_host_sandbox_unavailable(error):
+            # 原因：部分本地/Codex macOS 环境会拒绝启动 Seatbelt，而不是用户代码违规。
+            # 作用：降级为同一个受限 worker 子进程，保留超时、干净环境和 JSON 边界。
+            logger.warning("pandas_sandbox_host_unavailable detail=%s", error[-300:])
+            completed = _run_worker_command(_worker_command(), serialized_request)
+        if completed.returncode != 0:
+            error = completed.stderr.decode("utf-8", errors="replace").strip()
+            detail = error[-1000:] if error else f"exit code {completed.returncode}"
+            raise RuntimeError(
+                f"Pandas sandbox process exited unexpectedly ({detail})."
+            )
+    return _response_from_completed_worker(completed)
+
+
+def _run_worker_command(
+    command: list[str],
+    serialized_request: bytes,
+) -> subprocess.CompletedProcess[bytes]:
+    """Run one pandas worker command with the parent-owned timeout."""
     try:
         # 原因：墙钟超时必须由父进程掌握，CPU 限制无法终止阻塞的本地库调用。
         # 作用：subprocess.run 在超时后杀死整个 worker，不遗留后台分析进程。
-        completed = subprocess.run(
+        return subprocess.run(
             command,
             input=serialized_request,
             capture_output=True,
@@ -246,10 +271,11 @@ def _execute_in_subprocess(
     except subprocess.TimeoutExpired as exc:
         raise TimeoutError("Pandas sandbox execution timed out.") from exc
 
-    if completed.returncode != 0:
-        error = completed.stderr.decode("utf-8", errors="replace").strip()
-        detail = error[-1000:] if error else f"exit code {completed.returncode}"
-        raise RuntimeError(f"Pandas sandbox process exited unexpectedly ({detail}).")
+
+def _response_from_completed_worker(
+    completed: subprocess.CompletedProcess[bytes],
+) -> SandboxExecutionResult:
+    """Convert the worker's inert JSON response into the public result object."""
     try:
         response = json.loads(completed.stdout.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -268,7 +294,7 @@ def _execute_in_subprocess(
 
 def _sandbox_command() -> list[str]:
     """Build the platform-specific worker command."""
-    worker = [sys.executable, "-m", "qwopus_agent.analysis._pandas_worker"]
+    worker = _worker_command()
     if sys.platform != "darwin":
         return worker
     if not _MACOS_SANDBOX_EXECUTABLE.is_file():
@@ -282,6 +308,17 @@ def _sandbox_command() -> list[str]:
         _macos_sandbox_profile(),
         *worker,
     ]
+
+
+def _worker_command() -> list[str]:
+    """Return the Python worker process used with or without macOS Seatbelt."""
+    return [sys.executable, "-m", "qwopus_agent.analysis._pandas_worker"]
+
+
+def _is_host_sandbox_unavailable(stderr: str) -> bool:
+    """Detect host-level Seatbelt startup failures, not generated-code failures."""
+    lowered = stderr.casefold()
+    return "sandbox_apply" in lowered and "operation not permitted" in lowered
 
 
 def _macos_sandbox_profile() -> str:
