@@ -88,6 +88,7 @@ def format_file_analysis_agent_prompt(
         )
     if spreadsheet_names:
         spreadsheet_list = ", ".join(spreadsheet_names)
+        required_methods = smolagents_spreadsheets.required_spreadsheet_methods(question)
         spreadsheet_intent_guidance = smolagents_spreadsheets.spreadsheet_intent_guidance(
             question
         )
@@ -117,6 +118,14 @@ def format_file_analysis_agent_prompt(
                     "Interpret successful spreadsheet Tool results in prose without copying "
                     "their numbers into a new table; the runtime appends the exact local "
                     "GitHub-Flavored Markdown tables to the final answer."
+                ),
+                (
+                    "For spreadsheet questions with a required statistical computation, do not "
+                    "call final_answer until excel_schema and every required computation tool "
+                    "has completed successfully."
+                    if required_methods
+                    else "For spreadsheet questions, do not call final_answer before the file "
+                    "schema has been inspected."
                 ),
                 (
                     "Never describe Tukey HSD as an unequal-variance procedure. If Levene's "

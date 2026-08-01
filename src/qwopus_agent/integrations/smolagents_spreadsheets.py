@@ -181,7 +181,20 @@ def required_spreadsheet_methods(user_question: str) -> tuple[tuple[str, str], .
         ("missing", ("missing", "缺失", "空值", "null", "na")),
         ("iqr_outliers", ("outlier", "异常", "离群", "极端值")),
         ("frequency", ("frequency", "count", "counts", "频数", "频率", "计数")),
-        ("describe", ("summary", "describe", "概况", "统计摘要", "描述统计")),
+        (
+            "describe",
+            (
+                "summary",
+                "describe",
+                "mean",
+                "average",
+                "平均",
+                "均值",
+                "概况",
+                "统计摘要",
+                "描述统计",
+            ),
+        ),
     )
     for method, markers in method_markers:
         if any(marker in normalized for marker in markers):
@@ -475,18 +488,11 @@ def remove_markdown_tables(content: str) -> str:
     retained: list[str] = []
     index = 0
     while index < len(lines):
-        if (
-            index + 1 < len(lines)
-            and lines[index].strip().startswith("|")
-            and lines[index].strip().endswith("|")
-            and is_markdown_table_delimiter(lines[index + 1])
-        ):
-            index += 2
-            while (
-                index < len(lines)
-                and lines[index].strip().startswith("|")
-                and lines[index].strip().endswith("|")
-            ):
+        if _looks_like_table_row(lines[index]):
+            # 原因：弱模型常输出缺少 GFM delimiter 的伪表格，合法表格检测无法移除。
+            # 作用：清掉所有模型自写 pipe-row 表格，只保留本地 Tool 重新附加的核验表。
+            index += 1
+            while index < len(lines) and _looks_like_table_row(lines[index]):
                 index += 1
             continue
         retained.append(lines[index])
@@ -538,3 +544,9 @@ def is_markdown_table_delimiter(line: str) -> bool:
     """Validate the GFM delimiter row used to distinguish tables from prose."""
     cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
     return bool(cells) and all(re.fullmatch(r":?-{3,}:?", cell) for cell in cells)
+
+
+def _looks_like_table_row(line: str) -> bool:
+    """Return whether a line is a table row, even if the table is malformed."""
+    stripped = line.strip()
+    return stripped.startswith("|") and stripped.endswith("|")

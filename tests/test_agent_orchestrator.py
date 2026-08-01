@@ -92,7 +92,7 @@ class AgentOrchestratorTests(unittest.TestCase):
     def test_synthesis_preserves_requested_verified_table(self) -> None:
         table_answer = (
             "The mean Sepal.Length is 5.843333.\n\n"
-            "## Verified local computation\n\n"
+            "## Local calculation table\n\n"
             "| column | mean |\n"
             "| --- | --- |\n"
             "| Sepal.Length | 5.843333 |"
@@ -118,7 +118,7 @@ class AgentOrchestratorTests(unittest.TestCase):
 
         # 原因：Synthesizer 会把本地计算表压成纯文字，正式聊天页因此看不到用户要求的表格。
         # 作用：只在用户明确要表格且最终答案缺表时，从成功依赖中补回 verified table。
-        self.assertIn("## Verified local computation", result)
+        self.assertIn("## Local calculation table", result)
         self.assertIn("| Sepal.Length | 5.843333 |", result)
 
     def test_synthesis_empty_scaffold_falls_back_to_dependency_answer(self) -> None:

@@ -26,6 +26,7 @@ from qwopus_agent.integrations.smolagents_runtime import (
     run_smolagents_chat_turn,
     run_smolagents_file_analysis_with_debug,
 )
+from qwopus_agent.integrations.smolagents_spreadsheets import remove_markdown_tables
 from qwopus_agent.services.orchestration_models import AnswerContract, AnswerPlan
 from qwopus_agent.skills import (
     BaseSkill,
@@ -2823,6 +2824,32 @@ class SmolagentsRuntimeTests(unittest.TestCase):
         self.assertIn("lookup_value", prompt)
         self.assertIn("exact item label", prompt)
 
+    def test_format_file_analysis_prompt_treats_mean_as_required_statistics(self) -> None:
+        prompt = format_file_analysis_agent_prompt(
+            file_names=["iris.xlsx"],
+            spreadsheet_names=["iris.xlsx"],
+            user_question="Calculate the mean Sepal.Length and return a table.",
+        )
+
+        # 原因：均值问题如果只要求 schema，弱模型会直接猜表格并跳过本地统计 Tool。
+        # 作用：锁定 mean/average 这类计算请求首轮就要求 excel_statistics.describe。
+        self.assertIn("excel_statistics.describe", prompt)
+        self.assertIn("do not call final_answer until excel_schema", prompt)
+
+    def test_remove_markdown_tables_removes_malformed_model_pipe_tables(self) -> None:
+        cleaned = remove_markdown_tables(
+            "The mean is 5.84.\n\n"
+            "| column | mean |\n"
+            "| Sepal.Length | 5.843333 |\n\n"
+            "Use the local table below."
+        )
+
+        # 原因：本地模型会生成没有 delimiter 的伪表格，直接展示会和核验表重复。
+        # 作用：清理模型自写表格块，最终只附加本地 Tool 的规范 Markdown 表格。
+        self.assertIn("The mean is 5.84.", cleaned)
+        self.assertIn("Use the local table below.", cleaned)
+        self.assertNotIn("| Sepal.Length |", cleaned)
+
     def test_file_analysis_preserves_computed_table_when_model_omits_it(self) -> None:
         settings = SmolagentsModelSettings(
             model_id="any-model",
@@ -2852,8 +2879,11 @@ class SmolagentsRuntimeTests(unittest.TestCase):
                 "tool_calls": [
                     {
                         "function": {
-                            "name": "excel_analysis",
-                            "arguments": {"file_name": "sales.xlsx"},
+                            "name": "excel_statistics",
+                            "arguments": {
+                                "file_name": "sales.xlsx",
+                                "method": "describe",
+                            },
                         }
                     }
                 ],
@@ -2881,7 +2911,7 @@ class SmolagentsRuntimeTests(unittest.TestCase):
             settings=settings,
         )
 
-        self.assertIn("## Verified local computation", result.answer)
+        self.assertIn("## Local calculation table", result.answer)
         self.assertIn(computed_table, result.answer)
 
     def test_file_analysis_replaces_model_table_with_verified_tool_table(self) -> None:

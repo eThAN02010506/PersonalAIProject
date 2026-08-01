@@ -1326,8 +1326,39 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 .debug-record-header > div { display: grid; min-width: 0; grid-template-columns: 10px minmax(0, auto); align-items: center; gap: 5px 8px; }
 .debug-record-header h2 { margin: 0; font-size: 16px; letter-spacing: 0; text-transform: capitalize; }
 .debug-record-header code { grid-column: 2; overflow-wrap: anywhere; color: #777872; font-size: 11px; }
+.debug-record-tabs {
+  display: flex;
+  gap: 6px;
+  border-bottom: 1px solid #e2e2dd;
+  padding: 10px 22px 0;
+}
+.debug-record-tabs button {
+  min-height: 34px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: #73746f;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 650;
+}
+.debug-record-tabs button.active { border-bottom-color: #cf473e; color: #222321; }
 .debug-section { border-bottom: 1px solid #e2e2dd; padding: 18px 22px; }
 .debug-section h3 { margin: 0 0 10px; font-size: 13px; letter-spacing: 0; }
+.debug-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+.debug-summary-grid > div {
+  display: grid;
+  gap: 3px;
+  border: 1px solid #dfdfda;
+  background: #fafaf8;
+  padding: 10px;
+}
+.debug-summary-grid span { color: #767772; font-size: 11px; }
+.debug-summary-grid strong { overflow-wrap: anywhere; font-size: 13px; }
 .debug-section > pre, .debug-raw-field pre, .runtime-log-output, .trace-table pre {
   overflow: auto;
   margin: 0;
@@ -1342,6 +1373,22 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 .trace-table > div { display: grid; grid-template-columns: 25px minmax(0, 1fr); gap: 8px; }
 .trace-table > div > span { display: grid; width: 22px; height: 22px; place-items: center; border-radius: 50%; background: #eeeeeb; color: #666762; font-size: 10px; }
 .trace-table p, .debug-section > p { color: #777872; font-size: 12px; }
+.debug-tool-list { display: grid; gap: 10px; }
+.debug-tool-call {
+  border: 1px solid #d9d9d3;
+  background: #fafaf8;
+}
+.debug-tool-call > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border-bottom: 1px solid #e3e3de;
+  padding: 10px 12px;
+}
+.debug-tool-call > header strong { font-size: 12px; }
+.debug-tool-call > header span { overflow: hidden; color: #777872; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
+.debug-tool-call .debug-raw-field { padding: 10px 12px; }
 .debug-raw-run { border: 1px solid #d9d9d3; margin-top: 8px; }
 .debug-raw-run > summary, .debug-step > summary {
   display: flex;

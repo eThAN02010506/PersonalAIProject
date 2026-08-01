@@ -1180,9 +1180,13 @@ def _verified_table_block_from_dependencies(context: dict[str, Any]) -> str:
     """Use successful capability output as the source of deterministic table blocks."""
     for result in _dependency_capability_results(context):
         content = result.content
-        marker = "## Verified local computation"
-        if marker in content:
-            return content[content.index(marker):].strip()
+        for marker in (
+            "## Local calculation table",
+            "## 本地计算表格",
+            "## Verified local computation",
+        ):
+            if marker in content:
+                return content[content.index(marker):].strip()
         if _contains_markdown_table(content):
             return content.strip()
     return ""

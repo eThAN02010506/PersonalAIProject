@@ -565,12 +565,17 @@ def run_smolagents_file_analysis_with_debug(
         if computation_summary and computation_summary not in narrative:
             narrative = f"{narrative}\n\n{computation_summary}".strip()
         rendered_tables = "\n\n".join(
-            f"### Verified table {index}\n\n{table}"
+            f"### Local table {index}\n\n{table}"
             for index, table in enumerate(computed_tables, start=1)
+        )
+        table_heading = (
+            "## 本地计算表格"
+            if any("\u4e00" <= character <= "\u9fff" for character in user_question)
+            else "## Local calculation table"
         )
         final_answer = (
             f"{narrative}\n\n"
-            "## Verified local computation\n\n"
+            f"{table_heading}\n\n"
             f"{rendered_tables}"
         ).strip()
     if not final_answer or _looks_like_tool_observation(final_answer):

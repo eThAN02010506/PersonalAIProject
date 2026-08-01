@@ -22,6 +22,15 @@ import type { DebugAgentRun, DebugOverview, DebugRecord } from "../lib/types";
 import { SkillWorkspace } from "./SkillWorkspace";
 
 type ConsoleView = "runs" | "logs" | "skills";
+type DebugDetailView = "summary" | "tools" | "raw";
+type ToolCallSummary = {
+  runLabel: string;
+  stepNumber: string;
+  name: string;
+  arguments: unknown;
+  observation: string;
+  error: string;
+};
 
 export function DebugConsole() {
   const [overview, setOverview] = useState<DebugOverview | null>(null);
@@ -282,6 +291,8 @@ function RuntimeSummary({ overview }: { overview: DebugOverview }) {
 }
 
 function RecordDetail({ record }: { record: DebugRecord }) {
+  const [detailView, setDetailView] = useState<DebugDetailView>("summary");
+  const toolCalls = useMemo(() => toolCallSummaries(record), [record]);
   return (
     <>
       <header className="debug-record-header">
@@ -302,16 +313,63 @@ function RecordDetail({ record }: { record: DebugRecord }) {
         </button>
       </header>
 
+      {/* 原因：完整 prompt/Observation 很长，默认展示会淹没真正需要排查的运行概况。
+          作用：把摘要、Tool 调用和原始轨迹分开，保留完整信息但降低阅读噪音。 */}
+      <nav className="debug-record-tabs" aria-label="Run detail views">
+        <button className={detailView === "summary" ? "active" : ""} onClick={() => setDetailView("summary")}>
+          Summary
+        </button>
+        <button className={detailView === "tools" ? "active" : ""} onClick={() => setDetailView("tools")}>
+          Tool calls
+        </button>
+        <button className={detailView === "raw" ? "active" : ""} onClick={() => setDetailView("raw")}>
+          Raw trace
+        </button>
+      </nav>
+
+      {detailView === "summary" ? (
+        <RunSummary record={record} toolCallCount={toolCalls.length} />
+      ) : detailView === "tools" ? (
+        <ToolCallView toolCalls={toolCalls} />
+      ) : (
+        <RawTraceView record={record} />
+      )}
+    </>
+  );
+}
+
+function RunSummary({
+  record,
+  toolCallCount,
+}: {
+  record: DebugRecord;
+  toolCallCount: number;
+}) {
+  const summary = [
+    ["Status", record.status ?? "unknown"],
+    ["Source", record.source ?? "agent"],
+    ["User", record.username ?? "legacy / system"],
+    ["Trace events", String(record.trace?.length ?? 0)],
+    ["Agent runs", String(record.debug_runs?.length ?? 0)],
+    ["Tool calls", String(toolCallCount)],
+  ];
+  return (
+    <>
+      <section className="debug-section">
+        <h3>Run summary</h3>
+        <div className="debug-summary-grid">
+          {summary.map(([label, value]) => (
+            <div key={label}>
+              <span>{label}</span>
+              <strong>{value}</strong>
+            </div>
+          ))}
+        </div>
+      </section>
       <section className="debug-section">
         <h3>Final result</h3>
         <pre>{record.result || "No final result was recorded."}</pre>
       </section>
-
-      <section className="debug-section">
-        <h3>Run metrics</h3>
-        <pre>{JSON.stringify(record.metrics ?? {}, null, 2)}</pre>
-      </section>
-
       <section className="debug-section">
         <h3>Orchestration trace</h3>
         <div className="trace-table">
@@ -324,7 +382,39 @@ function RecordDetail({ record }: { record: DebugRecord }) {
           {!record.trace?.length && <p>No orchestration events were recorded.</p>}
         </div>
       </section>
+    </>
+  );
+}
 
+function ToolCallView({ toolCalls }: { toolCalls: ToolCallSummary[] }) {
+  return (
+    <section className="debug-section">
+      <h3>Tool calls</h3>
+      <div className="debug-tool-list">
+        {toolCalls.map((call, index) => (
+          <article className="debug-tool-call" key={`${call.runLabel}-${call.stepNumber}-${index}`}>
+            <header>
+              <strong>{call.name}</strong>
+              <span>{call.runLabel} · step {call.stepNumber}</span>
+            </header>
+            <RawField title="Arguments" value={call.arguments} json />
+            <RawField title="Observation preview" value={call.observation} />
+            <RawField title="Error" value={call.error} />
+          </article>
+        ))}
+        {!toolCalls.length && <p>No tool calls were recorded.</p>}
+      </div>
+    </section>
+  );
+}
+
+function RawTraceView({ record }: { record: DebugRecord }) {
+  return (
+    <>
+      <section className="debug-section">
+        <h3>Run metrics</h3>
+        <pre>{JSON.stringify(record.metrics ?? {}, null, 2)}</pre>
+      </section>
       <section className="debug-section">
         <h3>Raw Agent runs</h3>
         {(record.debug_runs ?? []).map((run, index) => (
@@ -381,6 +471,50 @@ function RawField({
       <pre>{json ? JSON.stringify(value, null, 2) : String(value)}</pre>
     </div>
   );
+}
+
+function toolCallSummaries(record: DebugRecord): ToolCallSummary[] {
+  // 原因：后端为兼容不同 smolagents 版本保留原始 step 字段，前端不能假设强类型结构。
+  // 作用：只抽取 Debug Console 需要的 Tool 名称、参数、Observation 摘要和错误。
+  const calls: ToolCallSummary[] = [];
+  for (const run of record.debug_runs ?? []) {
+    const runLabel = run.label ?? "agent_run";
+    for (const step of run.steps ?? []) {
+      const rawCalls = Array.isArray(step.tool_calls) ? step.tool_calls : [];
+      for (const rawCall of rawCalls) {
+        const fn = toolFunction(rawCall);
+        if (!fn.name) continue;
+        calls.push({
+          runLabel,
+          stepNumber: String(step.step_number ?? "?"),
+          name: fn.name,
+          arguments: fn.arguments,
+          observation: previewText(step.observations),
+          error: previewText(step.error),
+        });
+      }
+    }
+  }
+  return calls;
+}
+
+function toolFunction(value: unknown): { name: string; arguments: unknown } {
+  if (!value || typeof value !== "object") return { name: "", arguments: undefined };
+  const maybeFunction = (value as { function?: unknown }).function;
+  if (!maybeFunction || typeof maybeFunction !== "object") {
+    return { name: "", arguments: undefined };
+  }
+  const fn = maybeFunction as { name?: unknown; arguments?: unknown };
+  return {
+    name: typeof fn.name === "string" ? fn.name : "",
+    arguments: fn.arguments,
+  };
+}
+
+function previewText(value: unknown) {
+  if (value === undefined || value === null || value === "") return "";
+  const text = typeof value === "string" ? value : JSON.stringify(value);
+  return text.length > 2_000 ? `${text.slice(0, 2_000)}\n...` : text;
 }
 
 function RuntimeLog({ overview }: { overview: DebugOverview | null }) {
