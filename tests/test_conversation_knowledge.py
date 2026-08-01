@@ -162,6 +162,39 @@ class ConversationKnowledgeTests(unittest.TestCase):
             self.assertIn("member-global-exclusive-42", member_results)
             self.assertNotIn("owner-global-exclusive-31", member_results)
 
+    def test_delete_removes_only_one_account_global_scope(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / "knowledge"
+            manager = ConversationKnowledgeManager(root=root, factory=make_test_minirag)
+
+            with manager.lease("conversation-a", global_scope="owner-account") as first:
+                first.insert("# File: alpha.txt\n\nalpha-delete-account-global-31")
+            with manager.lease("conversation-b", global_scope="owner-account") as second:
+                second.insert("# File: beta.txt\n\nbeta-keep-account-global-42")
+            with manager.lease("conversation-c", global_scope="member-account") as third:
+                third.insert("# File: gamma.txt\n\ngamma-other-account-global-53")
+
+            manager.delete("conversation-a", global_scope="owner-account")
+
+            owner_global = make_test_minirag(
+                manager.global_storage_path_for("owner-account")
+            )
+            member_global = make_test_minirag(
+                manager.global_storage_path_for("member-account")
+            )
+            owner_results = "\n".join(
+                owner_global.search("account global", min_relevance=0.25)
+            )
+            member_results = "\n".join(
+                member_global.search("account global", min_relevance=0.25)
+            )
+
+            # 原因：删除 chat 后如果账号级 Global 镜像残留，用户仍能用全局开关搜到旧文件。
+            # 作用：证明删除只清掉该 conversation 的镜像，不影响同账号其他 chat 或其他账号。
+            self.assertNotIn("alpha-delete-account-global-31", owner_results)
+            self.assertIn("beta-keep-account-global-42", owner_results)
+            self.assertIn("gamma-other-account-global-53", member_results)
+
     def test_scope_path_rejects_directory_traversal(self) -> None:
         with self.assertRaisesRegex(ValueError, "unsupported characters"):
             conversation_knowledge_path("../another-conversation")

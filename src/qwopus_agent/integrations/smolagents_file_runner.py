@@ -14,7 +14,6 @@ from qwopus_agent.integrations import (
     smolagents_spreadsheets,
 )
 from qwopus_agent.integrations.smolagents_results import DocumentAnalysisRun
-from qwopus_agent.prompts import smolagents as smolagents_prompts
 from qwopus_agent.reports import contract as report_contract
 from qwopus_agent.reports import grounded
 from qwopus_agent.utils.token_budget import TokenBudgetManager, truncate_to_tokens
@@ -31,21 +30,13 @@ _extract_agent_tool_calls = smolagents_debug.extract_agent_tool_calls
 _extract_final_answer = smolagents_debug.extract_final_answer
 _extract_inspected_file_names = smolagents_debug.extract_inspected_file_names
 _extract_successful_agent_tool_calls = smolagents_debug.extract_successful_agent_tool_calls
-_extract_tool_observations = smolagents_debug.extract_tool_observations
-_has_successful_tool_method = smolagents_debug.has_successful_tool_method
 _looks_like_tool_observation = smolagents_debug.looks_like_tool_observation
 _missing_required_file_tools = smolagents_debug.missing_required_file_tools
 _required_file_tools = smolagents_debug.required_file_tools
 _unpack_agent_run_result = smolagents_debug.unpack_agent_run_result
-_document_evidence_required_answer = smolagents_prompts.document_evidence_required_answer
-_has_usable_knowledge_evidence = smolagents_prompts.has_usable_knowledge_evidence
-_LOCAL_KNOWLEDGE_TOOLS = smolagents_prompts.LOCAL_KNOWLEDGE_TOOLS
-_no_knowledge_evidence_answer = smolagents_prompts.no_knowledge_evidence_answer
-_requires_document_evidence = smolagents_prompts.requires_document_evidence
 _apply_missing_spreadsheet_fallbacks = smolagents_spreadsheets.apply_missing_spreadsheet_fallbacks
 _has_required_spreadsheet_method = smolagents_spreadsheets.has_required_spreadsheet_method
 _remove_markdown_tables = smolagents_spreadsheets.remove_markdown_tables
-_required_spreadsheet_method = smolagents_spreadsheets.required_spreadsheet_method
 _required_spreadsheet_methods = smolagents_spreadsheets.required_spreadsheet_methods
 _sanitize_spreadsheet_narrative = smolagents_spreadsheets.sanitize_spreadsheet_narrative
 _spreadsheet_computation_summary = smolagents_spreadsheets.spreadsheet_computation_summary
@@ -58,46 +49,12 @@ _lesson_slot_manifest = report_contract._lesson_slot_manifest
 _merge_numbered_section_refinement = report_contract._merge_numbered_section_refinement
 _missing_requested_sections = report_contract._missing_requested_sections
 _report_quality_issues = report_contract._report_quality_issues
-_SCRIPTURE_REFERENCE_PATTERN = grounded._SCRIPTURE_REFERENCE_PATTERN
-_LessonGroundingSpec = grounded._LessonGroundingSpec
-_canonical_lesson_heading = grounded._canonical_lesson_heading
-_chinese_integer = grounded._chinese_integer
-_collection_manifest_sources = grounded._collection_manifest_sources
-_collection_source_blocks = grounded._collection_source_blocks
-_grounded_application_claim = grounded._grounded_application_claim
-_grounded_evidence_claim = grounded._grounded_evidence_claim
-_lesson_answer_aliases = grounded._lesson_answer_aliases
-_lesson_answer_label = grounded._lesson_answer_label
-_lesson_evidence = grounded._lesson_evidence
 _lesson_grounding_specs = grounded._lesson_grounding_specs
-_lesson_number_from_label = grounded._lesson_number_from_label
-_lesson_scripture = grounded._lesson_scripture
-_lesson_topic = grounded._lesson_topic
-_normalized_fact_text = grounded._normalized_fact_text
 _render_deterministic_grounded_report = grounded._render_deterministic_grounded_report
-_render_grounded_checklist = grounded._render_grounded_checklist
-_render_grounded_draft_review = grounded._render_grounded_draft_review
-_render_grounded_examples = grounded._render_grounded_examples
-_render_grounded_full_draft = grounded._render_grounded_full_draft
-_render_grounded_lesson_fallback = grounded._render_grounded_lesson_fallback
-_render_grounded_outline = grounded._render_grounded_outline
-_render_grounded_paragraph_guidance = grounded._render_grounded_paragraph_guidance
-_render_grounded_source_inventory = grounded._render_grounded_source_inventory
-_render_grounded_strategy = grounded._render_grounded_strategy
-_render_grounded_understanding = grounded._render_grounded_understanding
 _requested_numbered_sections = grounded._requested_numbered_sections
-_scripture_reference_is_supported = grounded._scripture_reference_is_supported
-_scripture_reference_key = grounded._scripture_reference_key
-_source_answer_label = grounded._source_answer_label
-_source_application_excerpt = grounded._source_application_excerpt
-_source_evidence_excerpt = grounded._source_evidence_excerpt
-_source_fact_values = grounded._source_fact_values
-_source_tagged_excerpt = grounded._source_tagged_excerpt
-_title_is_source_understanding = grounded._title_is_source_understanding
-_title_requires_full_draft = grounded._title_requires_full_draft
-_topic_payload = grounded._topic_payload
 _validated_grounded_collection = grounded._validated_grounded_collection
 should_use_grounded_report_composer = grounded.should_use_grounded_report_composer
+
 
 def run_smolagents_file_analysis_with_debug(
     file_names: list[str],
@@ -243,21 +200,13 @@ def run_smolagents_file_analysis_with_debug(
     successful_tool_calls = _extract_successful_agent_tool_calls(steps)
     all_steps = list(steps)
     debug_steps = _agent_debug_steps(state=state, steps=steps, tool_calls=tool_calls)
-    required_tools = _required_file_tools(
+    required_tools = _required_tools_for_file_analysis(
         spreadsheet_names=spreadsheet_names,
+        parser_files=parser_files,
+        requires_collection_summary=requires_collection_summary,
+        requires_document_summary=requires_document_summary,
+        analysis_mode=analysis_mode,
     )
-    if requires_collection_summary:
-        # 原因：逐文件调用受 Agent 步数限制，提示语不能保证大型文档集合真的全部进入上下文。
-        # 作用：多文档任务必须执行一次带 coverage manifest 的平衡证据 Tool。
-        required_tools.add("document_collection_summary")
-    elif requires_document_summary and parser_files:
-        # 原因：整体文档问题如果只用 search，容易只根据局部命中片段回答。
-        # 作用：要求先取得分层摘要，再允许用检索补充细节。
-        required_tools.add("document_summary")
-    if analysis_mode == "section" and parser_files:
-        # 原因：章节模式的边界来自用户选择的章节，不应由全文搜索替代。
-        # 作用：把 document_read_section 作为验收条件，确保回答来源受 scoped tool 限定。
-        required_tools.add("document_read_section")
     missing_tools = _missing_required_file_tools(
         spreadsheet_names=spreadsheet_names,
         required_tools=required_tools,
@@ -557,6 +506,7 @@ def run_smolagents_file_analysis_with_debug(
             f"{issue_names}."
         )
     if spreadsheet_names:
+        use_chinese = _contains_cjk(user_question)
         computed_tables = _spreadsheet_result_tables(all_steps)
         if not computed_tables:
             raise RuntimeError(
@@ -569,12 +519,12 @@ def run_smolagents_file_analysis_with_debug(
             required_method=(
                 required_spreadsheet_methods[0] if required_spreadsheet_methods else None
             ),
-            use_chinese=any("\u4e00" <= character <= "\u9fff" for character in user_question),
+            use_chinese=use_chinese,
         ).strip()
         computation_summary = _spreadsheet_computation_summary(
             all_steps,
             user_question=user_question,
-            use_chinese=any("\u4e00" <= character <= "\u9fff" for character in user_question),
+            use_chinese=use_chinese,
         )
         if computation_summary and computation_summary not in narrative:
             narrative = f"{narrative}\n\n{computation_summary}".strip()
@@ -584,7 +534,7 @@ def run_smolagents_file_analysis_with_debug(
         )
         table_heading = (
             "## 本地计算表格"
-            if any("\u4e00" <= character <= "\u9fff" for character in user_question)
+            if use_chinese
             else "## Local calculation table"
         )
         final_answer = (
@@ -604,3 +554,33 @@ def run_smolagents_file_analysis_with_debug(
         ),
         debug_runs=tuple(debug_runs),
     )
+
+
+def _required_tools_for_file_analysis(
+    *,
+    spreadsheet_names: list[str],
+    parser_files: set[str],
+    requires_collection_summary: bool,
+    requires_document_summary: bool,
+    analysis_mode: str,
+) -> set[str]:
+    """Return fixed Tool requirements before accepting a file-analysis answer."""
+    required_tools = _required_file_tools(spreadsheet_names=spreadsheet_names)
+    if requires_collection_summary:
+        # 原因：逐文件调用受 Agent 步数限制，提示语不能保证大型文档集合真的全部进入上下文。
+        # 作用：多文档任务必须执行一次带 coverage manifest 的平衡证据 Tool。
+        required_tools.add("document_collection_summary")
+    elif requires_document_summary and parser_files:
+        # 原因：整体文档问题如果只用 search，容易只根据局部命中片段回答。
+        # 作用：要求先取得分层摘要，再允许用检索补充细节。
+        required_tools.add("document_summary")
+    if analysis_mode == "section" and parser_files:
+        # 原因：章节模式的边界来自用户选择的章节，不应由全文搜索替代。
+        # 作用：把 document_read_section 作为验收条件，确保回答来源受 scoped tool 限定。
+        required_tools.add("document_read_section")
+    return required_tools
+
+
+def _contains_cjk(content: str) -> bool:
+    """Return whether user-facing labels should use Chinese."""
+    return any("\u4e00" <= character <= "\u9fff" for character in content)

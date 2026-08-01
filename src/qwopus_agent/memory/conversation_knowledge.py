@@ -194,7 +194,9 @@ class ConversationKnowledgeManager:
         global_scope: str | None = None,
     ) -> None:
         """Remove cached and persisted knowledge after explicit conversation deletion."""
-        global_entry = self._global_entry_for(global_scope) if global_scope is None else None
+        # 原因：账号级 Global 库按 global_scope 分文件存储，删除 chat 时也必须清理同一 scope。
+        # 作用：私库删除和账号全局镜像删除保持一致，避免被删除聊天仍可被 Global 搜到。
+        global_entry = self._global_entry_for(global_scope)
         directory = self.storage_path(conversation_id).parent
         with self._entries_lock:
             self._deleted.add(conversation_id)
