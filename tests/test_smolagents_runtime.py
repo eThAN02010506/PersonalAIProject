@@ -2462,6 +2462,74 @@ class SmolagentsRuntimeTests(unittest.TestCase):
         self.assertIn("| column | p50 |", result.answer)
         self.assertIn("| column | outlier_count |", result.answer)
 
+    def test_file_analysis_routes_single_spreadsheet_item_lookup_for_weak_models(self) -> None:
+        settings = SmolagentsModelSettings(
+            model_id="any-model",
+            base_url="http://127.0.0.1:8080/v1",
+        )
+        FakeToolCallingAgent.queued_results = [
+            types.SimpleNamespace(
+                output="我看到了表结构，但没有查具体项。",
+                state="success",
+                steps=[
+                    {
+                        "step_number": 1,
+                        "observations": "Schema result",
+                        "tool_calls": [
+                            {
+                                "function": {
+                                    "name": "excel_schema",
+                                    "arguments": {"file_name": "character.xlsx"},
+                                }
+                            }
+                        ],
+                    },
+                ],
+            ),
+            types.SimpleNamespace(
+                output="STR 的值如下。",
+                state="success",
+                steps=[
+                    {
+                        "step_number": 2,
+                        "observations": (
+                            "| row_index | key | value |\n"
+                            "| --- | --- | --- |\n"
+                            "| 3 | STR | 40 |"
+                        ),
+                        "tool_calls": [
+                            {
+                                "function": {
+                                    "name": "excel_statistics",
+                                    "arguments": {
+                                        "file_name": "character.xlsx",
+                                        "table_name": "Sheet1_key_values",
+                                        "method": "lookup",
+                                        "lookup_value": "STR",
+                                    },
+                                }
+                            }
+                        ],
+                    },
+                ],
+            ),
+        ]
+
+        result = run_smolagents_file_analysis_with_debug(
+            file_names=["character.xlsx"],
+            spreadsheet_names=["character.xlsx"],
+            user_question="STR 是多少？",
+            tools=[object(), object(), object()],
+            settings=settings,
+        )
+
+        # 原因：单项问题需要命中原始行或 key-value 派生表，不能只给整表概况。
+        # 作用：锁定 runtime 会强制补调 lookup，并保留本地命中的结果表。
+        self.assertEqual(result.tool_calls, ["excel_schema", "excel_statistics"])
+        self.assertIn("| 3 | STR | 40 |", result.answer)
+        self.assertIn("excel_statistics.lookup", FakeToolCallingAgent.last_instance.prompt)
+        self.assertIn("lookup_value", FakeToolCallingAgent.last_instance.prompt)
+
     def test_file_analysis_rejects_failed_regression_even_with_model_table(self) -> None:
         settings = SmolagentsModelSettings(
             model_id="any-model",
@@ -2541,6 +2609,18 @@ class SmolagentsRuntimeTests(unittest.TestCase):
         self.assertIn("Markdown table", prompt)
         self.assertIn("count, mean, standard deviation", prompt)
         self.assertIn("按地区汇总收入", prompt)
+
+    def test_format_file_analysis_prompt_includes_spreadsheet_intent_decomposition(self) -> None:
+        prompt = format_file_analysis_agent_prompt(
+            file_names=["character.xlsx"],
+            spreadsheet_names=["character.xlsx"],
+            user_question="STR 是多少？",
+        )
+
+        self.assertIn("Spreadsheet intent decomposition", prompt)
+        self.assertIn("excel_statistics.lookup", prompt)
+        self.assertIn("lookup_value", prompt)
+        self.assertIn("exact item label", prompt)
 
     def test_file_analysis_preserves_computed_table_when_model_omits_it(self) -> None:
         settings = SmolagentsModelSettings(

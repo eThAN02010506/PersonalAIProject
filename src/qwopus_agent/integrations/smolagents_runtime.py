@@ -1030,6 +1030,7 @@ def run_smolagents_file_analysis_with_debug(
             if required_spreadsheet_methods
             else "infer the appropriate reviewed method from the user question"
         )
+        spreadsheet_intent_guidance = _spreadsheet_intent_guidance(user_question)
         missing_file_instruction = ", ".join(sorted(missing_files)) or "none"
         missing_section_instruction = (
             ", ".join(
@@ -1075,6 +1076,7 @@ def run_smolagents_file_analysis_with_debug(
                 "user question now. "
                 f"Before answering, call every missing required tool: {missing_tool_instruction}. "
                 f"Required spreadsheet computation: {required_method_instruction}. "
+                f"{spreadsheet_intent_guidance} "
                 "Inspect every missing file with document_search, document_read_section, "
                 f"or document_collection_summary: "
                 f"{missing_file_instruction}. "
@@ -1343,6 +1345,7 @@ def format_file_analysis_agent_prompt(
         )
     if spreadsheet_names:
         spreadsheet_list = ", ".join(spreadsheet_names)
+        spreadsheet_intent_guidance = _spreadsheet_intent_guidance(question)
         lines.extend(
             [
                 f"Spreadsheets: {spreadsheet_list}.",
@@ -1366,6 +1369,7 @@ def format_file_analysis_agent_prompt(
                 (
                     PANDAS_SANDBOX_CODE_GUIDANCE
                 ),
+                spreadsheet_intent_guidance,
                 (
                     "Interpret successful spreadsheet Tool results in prose without copying "
                     "their numbers into a new table; the runtime appends the exact local "
@@ -1404,6 +1408,31 @@ def _required_spreadsheet_method(user_question: str) -> tuple[str, str] | None:
     """Map explicit modeling requests to the deterministic local Skill method."""
     methods = _required_spreadsheet_methods(user_question)
     return methods[0] if methods else None
+
+
+def _spreadsheet_intent_guidance(user_question: str) -> str:
+    """Describe deterministic spreadsheet method requirements in the Agent prompt."""
+    methods = _required_spreadsheet_methods(user_question)
+    if not methods:
+        return "Spreadsheet intent: infer the smallest reviewed computation needed."
+    names = ", ".join(".".join(method) for method in methods)
+    lines = [f"Spreadsheet intent decomposition: required computations are {names}."]
+    if ("excel_statistics", "lookup") in methods:
+        # 原因：弱模型知道要 lookup 后仍可能忘记传 lookup_value。
+        # 作用：把用户问题中的行名、字段名、SKU、角色属性或标签作为查询键交给本地 Skill。
+        lines.append(
+            "For lookup, set lookup_value to the exact item label, row name, SKU, "
+            "character stat, or field named in the user question; return the matched row "
+            "as a Markdown table before explaining it."
+        )
+    if len(methods) > 1:
+        # 原因：抽象问题通常不是一个统计量能回答，弱模型容易停在第一张表。
+        # 作用：要求 Agent 先完成每个本地计算，再综合解释哪些发现重要。
+        lines.append(
+            "Run every listed computation before writing the answer, then synthesize which "
+            "findings are important instead of treating the first table as sufficient."
+        )
+    return " ".join(lines)
 
 
 def _required_spreadsheet_methods(user_question: str) -> tuple[tuple[str, str], ...]:
