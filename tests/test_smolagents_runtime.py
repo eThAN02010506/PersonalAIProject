@@ -2284,6 +2284,76 @@ class SmolagentsRuntimeTests(unittest.TestCase):
         self.assertEqual(result.tool_calls, ["excel_schema", "excel_modeling"])
         self.assertIn("| x | 1.97 | 0.0001 |", result.answer)
 
+    def test_file_analysis_routes_abstract_spreadsheet_statistics_for_weak_models(self) -> None:
+        settings = SmolagentsModelSettings(
+            model_id="any-model",
+            base_url="http://127.0.0.1:8080/v1",
+        )
+        FakeToolCallingAgent.queued_results = [
+            types.SimpleNamespace(
+                output="我看到了表结构，但没有计算。",
+                state="success",
+                steps=[
+                    {
+                        "step_number": 1,
+                        "observations": "Schema result",
+                        "tool_calls": [
+                            {
+                                "function": {
+                                    "name": "excel_schema",
+                                    "arguments": {"file_name": "iris.xlsx"},
+                                }
+                            }
+                        ],
+                    },
+                ],
+            ),
+            types.SimpleNamespace(
+                output=(
+                    "正态性检验：\n\n"
+                    "| column | p_value | decision_at_0.05 |\n"
+                    "| --- | --- | --- |\n"
+                    "| Sepal.Length | 0.056824 | do not reject normality |"
+                ),
+                state="success",
+                steps=[
+                    {
+                        "step_number": 2,
+                        "observations": (
+                            "| column | p_value | decision_at_0.05 |\n"
+                            "| --- | --- | --- |\n"
+                            "| Sepal.Length | 0.056824 | do not reject normality |"
+                        ),
+                        "tool_calls": [
+                            {
+                                "function": {
+                                    "name": "excel_statistics",
+                                    "arguments": {
+                                        "file_name": "iris.xlsx",
+                                        "method": "normality_test",
+                                    },
+                                }
+                            }
+                        ],
+                    },
+                ],
+            ),
+        ]
+
+        result = run_smolagents_file_analysis_with_debug(
+            file_names=["iris.xlsx"],
+            spreadsheet_names=["iris.xlsx"],
+            user_question="这个数据的分布正态吗？",
+            tools=[object(), object(), object()],
+            settings=settings,
+        )
+
+        # 原因：弱模型可能只看 schema 就作答，抽象统计问题必须被 runtime 拉回本地计算。
+        # 作用：锁定“正态/分布”等问题会补调确定性 normality_test，而不是接受空泛回答。
+        self.assertEqual(result.tool_calls, ["excel_schema", "excel_statistics"])
+        self.assertIn("| Sepal.Length | 0.056824 |", result.answer)
+        self.assertTrue(any("excel_statistics" in step for step in result.debug_steps))
+
     def test_file_analysis_rejects_failed_regression_even_with_model_table(self) -> None:
         settings = SmolagentsModelSettings(
             model_id="any-model",

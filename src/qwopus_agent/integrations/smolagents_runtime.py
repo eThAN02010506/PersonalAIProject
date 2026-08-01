@@ -1408,6 +1408,30 @@ def _required_spreadsheet_method(user_question: str) -> tuple[str, str] | None:
         for marker in ("regression", "回归", "summary(lm", "linear model")
     ):
         return ("excel_modeling", "linear_regression")
+    # 原因：弱模型常能理解“异常/分布/某项”但不会稳定选择正确 Excel Skill 方法。
+    # 作用：把高频抽象统计意图映射到本地确定性方法，由运行时强制补调对应工具。
+    method_markers: tuple[tuple[str, tuple[str, ...]], ...] = (
+        ("lookup", ("lookup", "某项", "某一项", "某行", "某一行", "sku", "是多少")),
+        (
+            "chi_square_independence",
+            ("chi-square", "chi square", "卡方", "独立性", "independence"),
+        ),
+        (
+            "normality_test",
+            ("normality", "normal distribution", "正态", "正态性", "normal test"),
+        ),
+        ("quantiles", ("quantile", "percentile", "分位", "百分位", "p90", "p50")),
+        ("covariance", ("covariance", "协方差")),
+        ("correlation", ("correlation", "相关", "相关性")),
+        ("group_summary", ("group summary", "分组统计", "按组统计", "by group")),
+        ("missing", ("missing", "缺失", "空值", "null", "na")),
+        ("iqr_outliers", ("outlier", "异常", "离群", "极端值")),
+        ("frequency", ("frequency", "count", "counts", "频数", "频率", "计数")),
+        ("describe", ("summary", "describe", "概况", "统计摘要", "描述统计")),
+    )
+    for method, markers in method_markers:
+        if any(marker in normalized for marker in markers):
+            return ("excel_statistics", method)
     return None
 
 
