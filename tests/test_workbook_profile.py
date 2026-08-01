@@ -100,7 +100,7 @@ class WorkbookProfileTests(unittest.TestCase):
         )
         self.assertEqual(
             set(result.analysis_frames()),
-            {"Data", "Data::table_2"},
+            {"Data", "Data::key_values", "Data::table_2"},
         )
 
     def test_form_sheet_uses_generic_columns_instead_of_false_header(self) -> None:
@@ -140,6 +140,14 @@ class WorkbookProfileTests(unittest.TestCase):
         pairs = result.form_summaries["Profile"].to_dict(orient="records")
         self.assertTrue(
             any(row["key"] == "Name" and row["value"] == "Ada" for row in pairs)
+        )
+        key_values = result.analysis_frames()["Profile::key_values"].to_dict(
+            orient="records"
+        )
+        # 原因：表单型 Excel 的字段不能只存在于预览文本里，否则单项问答无法稳定命中。
+        # 作用：确认 reader 会把字段和值暴露成可被统计 Skill 查询的结构化帧。
+        self.assertTrue(
+            any(row["key"] == "Role" and row["value"] == "Engineer" for row in key_values)
         )
 
     def test_profiles_formulas_chart_and_broken_reference(self) -> None:
@@ -212,6 +220,33 @@ class WorkbookProfileTests(unittest.TestCase):
             len(result.analysis_frames()),
             1 + 4,
         )
+
+    def test_footnoted_table_reuses_previous_header_region(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            path = Path(temporary_directory) / "footnoted.xlsx"
+            workbook = Workbook()
+            sheet = workbook.active
+            sheet.title = "Policy"
+            sheet.append(["year", "company_count", "investment"])
+            sheet.append(["eg", None, None])
+            sheet.append([2015, 43017, 6.497])
+            sheet.append([])
+            sheet.append([2016, 42621, 6.732])
+            sheet.append([None, "footnote", None])
+            sheet.append([2017, 50769, 7.401])
+            sheet.append([None, "footnote", None])
+            sheet.append([2018, 65282, 8.203])
+            workbook.save(path)
+
+            result = read_spreadsheet(path)
+
+        # 原因：真实研究表常把脚注穿插在年份数据之间，区域检测会把表头和主体拆开。
+        # 作用：确认主分析帧复用上方字段名，并保留首段和后续段的数据。
+        dataframe = result.sheets["Policy"]
+        self.assertEqual(list(dataframe.columns), ["year", "company_count", "investment"])
+        self.assertIn(2015, dataframe["year"].dropna().tolist())
+        self.assertIn(2017, dataframe["year"].dropna().tolist())
+        self.assertNotIn("eg", dataframe["year"].dropna().tolist())
 
 
 if __name__ == "__main__":

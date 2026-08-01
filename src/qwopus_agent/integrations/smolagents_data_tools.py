@@ -147,10 +147,13 @@ def build_excel_statistics_tool(spreadsheets: Mapping[str, str | Path]) -> Any:
         description=(
             "Run a reviewed local statistical method after excel_schema. Supported methods: "
             "describe, frequency, missing, iqr_outliers, zscore_outliers, group_summary, "
-            "correlation, "
-            "mean_confidence_interval, one_sample_t_test, and two_sample_t_test. "
+            "correlation, covariance, quantiles, normality_test, crosstab, "
+            "chi_square_independence, lookup, mean_confidence_interval, "
+            "one_sample_t_test, and two_sample_t_test. "
             "Use describe for an R summary()-style numeric profile and frequency for "
             "R table()-style categorical counts. "
+            "Use crosstab or chi_square_independence for two categorical columns. "
+            "Use lookup for questions about one row, item, character field, SKU, or label value. "
             "Use exact table and column names from excel_schema. For abstract outlier questions, "
             "prefer one interpretable business metric. Select multiple value columns only when "
             "they are repeated measurements of that same metric and unit, such as years; never "
@@ -174,8 +177,9 @@ def build_excel_statistics_tool(spreadsheets: Mapping[str, str | Path]) -> Any:
             },
             "value_columns": {
                 "type": "array",
-                "description": "Exact comparable value column names.",
+                "description": "Exact comparable value column names; null for lookup.",
                 "items": {"type": "string"},
+                "nullable": True,
             },
             "label_columns": {
                 "type": "array",
@@ -197,6 +201,21 @@ def build_excel_statistics_tool(spreadsheets: Mapping[str, str | Path]) -> Any:
                     "already contains exactly two groups or for other methods."
                 ),
                 "items": {"type": "string"},
+                "nullable": True,
+            },
+            "category_columns": {
+                "type": "array",
+                "description": (
+                    "Exactly two categorical columns for crosstab or chi_square_independence."
+                ),
+                "items": {"type": "string"},
+                "nullable": True,
+            },
+            "lookup_value": {
+                "type": "string",
+                "description": (
+                    "Text to find for lookup, such as a row label, character stat, SKU, or name."
+                ),
                 "nullable": True,
             },
             "confidence_level": {

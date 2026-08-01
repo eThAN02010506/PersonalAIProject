@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 
 import pandas as pd
+from openpyxl import Workbook
 
 from qwopus_agent.skills.base import SkillRequest
 from qwopus_agent.skills.document_parser import DocumentParserSkill
@@ -255,6 +256,85 @@ class BuiltinSkillTests(unittest.TestCase):
         self.assertIn("Pearson correlation", responses["correlation"].content)
         self.assertIn("absolute Z-score", responses["zscore_outliers"].content)
 
+    def test_excel_statistics_supports_distribution_and_categorical_methods(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "advanced_stats.xlsx"
+            pd.DataFrame(
+                {
+                    "score": [10, 12, 14, 16, 18, 20, 22, 24],
+                    "cost": [3, 4, 4, 5, 5, 6, 7, 8],
+                    "team": ["A", "A", "A", "A", "B", "B", "B", "B"],
+                    "passed": ["yes", "yes", "no", "yes", "yes", "no", "no", "no"],
+                }
+            ).to_excel(path, index=False)
+
+            base_arguments = {
+                "file_path": str(path),
+                "table_name": "Sheet1",
+                "value_columns": ["score", "cost"],
+            }
+            responses = {
+                "quantiles": asyncio.run(
+                    ExcelStatisticsSkill().run(
+                        SkillRequest(
+                            query="percentiles",
+                            arguments={**base_arguments, "method": "quantiles"},
+                        )
+                    )
+                ),
+                "covariance": asyncio.run(
+                    ExcelStatisticsSkill().run(
+                        SkillRequest(
+                            query="covariance",
+                            arguments={**base_arguments, "method": "covariance"},
+                        )
+                    )
+                ),
+                "normality_test": asyncio.run(
+                    ExcelStatisticsSkill().run(
+                        SkillRequest(
+                            query="normality",
+                            arguments={**base_arguments, "method": "normality_test"},
+                        )
+                    )
+                ),
+                "crosstab": asyncio.run(
+                    ExcelStatisticsSkill().run(
+                        SkillRequest(
+                            query="team by passed",
+                            arguments={
+                                "file_path": str(path),
+                                "table_name": "Sheet1",
+                                "method": "crosstab",
+                                "category_columns": ["team", "passed"],
+                            },
+                        )
+                    )
+                ),
+                "chi_square_independence": asyncio.run(
+                    ExcelStatisticsSkill().run(
+                        SkillRequest(
+                            query="team independent from passed",
+                            arguments={
+                                "file_path": str(path),
+                                "table_name": "Sheet1",
+                                "method": "chi_square_independence",
+                                "category_columns": ["team", "passed"],
+                            },
+                        )
+                    )
+                ),
+            }
+
+        # 原因：用户的 Excel 问题会从描述统计扩展到分布、矩阵和分类变量关系。
+        # 作用：锁定这些通用统计仍由本地确定性 Skill 返回表格，而不是交给模型猜算。
+        self.assertTrue(all(response.success for response in responses.values()))
+        self.assertIn("p90", responses["quantiles"].content)
+        self.assertIn("sample covariance matrix", responses["covariance"].content)
+        self.assertIn("decision_at_0.05", responses["normality_test"].content)
+        self.assertIn("passed", responses["crosstab"].content)
+        self.assertIn("Pearson chi-square", responses["chi_square_independence"].content)
+
     def test_excel_statistics_describe_and_frequency_match_r_style_summary(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "summary.xlsx"
@@ -307,6 +387,40 @@ class BuiltinSkillTests(unittest.TestCase):
             for row in frequency.data["rows"]
         }
         self.assertEqual(counts, {"A": 2, "B": 2, "<missing>": 1})
+
+    def test_excel_statistics_lookup_answers_single_item_questions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "character.xlsx"
+            workbook = Workbook()
+            sheet = workbook.active
+            sheet.title = "Profile"
+            sheet.append(["姓名", "Ethan Jiang"])
+            sheet.append(["年龄", 20])
+            sheet.append([])
+            sheet.append(["STR", 40])
+            sheet.append(["DEX", 60])
+            workbook.save(path)
+
+            response = asyncio.run(
+                ExcelStatisticsSkill().run(
+                    SkillRequest(
+                        query="年龄是多少",
+                        arguments={
+                            "file_path": str(path),
+                            "table_name": "Profile::key_values",
+                            "method": "lookup",
+                            "lookup_value": "年龄",
+                        },
+                    )
+                )
+            )
+
+        # 原因：用户会问“某一项是什么”，这不是统计汇总，不能靠模型从预览里猜。
+        # 作用：锁定 lookup 会从 key_values 结构化帧返回精确字段和值。
+        self.assertTrue(response.success)
+        rows = response.data["rows"]
+        self.assertEqual(rows[0]["key"], "年龄")
+        self.assertEqual(rows[0]["value"], 20)
 
     def test_excel_statistics_calculates_t_intervals_and_one_sample_test(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

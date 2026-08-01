@@ -15,17 +15,24 @@ from qwopus_agent.analysis.markdown_tables import dataframe_to_markdown
 from qwopus_agent.skills.base import BaseSkill, SkillRequest, SkillResponse
 
 SUPPORTED_METHODS = {
+    "chi_square_independence",
     "correlation",
+    "covariance",
+    "crosstab",
     "describe",
     "frequency",
     "group_summary",
     "iqr_outliers",
+    "lookup",
     "mean_confidence_interval",
     "missing",
+    "normality_test",
     "one_sample_t_test",
+    "quantiles",
     "two_sample_t_test",
     "zscore_outliers",
 }
+CROSSTAB_MAX_DISPLAY_CATEGORIES = 20
 
 
 @dataclass
@@ -37,8 +44,9 @@ class ExcelStatisticsSkill(BaseSkill):
     description: str = (
         "Run deterministic spreadsheet statistics: describe, missing, IQR outliers, "
         "Z-score outliers, frequency tables, grouped summaries, correlations, "
-        "confidence intervals, or t-tests. Prefer this skill for common statistical questions; use "
-        "excel_analysis only for custom computations."
+        "covariance, quantiles, normality checks, crosstabs, chi-square tests, "
+        "lookup, confidence intervals, or t-tests. Prefer this skill for common "
+        "statistical questions; use excel_analysis only for custom computations."
     )
 
     async def run(self, request: SkillRequest) -> SkillResponse:
@@ -51,6 +59,8 @@ class ExcelStatisticsSkill(BaseSkill):
             label_columns = _column_list(request.arguments.get("label_columns"))
             group_column = str(request.arguments.get("group_column") or "").strip()
             group_values = _column_list(request.arguments.get("group_values"))
+            category_columns = _column_list(request.arguments.get("category_columns"))
+            lookup_value = str(request.arguments.get("lookup_value") or "").strip()
             confidence_level_argument = request.arguments.get("confidence_level")
             confidence_level = (
                 0.95
@@ -141,6 +151,8 @@ class ExcelStatisticsSkill(BaseSkill):
                 label_columns=label_columns,
                 group_column=group_column,
                 group_values=group_values,
+                category_columns=category_columns,
+                lookup_value=lookup_value,
                 top_n=top_n,
                 threshold=threshold,
                 confidence_level=confidence_level,
@@ -162,7 +174,7 @@ class ExcelStatisticsSkill(BaseSkill):
             [
                 f"## Statistical result: {method}",
                 f"- Table: {table_name}",
-                f"- Value columns: {', '.join(value_columns)}",
+                f"- Value columns: {', '.join(value_columns) if value_columns else '<auto/none>'}",
                 *[f"- {key}: {value}" for key, value in details.items()],
                 "",
                 dataframe_to_markdown(result.head(top_n)),
@@ -189,14 +201,40 @@ def _run_statistical_method(
     label_columns: list[str],
     group_column: str,
     group_values: list[str],
+    category_columns: list[str],
+    lookup_value: str,
     top_n: int,
     threshold: float,
     confidence_level: float,
     hypothesized_mean: float | None,
 ) -> tuple[pd.DataFrame, dict[str, Any]]:
     """Dispatch one validated common method against an in-memory dataframe."""
+    if method == "lookup":
+        return _lookup_rows(dataframe, lookup_value=lookup_value, top_n=top_n)
+
+    if method in {"crosstab", "chi_square_independence"}:
+        return _categorical_association(
+            dataframe,
+            method=method,
+            category_columns=category_columns,
+            top_n=top_n,
+        )
+
     if not value_columns:
-        raise ValueError("value_columns must contain at least one column.")
+        # 原因：describe 和 frequency 是通用 profile 方法，用户不指定列时应自动选取。
+        # 作用：describe 自动选所有数值列，frequency 自动选所有非数值列。
+        if method in {"describe", "quantiles", "normality_test"}:
+            value_columns = [
+                str(c) for c in dataframe.columns
+                if pd.api.types.is_numeric_dtype(dataframe[c])
+            ]
+        elif method == "frequency":
+            value_columns = [
+                str(c) for c in dataframe.columns
+                if not pd.api.types.is_numeric_dtype(dataframe[c])
+            ]
+        if not value_columns:
+            raise ValueError("value_columns must contain at least one column.")
     requested_columns = [*label_columns, *value_columns]
     if group_column:
         requested_columns.append(group_column)
@@ -305,9 +343,24 @@ def _run_statistical_method(
             "unit_rule": "Each column is summarized separately.",
         }
 
+    if method == "quantiles":
+        return _quantile_summary(values), {
+            "method": "selected percentile summary",
+            "unit_rule": "Each column is summarized separately.",
+        }
+
     if method == "correlation":
         result = values.corr().reset_index(names="column")
         return result.round(4), {"method": "Pearson correlation"}
+
+    if method == "covariance":
+        result = values.cov().reset_index(names="column")
+        return result.round(6), {"method": "sample covariance matrix"}
+
+    if method == "normality_test":
+        return _normality_tests(values), {
+            "method": "D'Agostino-Pearson normality test; Shapiro-Wilk for small samples",
+        }
 
     if method == "group_summary":
         if not group_column:
@@ -420,6 +473,166 @@ def _run_statistical_method(
         "standard_deviation": round(standard_deviation, 4),
         "outlier_count": int(len(result)),
     }
+
+
+def _lookup_rows(
+    dataframe: pd.DataFrame,
+    *,
+    lookup_value: str,
+    top_n: int,
+) -> tuple[pd.DataFrame, dict[str, Any]]:
+    """Find rows that contain one requested item label or value."""
+    if not lookup_value:
+        raise ValueError("lookup requires lookup_value.")
+    normalized_query = lookup_value.casefold()
+    searchable = dataframe.astype("string").fillna("")
+    exact_mask = searchable.map(lambda value: value.casefold() == normalized_query).any(axis=1)
+    contains_mask = searchable.map(lambda value: normalized_query in value.casefold()).any(axis=1)
+    mask = exact_mask if bool(exact_mask.any()) else contains_mask
+    matches = dataframe.loc[mask].head(top_n).copy()
+    if matches.empty:
+        matches = pd.DataFrame(
+            [{"lookup_value": lookup_value, "match": "no matching rows found"}]
+        )
+    else:
+        # 原因：单项查询需要能回到 Excel 的原始行，尤其是 key_values 这种派生帧。
+        # 作用：结果表保留 dataframe 行号，便于 Agent 解释“命中了哪一项”。
+        matches.insert(0, "row_index", matches.index)
+    return matches.reset_index(drop=True), {
+        "lookup_value": lookup_value,
+        "match_rule": "case-insensitive exact row match, then contains fallback",
+        "match_count": int(mask.sum()),
+    }
+
+
+def _quantile_summary(values: pd.DataFrame) -> pd.DataFrame:
+    """Return common percentiles for each numeric column."""
+    percentiles = [0.0, 0.1, 0.25, 0.5, 0.75, 0.9, 1.0]
+    rows: list[dict[str, Any]] = []
+    for column in map(str, values.columns):
+        sample = values[column].dropna()
+        if sample.empty:
+            continue
+        quantiles = sample.quantile(percentiles)
+        row: dict[str, Any] = {"column": column, "count": int(len(sample))}
+        row.update(
+            {
+                f"p{int(percentile * 100):02d}": float(quantiles.loc[percentile])
+                for percentile in percentiles
+            }
+        )
+        rows.append(row)
+    if not rows:
+        raise ValueError("quantiles requires at least one numeric observation.")
+    return pd.DataFrame(rows).round(6)
+
+
+def _normality_tests(values: pd.DataFrame) -> pd.DataFrame:
+    """Run a conservative normality test per numeric column."""
+    rows: list[dict[str, Any]] = []
+    for column in map(str, values.columns):
+        sample = values[column].dropna()
+        count = int(len(sample))
+        if count < 3:
+            raise ValueError(
+                f"normality_test requires at least three observations in {column}."
+            )
+        if count >= 8:
+            test = stats.normaltest(sample.to_numpy(), nan_policy="omit")
+            test_name = "dagostino_pearson"
+        else:
+            test = stats.shapiro(sample.to_numpy())
+            test_name = "shapiro_wilk"
+        p_value = float(test.pvalue)
+        # 原因：正态性检验的 p 值经常被误读为“正态概率”。
+        # 作用：把统计判读放进结果表，降低弱模型解释错误的概率。
+        rows.append(
+            {
+                "column": column,
+                "count": count,
+                "test": test_name,
+                "statistic": float(test.statistic),
+                "p_value": p_value,
+                "decision_at_0.05": (
+                    "reject normality" if p_value < 0.05 else "do not reject normality"
+                ),
+            }
+        )
+    return pd.DataFrame(rows).round(6)
+
+
+def _categorical_association(
+    dataframe: pd.DataFrame,
+    *,
+    method: str,
+    category_columns: list[str],
+    top_n: int,
+) -> tuple[pd.DataFrame, dict[str, Any]]:
+    """Create a crosstab or chi-square test for two categorical columns."""
+    if len(category_columns) != 2:
+        raise ValueError(f"{method} requires exactly two category_columns.")
+    missing_columns = [
+        column for column in category_columns
+        if column not in dataframe.columns
+    ]
+    if missing_columns:
+        raise KeyError(", ".join(missing_columns))
+    first, second = category_columns
+    table = pd.crosstab(
+        dataframe[first].astype("string").fillna("<missing>"),
+        dataframe[second].astype("string").fillna("<missing>"),
+    )
+    if method == "crosstab":
+        display_table = _bounded_crosstab(table, top_n=top_n)
+        return display_table.reset_index(), {
+            "row_column": first,
+            "column_column": second,
+            "row_count": int(len(dataframe)),
+            "displayed_row_categories": int(display_table.shape[0]),
+            "displayed_column_categories": int(display_table.shape[1]),
+            "full_row_categories": int(table.shape[0]),
+            "full_column_categories": int(table.shape[1]),
+        }
+    if table.shape[0] < 2 or table.shape[1] < 2:
+        raise ValueError(
+            "chi_square_independence requires at least two categories in each column."
+        )
+    chi2, p_value, degrees_of_freedom, expected = stats.chi2_contingency(table)
+    min_expected = float(pd.DataFrame(expected).min().min())
+    result = pd.DataFrame(
+        [
+            {
+                "row_column": first,
+                "column_column": second,
+                "chi_square": float(chi2),
+                "degrees_of_freedom": int(degrees_of_freedom),
+                "p_value": float(p_value),
+                "min_expected_count": min_expected,
+                "decision_at_0.05": (
+                    "reject independence"
+                    if float(p_value) < 0.05
+                    else "do not reject independence"
+                ),
+            }
+        ]
+    )
+    return result.round(6), {
+        "method": "Pearson chi-square test of independence",
+        "row_count": int(len(dataframe)),
+        "row_categories": int(table.shape[0]),
+        "column_categories": int(table.shape[1]),
+    }
+
+
+def _bounded_crosstab(table: pd.DataFrame, *, top_n: int) -> pd.DataFrame:
+    """Keep displayed crosstabs compact while the caller can still explain truncation."""
+    row_limit = max(1, min(top_n, CROSSTAB_MAX_DISPLAY_CATEGORIES))
+    column_limit = CROSSTAB_MAX_DISPLAY_CATEGORIES
+    row_order = table.sum(axis=1).sort_values(ascending=False).index[:row_limit]
+    column_order = table.sum(axis=0).sort_values(ascending=False).index[:column_limit]
+    # 原因：高基数日期、城市等交叉表会把回答撑到不可读。
+    # 作用：展示最常见类别，完整类别数量留在 details 里供 Agent 说明截断口径。
+    return table.loc[row_order, column_order]
 
 
 def _mean_confidence_intervals(
