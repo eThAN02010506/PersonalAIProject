@@ -2354,6 +2354,114 @@ class SmolagentsRuntimeTests(unittest.TestCase):
         self.assertIn("| Sepal.Length | 0.056824 |", result.answer)
         self.assertTrue(any("excel_statistics" in step for step in result.debug_steps))
 
+    def test_file_analysis_routes_broad_spreadsheet_diagnostics_for_weak_models(self) -> None:
+        settings = SmolagentsModelSettings(
+            model_id="any-model",
+            base_url="http://127.0.0.1:8080/v1",
+        )
+        FakeToolCallingAgent.queued_results = [
+            types.SimpleNamespace(
+                output="我看到了表结构，数据大概正常。",
+                state="success",
+                steps=[
+                    {
+                        "step_number": 1,
+                        "observations": "Schema result",
+                        "tool_calls": [
+                            {
+                                "function": {
+                                    "name": "excel_schema",
+                                    "arguments": {"file_name": "scores.xlsx"},
+                                }
+                            }
+                        ],
+                    },
+                ],
+            ),
+            types.SimpleNamespace(
+                output="数据质量、概况、分位数和异常值已经本地计算。",
+                state="success",
+                steps=[
+                    {
+                        "step_number": 2,
+                        "observations": "| column | missing |\n| --- | --- |\n| score | 0 |",
+                        "tool_calls": [
+                            {
+                                "function": {
+                                    "name": "excel_statistics",
+                                    "arguments": {
+                                        "file_name": "scores.xlsx",
+                                        "method": "missing",
+                                    },
+                                }
+                            }
+                        ],
+                    },
+                    {
+                        "step_number": 3,
+                        "observations": "| column | mean |\n| --- | --- |\n| score | 75 |",
+                        "tool_calls": [
+                            {
+                                "function": {
+                                    "name": "excel_statistics",
+                                    "arguments": {
+                                        "file_name": "scores.xlsx",
+                                        "method": "describe",
+                                    },
+                                }
+                            }
+                        ],
+                    },
+                    {
+                        "step_number": 4,
+                        "observations": "| column | p50 |\n| --- | --- |\n| score | 74 |",
+                        "tool_calls": [
+                            {
+                                "function": {
+                                    "name": "excel_statistics",
+                                    "arguments": {
+                                        "file_name": "scores.xlsx",
+                                        "method": "quantiles",
+                                    },
+                                }
+                            }
+                        ],
+                    },
+                    {
+                        "step_number": 5,
+                        "observations": "| column | outlier_count |\n| --- | --- |\n| score | 1 |",
+                        "tool_calls": [
+                            {
+                                "function": {
+                                    "name": "excel_statistics",
+                                    "arguments": {
+                                        "file_name": "scores.xlsx",
+                                        "method": "iqr_outliers",
+                                    },
+                                }
+                            }
+                        ],
+                    },
+                ],
+            ),
+        ]
+
+        result = run_smolagents_file_analysis_with_debug(
+            file_names=["scores.xlsx"],
+            spreadsheet_names=["scores.xlsx"],
+            user_question="这个数据有什么问题？",
+            tools=[object(), object(), object()],
+            settings=settings,
+        )
+
+        # 原因：泛化诊断问题需要多项本地统计证据，否则弱模型会只给表面评价。
+        # 作用：锁定 runtime 会补齐缺失、概况、分位数和异常值四类检查。
+        self.assertEqual(result.tool_calls, ["excel_schema", "excel_statistics"])
+        self.assertIn("| column | missing |", result.answer)
+        self.assertIn("| column | mean |", result.answer)
+        self.assertIn("| column | p50 |", result.answer)
+        self.assertIn("| column | outlier_count |", result.answer)
+
     def test_file_analysis_rejects_failed_regression_even_with_model_table(self) -> None:
         settings = SmolagentsModelSettings(
             model_id="any-model",

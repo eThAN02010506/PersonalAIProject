@@ -951,17 +951,17 @@ def run_smolagents_file_analysis_with_debug(
         required_tools=required_tools,
         successful_tool_calls=successful_tool_calls,
     )
-    required_spreadsheet_method = _required_spreadsheet_method(user_question)
-    if (
-        spreadsheet_names
-        and required_spreadsheet_method is not None
-        and not _has_successful_tool_method(
-            all_steps,
-            tool_name=required_spreadsheet_method[0],
-            method=required_spreadsheet_method[1],
-        )
-    ):
-        missing_tools.add(required_spreadsheet_method[0])
+    required_spreadsheet_methods = _required_spreadsheet_methods(user_question)
+    for required_spreadsheet_method in required_spreadsheet_methods:
+        if (
+            spreadsheet_names
+            and not _has_successful_tool_method(
+                all_steps,
+                tool_name=required_spreadsheet_method[0],
+                method=required_spreadsheet_method[1],
+            )
+        ):
+            missing_tools.add(required_spreadsheet_method[0])
     inspected_files = _extract_inspected_file_names(steps)
     inspected_files.update(_extract_collection_covered_file_names(steps))
     missing_files = set(file_names).difference(inspected_files)
@@ -1026,8 +1026,8 @@ def run_smolagents_file_analysis_with_debug(
             debug_steps.append("Agent 尚未形成最终答案，保留工具上下文后触发收敛步骤。")
         missing_tool_instruction = ", ".join(sorted(missing_tools)) or "none"
         required_method_instruction = (
-            ".".join(required_spreadsheet_method)
-            if required_spreadsheet_method is not None
+            ", ".join(".".join(method) for method in required_spreadsheet_methods)
+            if required_spreadsheet_methods
             else "infer the appropriate reviewed method from the user question"
         )
         missing_file_instruction = ", ".join(sorted(missing_files)) or "none"
@@ -1195,16 +1195,16 @@ def run_smolagents_file_analysis_with_debug(
         required_tools=required_tools,
         successful_tool_calls=successful_tool_calls,
     )
-    if (
-        spreadsheet_names
-        and required_spreadsheet_method is not None
-        and not _has_successful_tool_method(
-            all_steps,
-            tool_name=required_spreadsheet_method[0],
-            method=required_spreadsheet_method[1],
-        )
-    ):
-        missing_tools.add(required_spreadsheet_method[0])
+    for required_spreadsheet_method in required_spreadsheet_methods:
+        if (
+            spreadsheet_names
+            and not _has_successful_tool_method(
+                all_steps,
+                tool_name=required_spreadsheet_method[0],
+                method=required_spreadsheet_method[1],
+            )
+        ):
+            missing_tools.add(required_spreadsheet_method[0])
     if missing_tools:
         missing_names = ", ".join(sorted(missing_tools))
         raise RuntimeError(f"smolagents did not call required file tools: {missing_names}.")
@@ -1239,7 +1239,9 @@ def run_smolagents_file_analysis_with_debug(
         # 作用：移除模型重排的表格并呈现本地 Skill 原表；解释仍由 Agent 生成。
         narrative = _sanitize_spreadsheet_narrative(
             _remove_markdown_tables(final_answer),
-            required_method=required_spreadsheet_method,
+            required_method=(
+                required_spreadsheet_methods[0] if required_spreadsheet_methods else None
+            ),
             use_chinese=any("\u4e00" <= character <= "\u9fff" for character in user_question),
         ).strip()
         rendered_tables = "\n\n".join(
@@ -1400,14 +1402,64 @@ def format_file_analysis_agent_prompt(
 
 def _required_spreadsheet_method(user_question: str) -> tuple[str, str] | None:
     """Map explicit modeling requests to the deterministic local Skill method."""
+    methods = _required_spreadsheet_methods(user_question)
+    return methods[0] if methods else None
+
+
+def _required_spreadsheet_methods(user_question: str) -> tuple[tuple[str, str], ...]:
+    """Map spreadsheet intents to deterministic local Skill methods."""
     normalized = user_question.casefold()
     if any(marker in normalized for marker in ("anova", "方差分析")):
-        return ("excel_modeling", "one_way_anova")
+        return (("excel_modeling", "one_way_anova"),)
     if any(
         marker in normalized
         for marker in ("regression", "回归", "summary(lm", "linear model")
     ):
-        return ("excel_modeling", "linear_regression")
+        return (("excel_modeling", "linear_regression"),)
+    # 原因：用户常用“这个数据有什么问题/帮我看看”这类抽象需求，但弱模型容易只复述 schema。
+    # 作用：把泛化诊断拆成几项稳定的本地统计检查，再交给模型解释。
+    diagnostic_markers = (
+        "有什么问题",
+        "数据问题",
+        "质量",
+        "health",
+        "diagnose",
+        "diagnostic",
+        "profile",
+        "inspect",
+        "帮我看看",
+        "分析一下",
+    )
+    if any(marker in normalized for marker in diagnostic_markers):
+        return (
+            ("excel_statistics", "missing"),
+            ("excel_statistics", "describe"),
+            ("excel_statistics", "quantiles"),
+            ("excel_statistics", "iqr_outliers"),
+        )
+    distribution_markers = (
+        "分布怎么样",
+        "分布情况",
+        "distribution",
+        "distributed",
+    )
+    if any(marker in normalized for marker in distribution_markers):
+        return (
+            ("excel_statistics", "describe"),
+            ("excel_statistics", "quantiles"),
+            ("excel_statistics", "normality_test"),
+        )
+    relationship_markers = (
+        "两个分类变量",
+        "分类变量有关",
+        "categorical association",
+        "categorical relationship",
+    )
+    if any(marker in normalized for marker in relationship_markers):
+        return (
+            ("excel_statistics", "crosstab"),
+            ("excel_statistics", "chi_square_independence"),
+        )
     # 原因：弱模型常能理解“异常/分布/某项”但不会稳定选择正确 Excel Skill 方法。
     # 作用：把高频抽象统计意图映射到本地确定性方法，由运行时强制补调对应工具。
     method_markers: tuple[tuple[str, tuple[str, ...]], ...] = (
@@ -1431,8 +1483,8 @@ def _required_spreadsheet_method(user_question: str) -> tuple[str, str] | None:
     )
     for method, markers in method_markers:
         if any(marker in normalized for marker in markers):
-            return ("excel_statistics", method)
-    return None
+            return (("excel_statistics", method),)
+    return ()
 
 
 def _spreadsheet_result_tables(steps: list[dict[str, Any]]) -> list[str]:
