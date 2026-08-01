@@ -1276,7 +1276,7 @@ class SmolagentsRuntimeTests(unittest.TestCase):
                         "tool_calls": [
                             {
                                 "function": {
-                                    "name": "document_search",
+                                    "name": "document_summary",
                                     "arguments": {"file_name": "notes.txt"},
                                 }
                             }
@@ -1297,13 +1297,71 @@ class SmolagentsRuntimeTests(unittest.TestCase):
         # 原因：自然语言答案不能证明模型真的读取了上传文件。
         # 作用：断言 runtime 记录了文件 Tool 调用，并且只返回最终答案。
         self.assertEqual(result.answer, "完整文件总结")
-        self.assertEqual(result.tool_calls, ["document_search"])
-        self.assertTrue(any("document_search" in step for step in result.debug_steps))
+        self.assertEqual(result.tool_calls, ["document_summary"])
+        self.assertTrue(any("document_summary" in step for step in result.debug_steps))
         self.assertEqual(result.debug_runs[0].prompt.splitlines()[0], (
             "You are Qwopus-Agent's uploaded-file analysis agent."
         ))
         self.assertEqual(result.debug_runs[0].state, "success")
         self.assertEqual(result.debug_runs[0].steps[0]["step_number"], 1)
+
+    def test_file_analysis_retries_broad_summary_without_document_summary(self) -> None:
+        settings = SmolagentsModelSettings(
+            model_id="any-model",
+            base_url="http://127.0.0.1:8080/v1",
+        )
+        FakeToolCallingAgent.queued_results = [
+            types.SimpleNamespace(
+                output="这是基于局部搜索的总结。",
+                state="success",
+                steps=[
+                    {
+                        "step_number": 1,
+                        "observations": "One matching paragraph.",
+                        "tool_calls": [
+                            {
+                                "function": {
+                                    "name": "document_search",
+                                    "arguments": {"file_name": "notes.txt"},
+                                }
+                            }
+                        ],
+                    }
+                ],
+            ),
+            types.SimpleNamespace(
+                output="这是基于全文摘要的最终总结。",
+                state="success",
+                steps=[
+                    {
+                        "step_number": 2,
+                        "observations": "Hierarchical summary.",
+                        "tool_calls": [
+                            {
+                                "function": {
+                                    "name": "document_summary",
+                                    "arguments": {"file_name": "notes.txt"},
+                                }
+                            }
+                        ],
+                    }
+                ],
+            ),
+        ]
+
+        result = run_smolagents_file_analysis_with_debug(
+            file_names=["notes.txt"],
+            spreadsheet_names=[],
+            user_question="总结这份文档",
+            tools=[object()],
+            settings=settings,
+        )
+
+        # 原因：弱模型会把 search 命中的局部片段当作全文总结。
+        # 作用：证明文档级问题漏掉 document_summary 时会被 runtime 追补。
+        self.assertEqual(result.answer, "这是基于全文摘要的最终总结。")
+        self.assertEqual(result.tool_calls, ["document_search", "document_summary"])
+        self.assertTrue(any("document_summary" in step for step in result.debug_steps))
 
     def test_file_analysis_agent_retries_raw_observation(self) -> None:
         settings = SmolagentsModelSettings(
@@ -1337,7 +1395,7 @@ class SmolagentsRuntimeTests(unittest.TestCase):
         result = run_smolagents_file_analysis_with_debug(
             file_names=["notes.txt"],
             spreadsheet_names=[],
-            user_question="总结",
+            user_question="这份文件提到什么？",
             tools=[object()],
             settings=settings,
         )
@@ -1845,7 +1903,7 @@ class SmolagentsRuntimeTests(unittest.TestCase):
         result = run_smolagents_file_analysis_with_debug(
             file_names=["first.txt", "second.txt"],
             spreadsheet_names=[],
-            user_question="Summarize both files.",
+            user_question="Compare the setup details in both files.",
             tools=[object()],
             settings=settings,
         )
@@ -2087,7 +2145,7 @@ class SmolagentsRuntimeTests(unittest.TestCase):
             run_smolagents_file_analysis_with_debug(
                 file_names=["notes.txt"],
                 spreadsheet_names=[],
-                user_question="总结",
+                user_question="这份文件提到什么？",
                 tools=[object()],
                 settings=settings,
             )
@@ -2835,6 +2893,7 @@ class SmolagentsRuntimeTests(unittest.TestCase):
         # 作用：锁定 mean/average 这类计算请求首轮就要求 excel_statistics.describe。
         self.assertIn("excel_statistics.describe", prompt)
         self.assertIn("do not call final_answer until excel_schema", prompt)
+        self.assertNotIn("document-level understanding", prompt)
 
     def test_remove_markdown_tables_removes_malformed_model_pipe_tables(self) -> None:
         cleaned = remove_markdown_tables(
@@ -3075,6 +3134,19 @@ class SmolagentsRuntimeTests(unittest.TestCase):
         # 作用：锁定 Agent 先使用分层摘要 Tool、再按需检索证据的调用策略。
         self.assertIn("document_summary first", prompt)
         self.assertIn("Summarize the uploaded files.", prompt)
+
+    def test_format_file_analysis_prompt_routes_broad_question_to_summary(self) -> None:
+        prompt = format_file_analysis_agent_prompt(
+            file_names=["manual.pdf"],
+            spreadsheet_names=[],
+            user_question="请总结这份文档的整体观点",
+            analysis_mode="question",
+        )
+
+        # 原因：用户不一定切到全文模式，也会用自然语言提出整体总结。
+        # 作用：锁定 question 模式下的文档级请求先走分层摘要。
+        self.assertIn("document-level understanding", prompt)
+        self.assertIn("Call document_summary first", prompt)
 
     def test_format_chat_prompt_includes_history_and_latest_user_message(self) -> None:
         history = [

@@ -23,6 +23,7 @@ SmolagentsModelSettings = smolagents_model.SmolagentsModelSettings
 build_smolagents_tool_calling_agent = smolagents_factory.build_smolagents_tool_calling_agent
 format_file_analysis_agent_prompt = smolagents_file_prompts.format_file_analysis_agent_prompt
 _requires_collection_summary = smolagents_file_prompts.requires_collection_summary_for_prompt
+_requires_document_summary = smolagents_file_prompts.requires_document_summary_for_prompt
 _agent_debug_steps = smolagents_debug.agent_debug_steps
 _build_agent_debug_run = smolagents_debug.build_agent_debug_run
 _extract_collection_covered_file_names = smolagents_debug.extract_collection_covered_file_names
@@ -130,6 +131,11 @@ def run_smolagents_file_analysis_with_debug(
     parser_files = set(file_names).difference(spreadsheet_names)
     requires_collection_summary = _requires_collection_summary(
         available=has_collection_summary,
+        file_count=len(parser_files),
+        user_question=user_question,
+        analysis_mode=analysis_mode,
+    )
+    requires_document_summary = _requires_document_summary(
         file_count=len(parser_files),
         user_question=user_question,
         analysis_mode=analysis_mode,
@@ -244,6 +250,14 @@ def run_smolagents_file_analysis_with_debug(
         # 原因：逐文件调用受 Agent 步数限制，提示语不能保证大型文档集合真的全部进入上下文。
         # 作用：多文档任务必须执行一次带 coverage manifest 的平衡证据 Tool。
         required_tools.add("document_collection_summary")
+    elif requires_document_summary and parser_files:
+        # 原因：整体文档问题如果只用 search，容易只根据局部命中片段回答。
+        # 作用：要求先取得分层摘要，再允许用检索补充细节。
+        required_tools.add("document_summary")
+    if analysis_mode == "section" and parser_files:
+        # 原因：章节模式的边界来自用户选择的章节，不应由全文搜索替代。
+        # 作用：把 document_read_section 作为验收条件，确保回答来源受 scoped tool 限定。
+        required_tools.add("document_read_section")
     missing_tools = _missing_required_file_tools(
         spreadsheet_names=spreadsheet_names,
         required_tools=required_tools,
@@ -375,8 +389,8 @@ def run_smolagents_file_analysis_with_debug(
                 f"Before answering, call every missing required tool: {missing_tool_instruction}. "
                 f"Required spreadsheet computation: {required_method_instruction}. "
                 f"{spreadsheet_intent_guidance} "
-                "Inspect every missing file with document_search, document_read_section, "
-                f"or document_collection_summary: "
+                "Inspect every missing file with document_summary, document_search, "
+                "document_read_section, or document_collection_summary: "
                 f"{missing_file_instruction}. "
                 "For each missing spreadsheet, call excel_schema, then prefer "
                 "excel_statistics for a supported common method, or excel_modeling for "

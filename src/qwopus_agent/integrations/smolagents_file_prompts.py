@@ -28,6 +28,12 @@ def format_file_analysis_agent_prompt(
         user_question=question,
         analysis_mode=analysis_mode,
     )
+    document_file_count = len(set(file_names).difference(spreadsheet_names))
+    requires_document_summary = requires_document_summary_for_prompt(
+        file_count=document_file_count,
+        user_question=question,
+        analysis_mode=analysis_mode,
+    )
     file_list = "\n".join(f"- {file_name}" for file_name in file_names)
     lines = [
         "You are Qwopus-Agent's uploaded-file analysis agent.",
@@ -85,6 +91,13 @@ def format_file_analysis_agent_prompt(
         lines.append(
             f"Analysis mode: whole document. Call {summary_tool} first, then use "
             "document_search only when details need supporting evidence."
+        )
+    elif requires_document_summary:
+        # 原因：用户在 question 模式也可能提出“全文/整体/总结”类请求。
+        # 作用：不改变 API 模式，只要求 Agent 先读取分层摘要，避免只命中开头片段。
+        lines.append(
+            "The user is asking for document-level understanding. Call document_summary "
+            "first, then use document_search for exact supporting details."
         )
     if spreadsheet_names:
         spreadsheet_list = ", ".join(spreadsheet_names)
@@ -172,3 +185,35 @@ def requires_collection_summary_for_prompt(
         analysis_mode == "full"
         or _ALL_SOURCE_REQUEST_PATTERN.search(user_question) is not None
     )
+
+
+def requires_document_summary_for_prompt(
+    *,
+    file_count: int,
+    user_question: str,
+    analysis_mode: str,
+) -> bool:
+    """Return whether a document task needs the hierarchy summary before search."""
+    if file_count <= 0 or analysis_mode == "section":
+        return False
+    if analysis_mode == "full":
+        return True
+    normalized = user_question.strip().lower()
+    broad_markers = (
+        "summarize",
+        "summary",
+        "overview",
+        "whole document",
+        "entire document",
+        "full document",
+        "overall",
+        "总结",
+        "概括",
+        "概览",
+        "全文",
+        "整体",
+        "通读",
+    )
+    # 原因：这些词表达的是覆盖范围，不是某个局部事实查询。
+    # 作用：把广义文档理解稳定路由到 document_summary，而不是依赖模型临场选择。
+    return any(marker in normalized for marker in broad_markers)
