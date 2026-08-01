@@ -7,7 +7,11 @@ from unittest.mock import patch
 import pandas as pd
 
 from qwopus_agent.analysis import AnalysisResult
-from qwopus_agent.documents import build_document_structure, chunk_document_structure
+from qwopus_agent.documents import (
+    DocumentStore,
+    build_document_structure,
+    chunk_document_structure,
+)
 from qwopus_agent.integrations.smolagents_runtime import (
     AgentDebugRun,
     DocumentAnalysisRun,
@@ -331,6 +335,81 @@ class AnalysisServiceTests(unittest.TestCase):
             self.assertIn("40", captured["analysis"])
             self.assertTrue(outcome.result.metadata["pandas_sandbox_used"])
             self.assertEqual(outcome.result.llm_analysis, "East revenue is 40; West revenue is 20.")
+
+    def test_repeated_upload_reuses_cached_parse_and_minirag_document(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source_path = root / "cached.xlsx"
+            source_path.write_bytes(b"same spreadsheet bytes")
+            minirag = make_test_minirag(root / "documents.jsonl")
+            document_store = DocumentStore(root / "documents")
+            settings = SmolagentsModelSettings(
+                model_id="test-model",
+                base_url="http://127.0.0.1:9999/v1",
+            )
+            local_result = AnalysisResult(
+                markdown_summary="# Spreadsheet Analysis\n\nCached schema.",
+                metadata={"source_type": "spreadsheet"},
+                markdown_document="# Spreadsheet Analysis\n\nCached schema.",
+            )
+
+            with (
+                patch(
+                    "qwopus_agent.services.analysis_service.save_uploaded_bytes",
+                    return_value=SimpleNamespace(
+                        original_name="cached.xlsx",
+                        path=source_path,
+                    ),
+                ) as save_file,
+                patch(
+                    "qwopus_agent.services.analysis_service.analyze_uploaded_file",
+                    return_value=local_result,
+                ) as analyze_file,
+                patch(
+                    "qwopus_agent.services.analysis_service.check_model_connection",
+                    return_value=(False, "offline"),
+                ),
+                patch(
+                    "qwopus_agent.services.analysis_service.resolve_model_settings",
+                    side_effect=lambda current: current,
+                ),
+            ):
+                first = analyze_uploaded_files(
+                    uploaded_files=[
+                        UploadedFileInput(
+                            name="cached.xlsx",
+                            content=source_path.read_bytes(),
+                        )
+                    ],
+                    user_question="summary",
+                    settings=settings,
+                    minirag=minirag,
+                    document_store=document_store,
+                )
+                second = analyze_uploaded_files(
+                    uploaded_files=[
+                        UploadedFileInput(
+                            name="cached.xlsx",
+                            content=source_path.read_bytes(),
+                        )
+                    ],
+                    user_question="summary",
+                    settings=settings,
+                    minirag=minirag,
+                    document_store=document_store,
+                )
+
+            # 原因：相同上传内容已经有持久化解析产物时，不应再次跑昂贵的解析和图谱入库。
+            # 作用：锁定第二次请求命中缓存，MiniRAG 仍只有一个稳定 document_id。
+            self.assertEqual(save_file.call_count, 1)
+            self.assertEqual(analyze_file.call_count, 1)
+            self.assertTrue(
+                any("命中上传缓存" in step for step in second.debug_steps)
+            )
+            self.assertFalse(first.result.metadata["files"][0]["metadata"]["cache_hit"])
+            self.assertTrue(second.result.metadata["files"][0]["metadata"]["cache_hit"])
+            records = (root / "documents.jsonl").read_text(encoding="utf-8").splitlines()
+            self.assertEqual(len(records), 1)
 
     def test_local_folder_files_are_analyzed_without_upload_or_minirag(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

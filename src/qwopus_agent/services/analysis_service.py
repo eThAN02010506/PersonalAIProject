@@ -6,7 +6,8 @@ outputs.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import hashlib
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal
 
@@ -17,6 +18,7 @@ from qwopus_agent.documents import (
     DocumentStore,
     DocumentStructure,
     HierarchicalDocumentSummary,
+    StoredDocumentNotFoundError,
     build_document_structure,
     chunk_document_structure,
     save_uploaded_bytes,
@@ -121,10 +123,14 @@ def analyze_uploaded_files(
     document_summaries: dict[str, HierarchicalDocumentSummary] = {}
     spreadsheet_contexts: dict[str, str] = {}
     spreadsheet_paths: dict[str, Path] = {}
+    document_ids_by_file: dict[str, str] = {}
     saved_documents: list[dict[str, str]] = []
     debug_runs: list[AgentDebugRun] = []
+    resolved_store = document_store or (None if direct_mode else DocumentStore())
 
     for uploaded_file in uploaded_files:
+        content_hash: str | None = None
+        cached_result: AnalysisResult | None = None
         if uploaded_file.local_path is not None:
             source_path = uploaded_file.local_path.expanduser().resolve(strict=True)
             file_name = uploaded_file.name
@@ -140,29 +146,67 @@ def analyze_uploaded_files(
             content = uploaded_file.content
             if content is None:
                 raise ValueError(f"Missing uploaded bytes: {uploaded_file.name}")
+            content_hash = hashlib.sha256(content).hexdigest()
+            cached_document_id = _document_id_for_content(content_hash)
             logger.info(
                 "upload_received filename=%s size=%s",
                 uploaded_file.name,
                 len(content),
             )
-            stored = save_uploaded_bytes(uploaded_file.name, content)
-            source_path = stored.path
-            file_name = stored.original_name
-            logger.info("upload_saved filename=%s path=%s", file_name, source_path)
-            debug_steps.extend(
-                [
-                    f"文件已保存：{file_name}",
-                    f"保存路径：{source_path}",
-                ]
-            )
+            file_name = Path(uploaded_file.name).name
+            if resolved_store is not None:
+                cached_result, cached_path = _load_cached_upload_analysis(
+                    resolved_store,
+                    cached_document_id,
+                    file_name=file_name,
+                    content_hash=content_hash,
+                )
+                if cached_result is not None and cached_path is not None:
+                    source_path = cached_path
+                    debug_steps.append(
+                        f"命中上传缓存：{file_name} ({content_hash[:12]})"
+                    )
+                    logger.info(
+                        "upload_cache_hit filename=%s document_id=%s",
+                        file_name,
+                        cached_document_id,
+                    )
+                else:
+                    stored = save_uploaded_bytes(uploaded_file.name, content)
+                    source_path = stored.path
+                    file_name = stored.original_name
+                    logger.info("upload_saved filename=%s path=%s", file_name, source_path)
+                    debug_steps.extend(
+                        [
+                            f"文件已保存：{file_name}",
+                            f"保存路径：{source_path}",
+                        ]
+                    )
+            else:
+                stored = save_uploaded_bytes(uploaded_file.name, content)
+                source_path = stored.path
+                file_name = stored.original_name
+                logger.info("upload_saved filename=%s path=%s", file_name, source_path)
+                debug_steps.extend(
+                    [
+                        f"文件已保存：{file_name}",
+                        f"保存路径：{source_path}",
+                    ]
+                )
+            document_ids_by_file[file_name] = cached_document_id
 
         # 原因：文件解析是确定性的输入预处理，不应该再启动另一套 Planner/Executor。
         # 作用：只生成 UI、MiniRAG 和 Tool 共用的安全上下文；Agent 决策留给 smolagents。
-        result = analyze_uploaded_file(
+        result = cached_result or analyze_uploaded_file(
             source_path,
             user_question=effective_question,
             source_name=file_name,
         )
+        if content_hash is not None and cached_result is None:
+            result = replace(
+                result,
+                metadata=_metadata_with_content_hash(result.metadata, content_hash),
+            )
         if result.markdown_document:
             if result.metadata.get("source_type") == "spreadsheet":
                 spreadsheet_contexts[file_name] = result.markdown_document
@@ -171,12 +215,13 @@ def analyze_uploaded_files(
                     build_document_structure(
                         result.markdown_document,
                         source=file_name,
+                        document_id=document_ids_by_file.get(file_name),
                         infer_plaintext_headings=False,
                     )
                 )
                 persistence_summary = summarize_document(persistence_structure)
-                if not direct_mode and source_path.exists():
-                    resolved_store = document_store or DocumentStore()
+                document_ids_by_file[file_name] = persistence_structure.document_id
+                if not direct_mode and source_path.exists() and resolved_store is not None:
                     resolved_store.persist(
                         original_path=source_path,
                         markdown=result.markdown_document,
@@ -193,19 +238,23 @@ def analyze_uploaded_files(
             else:
                 structure = (
                     result.document_structures[0]
-                    if result.document_structures
+                    if (
+                        result.document_structures
+                        and document_ids_by_file.get(file_name) is None
+                    )
                     else chunk_document_structure(
                         build_document_structure(
                             result.markdown_document,
                             source=file_name,
+                            document_id=document_ids_by_file.get(file_name),
                         )
                     )
                 )
+                document_ids_by_file[file_name] = structure.document_id
                 document_structures[file_name] = structure
                 summary = summarize_document(structure)
                 document_summaries[file_name] = summary
-                if not direct_mode and source_path.exists():
-                    resolved_store = document_store or DocumentStore()
+                if not direct_mode and source_path.exists() and resolved_store is not None:
                     resolved_store.persist(
                         original_path=source_path,
                         markdown=result.markdown_document,
@@ -256,6 +305,7 @@ def analyze_uploaded_files(
             minirag=minirag,
             min_source_relevance=min_source_relevance,
             debug_steps=debug_steps,
+            document_ids_by_file=document_ids_by_file,
         )
     result, model_debug_runs = _run_model_analysis(
         result=result,
@@ -295,6 +345,7 @@ def _index_uploaded_results(
     minirag: MiniRAG,
     min_source_relevance: float,
     debug_steps: list[str],
+    document_ids_by_file: dict[str, str],
 ) -> int:
     """Search previous knowledge, then index each current file independently."""
     if not result.markdown_document:
@@ -327,7 +378,7 @@ def _index_uploaded_results(
             document_id=(
                 indexed_structure.document_id
                 if indexed_structure is not None
-                else None
+                else document_ids_by_file.get(file_name)
             ),
         )
     result.metadata["minirag_inserted"] = True
@@ -338,6 +389,72 @@ def _index_uploaded_results(
     )
     debug_steps.append("MiniRAG 入库完成：已插入当前文件的 Markdown/安全摘要。")
     return memory_hit_count
+
+
+def _document_id_for_content(content_hash: str) -> str:
+    """Return the stable upload artifact id derived from file bytes."""
+    # 原因：上传文件名每次会带 uuid，不能作为“是否已经分析过”的判断依据。
+    # 作用：同一份二进制内容复用同一个文档记录和 MiniRAG document_id。
+    return f"document-{content_hash[:32]}"
+
+
+def _metadata_with_content_hash(
+    metadata: dict[str, Any],
+    content_hash: str | None,
+) -> dict[str, Any]:
+    """Attach the upload content hash when the request came from uploaded bytes."""
+    if content_hash is None:
+        return dict(metadata)
+    return {**metadata, "content_sha256": content_hash, "cache_hit": False}
+
+
+def _load_cached_upload_analysis(
+    document_store: DocumentStore,
+    document_id: str,
+    *,
+    file_name: str,
+    content_hash: str,
+) -> tuple[AnalysisResult | None, Path | None]:
+    """Load deterministic parse artifacts for a previously uploaded identical file."""
+    try:
+        stored = document_store.load_document(document_id)
+    except StoredDocumentNotFoundError:
+        return None, None
+
+    metadata = {
+        **stored.metadata,
+        "content_sha256": content_hash,
+        "cache_hit": True,
+    }
+    source_type = metadata.get("source_type")
+    if source_type == "spreadsheet":
+        # 原因：Excel 统计 Tool 需要原始表格路径，而最终回答只需要安全 Markdown 上下文。
+        # 作用：跳过重复 schema/sample 解析，同时仍可对缓存原文件执行本地 pandas 计算。
+        return (
+            AnalysisResult(
+                markdown_summary=stored.normalized_markdown,
+                metadata=metadata,
+                markdown_document=stored.normalized_markdown,
+            ),
+            stored.original_path,
+        )
+
+    structure = chunk_document_structure(
+        build_document_structure(
+            stored.normalized_markdown,
+            source=file_name,
+            document_id=document_id,
+        )
+    )
+    return (
+        AnalysisResult(
+            markdown_summary=stored.normalized_markdown,
+            metadata=metadata,
+            markdown_document=stored.normalized_markdown,
+            document_structures=(structure,),
+        ),
+        stored.original_path,
+    )
 
 
 def _run_model_analysis(
@@ -415,6 +532,7 @@ def _run_model_analysis(
         # 原因：文档页和聊天页必须对 Detailed 使用同一语义，否则 UI 选择会静默失效。
         # 作用：文件 Agent 收到用户本轮的详略偏好，而不是始终使用隐式默认值。
         response_detail=response_detail,
+        spreadsheet_paths=spreadsheet_paths,
     )
     logger.info(
         "analysis_llm_completed files=%s answer_length=%s",

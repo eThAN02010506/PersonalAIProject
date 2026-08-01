@@ -422,6 +422,62 @@ class BuiltinSkillTests(unittest.TestCase):
         self.assertEqual(rows[0]["key"], "年龄")
         self.assertEqual(rows[0]["value"], 20)
 
+    def test_excel_statistics_lookup_can_match_two_column_header_pair(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "character.xlsx"
+            pd.DataFrame(
+                {
+                    "STR": ["CON", "DEX"],
+                    "40": [55, 60],
+                }
+            ).to_excel(path, index=False)
+
+            response = asyncio.run(
+                ExcelStatisticsSkill().run(
+                    SkillRequest(
+                        query="STR 是多少",
+                        arguments={
+                            "file_path": str(path),
+                            "table_name": "Sheet1",
+                            "method": "lookup",
+                            "lookup_value": "STR",
+                        },
+                    )
+                )
+            )
+
+        # 原因：二列表单被解析成表格时，首个字段值可能变成列名而不是数据行。
+        # 作用：保证 COC 角色卡这类 STR | 40 结构仍能被单项查询命中。
+        self.assertTrue(response.success)
+        self.assertEqual(response.data["rows"][0]["key"], "STR")
+        self.assertEqual(response.data["rows"][0]["value"], "40")
+        self.assertIn("column_header_pair", response.content)
+
+    def test_excel_statistics_returns_status_row_when_iqr_outliers_are_empty(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "clean.xlsx"
+            pd.DataFrame({"score": [10, 11, 12, 13, 14]}).to_excel(path, index=False)
+
+            response = asyncio.run(
+                ExcelStatisticsSkill().run(
+                    SkillRequest(
+                        query="outlier",
+                        arguments={
+                            "file_path": str(path),
+                            "table_name": "Sheet1",
+                            "method": "iqr_outliers",
+                            "value_columns": ["score"],
+                        },
+                    )
+                )
+            )
+
+        # 原因：没有异常值也是结论，不能让空结果在最终回答的表格展示中丢失。
+        # 作用：保证 Chat/API 可以显示 outlier_count=0 和 IQR 边界。
+        self.assertTrue(response.success)
+        self.assertEqual(response.data["rows"][0]["outlier_count"], 0)
+        self.assertIn("| metric | rule | outlier_count |", response.content)
+
     def test_excel_statistics_calculates_t_intervals_and_one_sample_test(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "sample.xlsx"

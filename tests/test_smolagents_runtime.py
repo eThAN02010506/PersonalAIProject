@@ -1,9 +1,12 @@
 import json
 import sys
+import tempfile
 import types
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+
+import pandas as pd
 
 from qwopus_agent.integrations.smolagents_runtime import (
     SmolagentsModelSettings,
@@ -2461,6 +2464,67 @@ class SmolagentsRuntimeTests(unittest.TestCase):
         self.assertIn("| column | mean |", result.answer)
         self.assertIn("| column | p50 |", result.answer)
         self.assertIn("| column | outlier_count |", result.answer)
+        self.assertIn("IQR 异常值检查发现 1 个候选离群点", result.answer)
+
+    def test_file_analysis_explains_empty_outlier_result_in_narrative(self) -> None:
+        settings = SmolagentsModelSettings(
+            model_id="any-model",
+            base_url="http://127.0.0.1:8080/v1",
+        )
+        FakeToolCallingAgent.queued_results = [
+            types.SimpleNamespace(
+                output="异常值检查完成。",
+                state="success",
+                steps=[
+                    {
+                        "step_number": 1,
+                        "observations": "Schema result",
+                        "tool_calls": [
+                            {
+                                "function": {
+                                    "name": "excel_schema",
+                                    "arguments": {"file_name": "iris.xlsx"},
+                                }
+                            }
+                        ],
+                    },
+                    {
+                        "step_number": 2,
+                        "observations": (
+                            "## Statistical result: iqr_outliers\n"
+                            "- outlier_count: 0\n\n"
+                            "| metric | rule | outlier_count |\n"
+                            "| --- | --- | --- |\n"
+                            "| row_mean | 1.5 x IQR | 0 |"
+                        ),
+                        "tool_calls": [
+                            {
+                                "function": {
+                                    "name": "excel_statistics",
+                                    "arguments": {
+                                        "file_name": "iris.xlsx",
+                                        "method": "iqr_outliers",
+                                    },
+                                }
+                            }
+                        ],
+                    },
+                ],
+            ),
+        ]
+
+        result = run_smolagents_file_analysis_with_debug(
+            file_names=["iris.xlsx"],
+            spreadsheet_names=["iris.xlsx"],
+            user_question="outlier 是什么？",
+            tools=[object(), object(), object()],
+            settings=settings,
+        )
+
+        # 原因：模型可能只说“已检查”，却漏掉 0 个异常值这个关键解释。
+        # 作用：保证本地统计结果在自然语言正文和核验表中都可见。
+        self.assertIn("未发现离群点", result.answer)
+        self.assertIn("| metric | rule | outlier_count |", result.answer)
 
     def test_file_analysis_routes_single_spreadsheet_item_lookup_for_weak_models(self) -> None:
         settings = SmolagentsModelSettings(
@@ -2529,6 +2593,143 @@ class SmolagentsRuntimeTests(unittest.TestCase):
         self.assertIn("| 3 | STR | 40 |", result.answer)
         self.assertIn("excel_statistics.lookup", FakeToolCallingAgent.last_instance.prompt)
         self.assertIn("lookup_value", FakeToolCallingAgent.last_instance.prompt)
+
+    def test_file_analysis_rejects_lookup_value_not_requested_by_user(self) -> None:
+        settings = SmolagentsModelSettings(
+            model_id="any-model",
+            base_url="http://127.0.0.1:8080/v1",
+        )
+        wrong_lookup_steps = [
+            {
+                "step_number": 1,
+                "observations": "Schema result",
+                "tool_calls": [
+                    {
+                        "function": {
+                            "name": "excel_schema",
+                            "arguments": {"file_name": "character.xlsx"},
+                        }
+                    }
+                ],
+            },
+            {
+                "step_number": 2,
+                "observations": (
+                    "| row_index | STR | 40 |\n"
+                    "| --- | --- | --- |\n"
+                    "| 10 | CON | 55 |"
+                ),
+                "tool_calls": [
+                    {
+                        "function": {
+                            "name": "excel_statistics",
+                            "arguments": {
+                                "file_name": "character.xlsx",
+                                "table_name": "COC Character::table_2",
+                                "method": "lookup",
+                                "lookup_value": "CON",
+                            },
+                        }
+                    }
+                ],
+            },
+        ]
+        FakeToolCallingAgent.queued_results = [
+            types.SimpleNamespace(
+                output="STR 是 55。",
+                state="success",
+                steps=wrong_lookup_steps,
+            ),
+            types.SimpleNamespace(
+                output="STR 是 55。",
+                state="success",
+                steps=wrong_lookup_steps,
+            ),
+        ]
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "did not call required file tools: excel_statistics",
+        ):
+            run_smolagents_file_analysis_with_debug(
+                file_names=["character.xlsx"],
+                spreadsheet_names=["character.xlsx"],
+                user_question="STR 是多少？",
+                tools=[object(), object(), object()],
+                settings=settings,
+            )
+
+    def test_file_analysis_falls_back_when_lookup_value_is_wrong_but_path_is_authorized(
+        self,
+    ) -> None:
+        settings = SmolagentsModelSettings(
+            model_id="any-model",
+            base_url="http://127.0.0.1:8080/v1",
+        )
+        wrong_lookup_steps = [
+            {
+                "step_number": 1,
+                "observations": "Schema result",
+                "tool_calls": [
+                    {
+                        "function": {
+                            "name": "excel_schema",
+                            "arguments": {"file_name": "character.xlsx"},
+                        }
+                    }
+                ],
+            },
+            {
+                "step_number": 2,
+                "observations": (
+                    "| row_index | STR | 40 |\n"
+                    "| --- | --- | --- |\n"
+                    "| 10 | CON | 55 |"
+                ),
+                "tool_calls": [
+                    {
+                        "function": {
+                            "name": "excel_statistics",
+                            "arguments": {
+                                "file_name": "character.xlsx",
+                                "table_name": "Sheet1",
+                                "method": "lookup",
+                                "lookup_value": "CON",
+                            },
+                        }
+                    }
+                ],
+            },
+        ]
+        FakeToolCallingAgent.queued_results = [
+            types.SimpleNamespace(
+                output="STR 是 55。",
+                state="success",
+                steps=wrong_lookup_steps,
+            ),
+            types.SimpleNamespace(
+                output="STR 是 55。",
+                state="success",
+                steps=wrong_lookup_steps,
+            ),
+        ]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "character.xlsx"
+            pd.DataFrame({"STR": ["CON"], "40": [55]}).to_excel(path, index=False)
+
+            result = run_smolagents_file_analysis_with_debug(
+                file_names=["character.xlsx"],
+                spreadsheet_names=["character.xlsx"],
+                user_question="STR 是多少？",
+                tools=[object(), object(), object()],
+                settings=settings,
+                spreadsheet_paths={"character.xlsx": path},
+            )
+
+        # 原因：真实 UI 中弱模型可能两轮都错把样例值 CON 当查询目标。
+        # 作用：已授权路径内的本地 fallback 能纠正为 STR | 40，而不是把错误答案返回用户。
+        self.assertIn("| STR | 40 |", result.answer)
+        self.assertIn("本地 lookup 兜底完成", "\n".join(result.debug_steps))
 
     def test_file_analysis_rejects_failed_regression_even_with_model_table(self) -> None:
         settings = SmolagentsModelSettings(

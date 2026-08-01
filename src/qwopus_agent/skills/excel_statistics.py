@@ -440,6 +440,20 @@ def _run_statistical_method(
         result["lower_bound"] = lower
         result["upper_bound"] = upper
         result = result.sort_values("metric", ascending=False)
+        if result.empty:
+            # 原因：空 DataFrame 会被 Markdown 渲染成纯文本，最终回答阶段无法作为表格展示。
+            # 作用：即使没有异常值，也保留 IQR 边界和 outlier_count 供用户核对。
+            result = pd.DataFrame(
+                [
+                    {
+                        "metric": metric_name,
+                        "rule": f"{threshold} x IQR",
+                        "outlier_count": 0,
+                        "lower_bound": lower,
+                        "upper_bound": upper,
+                    }
+                ]
+            )
         return result.round(4), {
             "metric": metric_name,
             "rule": f"{threshold} x IQR",
@@ -466,6 +480,20 @@ def _run_statistical_method(
             key=lambda values: values.abs(),
             ascending=False,
         )
+    if result.empty:
+        # 原因：空异常值结果仍是有意义的统计结论，不能在 Chat 表格展示中消失。
+        # 作用：把“没有发现 Z-score 异常值”和计算口径作为可见表格返回。
+        result = pd.DataFrame(
+            [
+                {
+                    "metric": metric_name,
+                    "rule": f"absolute Z-score >= {threshold}",
+                    "outlier_count": 0,
+                    "mean": mean,
+                    "standard_deviation": standard_deviation,
+                }
+            ]
+        )
     return result.round(4), {
         "metric": metric_name,
         "rule": f"absolute Z-score >= {threshold}",
@@ -485,6 +513,27 @@ def _lookup_rows(
     if not lookup_value:
         raise ValueError("lookup requires lookup_value.")
     normalized_query = lookup_value.casefold()
+    if len(dataframe.columns) == 2:
+        columns = [str(column) for column in dataframe.columns]
+        for index, column in enumerate(columns):
+            if column.casefold() != normalized_query:
+                continue
+            # 原因：部分表单型 Excel 会把第一项数据误识别为表头，例如 STR | 40。
+            # 作用：单项查询仍能返回字段和值，而不被迫把 CON | 55 当作 STR 的答案。
+            value_column = columns[1 - index]
+            return pd.DataFrame(
+                [
+                    {
+                        "key": column,
+                        "value": value_column,
+                        "match_source": "column_header_pair",
+                    }
+                ]
+            ), {
+                "lookup_value": lookup_value,
+                "match_rule": "two-column header pair fallback before row search",
+                "match_count": 1,
+            }
     searchable = dataframe.astype("string").fillna("")
     exact_mask = searchable.map(lambda value: value.casefold() == normalized_query).any(axis=1)
     contains_mask = searchable.map(lambda value: normalized_query in value.casefold()).any(axis=1)
