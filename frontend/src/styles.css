@@ -393,8 +393,26 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 .message-markdown li { margin: 5px 0; }
 .message-markdown blockquote { border-left: 3px solid #db8b83; margin: 14px 0; background: #faf6f4; padding: 8px 13px; color: #555d57; }
 .message-markdown a { color: #346b8f; text-decoration-thickness: 1px; text-underline-offset: 3px; }
-.message-markdown table { display: block; max-width: 100%; overflow-x: auto; border-collapse: collapse; margin: 16px 0; font-size: 13px; }
-.message-markdown th, .message-markdown td { border: 1px solid var(--border); padding: 8px 10px; text-align: left; vertical-align: top; }
+.message-markdown table {
+  /* 原因：统计结果表通常列多且列名长，继承普通正文换行会把表头拆成单字。
+     作用：让表格自己横向滚动，保留 Excel/统计输出的可读列结构。 */
+  display: block;
+  width: max-content;
+  max-width: 100%;
+  overflow-x: auto;
+  border-collapse: collapse;
+  margin: 16px 0;
+  font-size: 13px;
+}
+.message-markdown th, .message-markdown td {
+  border: 1px solid var(--border);
+  padding: 8px 10px;
+  text-align: left;
+  vertical-align: top;
+  white-space: nowrap;
+  overflow-wrap: normal;
+  word-break: normal;
+}
 .message-markdown th { background: #f2f4f1; }
 .message-markdown pre { overflow-x: auto; border: 1px solid #303630; border-radius: 7px; background: #242925; color: #f5f6f2; padding: 15px; }
 .message-markdown code { overflow-wrap: anywhere; }
