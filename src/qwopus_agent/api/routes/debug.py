@@ -136,16 +136,63 @@ def _read_runtime_log(path: Path, line_limit: int) -> DebugRuntimeLogView:
         return DebugRuntimeLogView(path=str(path), exists=False)
     try:
         stat = path.stat()
-        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        lines = _read_tail_lines(path, line_limit)
         return DebugRuntimeLogView(
             path=str(path),
             exists=True,
             size_bytes=stat.st_size,
             modified_at=datetime.fromtimestamp(stat.st_mtime, UTC).isoformat(),
-            total_lines=len(lines),
-            lines=lines[-line_limit:] if line_limit else [],
+            total_lines=_count_lines(path),
+            lines=lines,
         )
     except OSError as exc:
         # 原因：日志轮转可能恰好发生在 stat 与读取之间。
         # 作用：Debug Console 显示读取错误，但不会让整个诊断接口失败。
         return DebugRuntimeLogView(path=str(path), exists=True, error=str(exc))
+
+
+_TAIL_READ_CHUNK_BYTES = 64 * 1024
+_MAX_TAIL_READ_BYTES = 16 * 1024 * 1024
+
+
+def _read_tail_lines(path: Path, line_limit: int) -> list[str]:
+    """Return the newest ``line_limit`` lines without reading the whole file.
+
+    原因：大日志一次性 read_text 会占用整个文件大小的内存，日志轮转前可能
+    膨胀到数百 MB。作用：从文件尾部按块反向扫描，只保留最后有界的行集。
+    """
+    if line_limit <= 0:
+        return []
+    size = path.stat().st_size
+    if size == 0:
+        return []
+    block_end = size
+    read_bytes = 0
+    chunks: list[str] = []
+    while block_end > 0 and read_bytes < _MAX_TAIL_READ_BYTES:
+        block_start = max(0, block_end - _TAIL_READ_CHUNK_BYTES)
+        read_bytes += block_end - block_start
+        with path.open("rb") as handle:
+            handle.seek(block_start)
+            block = handle.read(block_end - block_start)
+        block_end = block_start
+        chunks.append(block.decode("utf-8", errors="replace"))
+        combined = "".join(reversed(chunks))
+        line_count = combined.count("\n")
+        if line_count >= line_limit:
+            break
+    full_tail = "".join(reversed(chunks))
+    lines = full_tail.splitlines()
+    return lines[-line_limit:] if line_limit else []
+
+
+def _count_lines(path: Path) -> int:
+    """Count newlines with a bounded read to avoid loading the whole file."""
+    count = 0
+    with path.open("rb") as handle:
+        while True:
+            block = handle.read(1 << 20)
+            if not block:
+                break
+            count += block.count(b"\n")
+    return count

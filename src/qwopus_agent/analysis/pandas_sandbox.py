@@ -527,6 +527,7 @@ def _validate_attribute(node: ast.Attribute) -> None:
     if node.attr.startswith("_"):
         raise ValueError(f"Blocked private attribute access: {node.attr}")
     if node.attr in {
+        "data",
         "eval",
         "plot",
         "query",

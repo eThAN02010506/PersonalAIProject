@@ -228,6 +228,15 @@ class PandasSandboxTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Unknown sandbox name"):
             execute_pandas_code("result = secret_value", {"Sheet1": pd.DataFrame()})
 
+    def test_rejects_exposing_low_level_memory_buffer(self) -> None:
+        # 原因：df.values.data 会暴露 numpy 底层内存视图，虽有方法白名单兜底但无分析用途。
+        # 作用：把这类可绕过 pandas 高层 API 的属性访问加入黑名单。
+        with self.assertRaisesRegex(ValueError, "Blocked sandbox attribute"):
+            execute_pandas_code(
+                'df = dfs["Sheet1"]\nresult = df.values.data',
+                {"Sheet1": pd.DataFrame({"value": [1, 2]})},
+            )
+
     @unittest.skipUnless(sys.platform == "darwin", "Seatbelt is specific to macOS.")
     def test_macos_worker_command_enforces_seatbelt_policy(self) -> None:
         command = _sandbox_command()
