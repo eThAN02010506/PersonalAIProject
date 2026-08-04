@@ -135,65 +135,12 @@ _collection_grounding_evidence = report_contract._collection_grounding_evidence
 _is_model_generation_failure_output = (
     report_contract._is_model_generation_failure_output
 )
-_lesson_slot_manifest = report_contract._lesson_slot_manifest
 _merge_numbered_section_refinement = (
     report_contract._merge_numbered_section_refinement
 )
 _missing_requested_sections = report_contract._missing_requested_sections
 _report_quality_issues = report_contract._report_quality_issues
-
-_SCRIPTURE_REFERENCE_PATTERN = grounded._SCRIPTURE_REFERENCE_PATTERN
-_LessonGroundingSpec = grounded._LessonGroundingSpec
-_canonical_lesson_heading = grounded._canonical_lesson_heading
-_chinese_integer = grounded._chinese_integer
-_collection_manifest_sources = grounded._collection_manifest_sources
-_collection_source_blocks = grounded._collection_source_blocks
-_grounded_application_claim = grounded._grounded_application_claim
-_grounded_evidence_claim = grounded._grounded_evidence_claim
-_lesson_answer_aliases = grounded._lesson_answer_aliases
-_lesson_answer_label = grounded._lesson_answer_label
-_lesson_evidence = grounded._lesson_evidence
-_lesson_grounding_specs = grounded._lesson_grounding_specs
-_lesson_number_from_label = grounded._lesson_number_from_label
-_lesson_scripture = grounded._lesson_scripture
-_lesson_topic = grounded._lesson_topic
-_normalized_fact_text = grounded._normalized_fact_text
-_render_deterministic_grounded_report = (
-    grounded._render_deterministic_grounded_report
-)
-_render_grounded_checklist = grounded._render_grounded_checklist
-_render_grounded_draft_review = grounded._render_grounded_draft_review
-_render_grounded_examples = grounded._render_grounded_examples
-_render_grounded_full_draft = grounded._render_grounded_full_draft
-_render_grounded_lesson_fallback = (
-    grounded._render_grounded_lesson_fallback
-)
-_render_grounded_outline = grounded._render_grounded_outline
-_render_grounded_paragraph_guidance = (
-    grounded._render_grounded_paragraph_guidance
-)
-_render_grounded_source_inventory = (
-    grounded._render_grounded_source_inventory
-)
-_render_grounded_strategy = grounded._render_grounded_strategy
-_render_grounded_understanding = grounded._render_grounded_understanding
-_requested_numbered_sections = grounded._requested_numbered_sections
-_scripture_reference_is_supported = (
-    grounded._scripture_reference_is_supported
-)
-_scripture_reference_key = grounded._scripture_reference_key
-_source_answer_label = grounded._source_answer_label
-_source_application_excerpt = grounded._source_application_excerpt
-_source_evidence_excerpt = grounded._source_evidence_excerpt
-_source_fact_values = grounded._source_fact_values
-_source_tagged_excerpt = grounded._source_tagged_excerpt
-_title_is_source_understanding = grounded._title_is_source_understanding
-_title_requires_full_draft = grounded._title_requires_full_draft
-_topic_payload = grounded._topic_payload
-_validated_grounded_collection = grounded._validated_grounded_collection
-should_use_grounded_report_composer = (
-    grounded.should_use_grounded_report_composer
-)
+should_use_grounded_report_composer = grounded.should_use_grounded_report_composer
 
 
 def run_smolagents_file_analysis_with_debug(*args: Any, **kwargs: Any) -> DocumentAnalysisRun:

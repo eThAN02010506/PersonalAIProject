@@ -15,7 +15,8 @@ from qwopus_agent.integrations import (
 )
 from qwopus_agent.integrations.smolagents_results import DocumentAnalysisRun
 from qwopus_agent.reports import contract as report_contract
-from qwopus_agent.reports import grounded
+from qwopus_agent.reports import grounded, grounded_facts
+from qwopus_agent.reports.recipe import ReportRecipe, default_recipe
 from qwopus_agent.utils.token_budget import TokenBudgetManager, truncate_to_tokens
 
 SmolagentsModelSettings = smolagents_model.SmolagentsModelSettings
@@ -45,13 +46,12 @@ _spreadsheet_result_tables = smolagents_spreadsheets.spreadsheet_result_tables
 _apply_grounded_report_fallbacks = report_contract._apply_grounded_report_fallbacks
 _collection_grounding_evidence = report_contract._collection_grounding_evidence
 _is_model_generation_failure_output = report_contract._is_model_generation_failure_output
-_lesson_slot_manifest = report_contract._lesson_slot_manifest
 _merge_numbered_section_refinement = report_contract._merge_numbered_section_refinement
 _missing_requested_sections = report_contract._missing_requested_sections
 _report_quality_issues = report_contract._report_quality_issues
-_lesson_grounding_specs = grounded._lesson_grounding_specs
+_source_slot_manifest = report_contract._source_slot_manifest
 _render_deterministic_grounded_report = grounded._render_deterministic_grounded_report
-_requested_numbered_sections = grounded._requested_numbered_sections
+_requested_numbered_sections = grounded_facts._requested_numbered_sections
 _validated_grounded_collection = grounded._validated_grounded_collection
 should_use_grounded_report_composer = grounded.should_use_grounded_report_composer
 
@@ -65,6 +65,7 @@ def run_smolagents_file_analysis_with_debug(
     analysis_mode: str = "question",
     response_detail: Literal["concise", "balanced", "detailed"] = "detailed",
     spreadsheet_paths: dict[str, Path] | None = None,
+    recipe: ReportRecipe | None = None,
 ) -> DocumentAnalysisRun:
     """Run uploaded-file analysis through the smolagents ToolCallingAgent."""
     if not file_names:
@@ -72,6 +73,7 @@ def run_smolagents_file_analysis_with_debug(
     if not tools:
         raise ValueError("At least one file-analysis tool is required.")
 
+    active_recipe = recipe or default_recipe()
     effective_settings = settings or SmolagentsModelSettings.from_env()
     budget = TokenBudgetManager(
         context_window=effective_settings.context_window_tokens,
@@ -91,6 +93,7 @@ def run_smolagents_file_analysis_with_debug(
         file_count=len(parser_files),
         user_question=user_question,
         analysis_mode=analysis_mode,
+        recipe=active_recipe,
     )
     requires_document_summary = _requires_document_summary(
         file_count=len(parser_files),
@@ -105,6 +108,7 @@ def run_smolagents_file_analysis_with_debug(
         analysis_mode=analysis_mode,
         has_collection_summary=has_collection_summary,
         response_detail=response_detail,
+        recipe=active_recipe,
     )
     collection_tool = collection_tools[0] if collection_tools else None
     use_grounded_report_composer = should_use_grounded_report_composer(
@@ -112,27 +116,31 @@ def run_smolagents_file_analysis_with_debug(
         spreadsheet_names=spreadsheet_names,
         user_question=user_question,
         has_collection_summary=collection_tool is not None,
+        recipe=active_recipe,
     )
     if use_grounded_report_composer:
         assert collection_tool is not None
         # 原因：一次 8k-token 长生成在本地大模型切换或显存紧张时会超时/重启，
-        # 而且弱模型容易把相邻课程压成一个泛化清单。
-        # 作用：完整报告先由 collection Tool 确定性覆盖全部来源，再按逐课事实槽位组装；
+        # 而且弱模型容易把相邻来源压成一个泛化清单。
+        # 作用：完整报告先由 collection Tool 确定性覆盖全部来源，再按逐来源事实槽位组装；
         # 这一完整性优先路径不依赖模型长生成，也不会使用文件外知识。
         collection_evidence = str(collection_tool.forward())
-        lesson_specs = _validated_grounded_collection(
+        source_specs = _validated_grounded_collection(
             file_names=file_names,
             collection_evidence=collection_evidence,
+            recipe=active_recipe,
         )
         final_answer = _render_deterministic_grounded_report(
             requested=requested_sections,
             file_names=file_names,
             collection_evidence=collection_evidence,
-            lesson_specs=lesson_specs,
+            source_specs=source_specs,
+            recipe=active_recipe,
         )
         missing_sections = _missing_requested_sections(
             final_answer,
             requested_sections,
+            recipe=active_recipe,
         )
         quality_issues = _report_quality_issues(
             answer=final_answer,
@@ -140,6 +148,7 @@ def run_smolagents_file_analysis_with_debug(
             file_names=file_names,
             user_question=user_question,
             collection_evidence=collection_evidence,
+            recipe=active_recipe,
         )
         if missing_sections or quality_issues:
             raise RuntimeError(
@@ -147,7 +156,7 @@ def run_smolagents_file_analysis_with_debug(
             )
         debug_steps = [
             "已用 document_collection_summary 读取并核对全部来源。",
-            "长篇全来源任务使用逐来源、逐课确定性报告合成，未调用不稳定的单次长生成。",
+            "长篇全来源任务使用逐来源确定性报告合成，未调用不稳定的单次长生成。",
         ]
         return DocumentAnalysisRun(
             answer=final_answer,
@@ -244,15 +253,17 @@ def run_smolagents_file_analysis_with_debug(
     missing_sections = _missing_requested_sections(
         final_answer,
         requested_sections,
+        recipe=active_recipe,
     )
     collection_evidence = _collection_grounding_evidence(all_steps)
-    lesson_specs = _lesson_grounding_specs(file_names, collection_evidence)
+    source_specs = active_recipe.build_grounding_specs(file_names, collection_evidence)
     quality_issues = _report_quality_issues(
         answer=final_answer,
         requested=requested_sections,
         file_names=file_names,
         user_question=user_question,
         collection_evidence=collection_evidence,
+        recipe=active_recipe,
     )
     refinement_numbers = set(missing_sections).union(quality_issues)
     refinement_sections = {
@@ -306,7 +317,7 @@ def run_smolagents_file_analysis_with_debug(
             )
             or "none"
         )
-        lesson_slot_instruction = _lesson_slot_manifest(lesson_specs)
+        source_slot_instruction = _source_slot_manifest(source_specs, recipe=active_recipe)
         if section_only_refinement:
             grounded_context = truncate_to_tokens(
                 collection_evidence,
@@ -320,13 +331,13 @@ def run_smolagents_file_analysis_with_debug(
                 "Fully develop those sections from the existing inspected-file evidence. "
                 "Correct every grounded-deliverable defect listed here: "
                 f"{quality_issue_instruction}. "
-                "Use SOURCE_FACTS as the only authority for lesson titles and scripture "
-                "references. If QWOPUS_EXPLICIT_RUBRIC_FOUND is false, explicitly say that no "
+                "Use SOURCE_FACTS as the only authority for source titles and references. "
+                "If QWOPUS_EXPLICIT_RUBRIC_FOUND is false, explicitly say that no "
                 "rubric was supplied and do not invent points, weights, or totals. "
                 "Never use placeholders such as '略', 'omitted', or 'to be completed'. "
                 "Do not add a preface, conclusion, Observation, Thought, tool log, or any "
                 "section not listed above. Follow the language of the user's question.\n\n"
-                f"{lesson_slot_instruction}\n\n"
+                f"{source_slot_instruction}\n\n"
                 "Grounding evidence from the completed collection read follows. Treat each "
                 "# File block as isolated and use no outside knowledge:\n"
                 f"{grounded_context}"
@@ -361,8 +372,8 @@ def run_smolagents_file_analysis_with_debug(
             )
         if section_only_refinement and collection_evidence:
             # 原因：原 Agent memory 已累计工具结果、outline 和旧 Draft；弱模型会在长上下文里
-            # 重复相邻课次并漏掉某个课次。
-            # 作用：只把受控 collection evidence 和精确课次槽位交给无工具的新 Agent，
+            # 重复相邻来源并漏掉某个来源。
+            # 作用：只把受控 collection evidence 和精确来源槽位交给无工具的新 Agent，
             # 接受章节仍由确定性 merge 保留。
             retry_agent = build_smolagents_tool_calling_agent(
                 settings=effective_settings,
@@ -425,7 +436,8 @@ def run_smolagents_file_analysis_with_debug(
                     retry_final_answer,
                     requested_sections,
                     refinement_sections,
-                    lesson_specs,
+                    source_specs,
+                    recipe=active_recipe,
                 )
             final_answer = _apply_grounded_report_fallbacks(
                 answer=final_answer,
@@ -435,22 +447,25 @@ def run_smolagents_file_analysis_with_debug(
                 quality_issues=quality_issues,
                 file_names=file_names,
                 collection_evidence=collection_evidence,
-                lesson_specs=lesson_specs,
+                source_specs=source_specs,
+                recipe=active_recipe,
             )
         else:
             final_answer = retry_final_answer
         missing_sections = _missing_requested_sections(
             final_answer,
             requested_sections,
+            recipe=active_recipe,
         )
         collection_evidence = _collection_grounding_evidence(all_steps)
-        lesson_specs = _lesson_grounding_specs(file_names, collection_evidence)
+        source_specs = active_recipe.build_grounding_specs(file_names, collection_evidence)
         quality_issues = _report_quality_issues(
             answer=final_answer,
             requested=requested_sections,
             file_names=file_names,
             user_question=user_question,
             collection_evidence=collection_evidence,
+            recipe=active_recipe,
         )
 
     missing_tools = _missing_required_file_tools(

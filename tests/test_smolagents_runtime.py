@@ -27,6 +27,7 @@ from qwopus_agent.integrations.smolagents_runtime import (
     run_smolagents_file_analysis_with_debug,
 )
 from qwopus_agent.integrations.smolagents_spreadsheets import remove_markdown_tables
+from qwopus_agent.reports.bible_recipe import BIBLE_RECIPE
 from qwopus_agent.services.orchestration_models import AnswerContract, AnswerPlan
 from qwopus_agent.skills import (
     BaseSkill,
@@ -1742,6 +1743,7 @@ class SmolagentsRuntimeTests(unittest.TestCase):
             ),
             tools=[types.SimpleNamespace(name="document_collection_summary")],
             settings=settings,
+            recipe=BIBLE_RECIPE,
         )
 
         self.assertIn("bible-method", result.answer)
@@ -1842,6 +1844,7 @@ class SmolagentsRuntimeTests(unittest.TestCase):
             ),
             tools=[types.SimpleNamespace(name="document_collection_summary")],
             settings=settings,
+            recipe=BIBLE_RECIPE,
         )
 
         self.assertIn(accepted_understanding, result.answer)
@@ -1932,6 +1935,7 @@ class SmolagentsRuntimeTests(unittest.TestCase):
             user_question=_grounded_report_prompt(),
             tools=[collection_tool],
             settings=settings,
+            recipe=BIBLE_RECIPE,
         )
 
         self.assertIsNone(FakeToolCallingAgent.last_instance)
@@ -1997,6 +2001,7 @@ class SmolagentsRuntimeTests(unittest.TestCase):
                 user_question=_grounded_report_prompt("自由发挥"),
                 tools=[collection_tool],
                 settings=settings,
+                recipe=BIBLE_RECIPE,
             )
 
     def test_collection_summary_requires_a_complete_tool_coverage_manifest(self) -> None:

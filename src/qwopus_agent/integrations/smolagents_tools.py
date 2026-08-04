@@ -24,6 +24,7 @@ from qwopus_agent.integrations.smolagents_web_tools import (
 )
 from qwopus_agent.integrations.tavily import TavilySearchConfig
 from qwopus_agent.memory.knowledge_store import KnowledgeStore
+from qwopus_agent.reports.recipe import ReportRecipe, default_recipe
 from qwopus_agent.utils.token_budget import (
     TokenBudgetManager,
     estimate_tokens,
@@ -228,6 +229,7 @@ def build_document_collection_summary_tool(
     documents: Mapping[str, DocumentStructure] | None = None,
     query: str = "",
     budget_manager: TokenBudgetManager | None = None,
+    recipe: ReportRecipe | None = None,
 ) -> Any:
     """Expose balanced, source-labelled evidence for every selected document."""
     Tool = _smolagents_tool_class()
@@ -235,6 +237,7 @@ def build_document_collection_summary_tool(
         raise ValueError("summaries must not be empty.")
     budget = budget_manager or TokenBudgetManager()
     ordered_sources = tuple(summaries)
+    active_recipe = recipe or default_recipe()
 
     class DocumentCollectionSummaryTool(Tool):  # type: ignore[misc, valid-type]
         name = "document_collection_summary"
@@ -256,6 +259,7 @@ def build_document_collection_summary_tool(
                     summary=summary,
                     structure=(documents or {}).get(file_name),
                     query=query,
+                    recipe=active_recipe,
                 )
                 for file_name, summary in summaries.items()
             }
@@ -265,7 +269,8 @@ def build_document_collection_summary_tool(
                 if any(part.strip() for part in payloads[file_name])
             )
             explicit_rubric_found = _documents_contain_explicit_rubric(
-                documents or {}
+                documents or {},
+                recipe=active_recipe,
             )
             return _pack_collection_evidence(
                 payloads=payloads,
@@ -276,6 +281,7 @@ def build_document_collection_summary_tool(
                 # 作用：沿用模型窗口扣除输出/system/history 后的 synthesis 安全预算，
                 # 默认最多 12000 tokens，让逐源事实、正文证据和摘要能同时保留。
                 max_tokens=budget.synthesis_budget,
+                grounding_rules_text=active_recipe.grounding_rules_text,
             )
 
     return DocumentCollectionSummaryTool()
@@ -509,13 +515,15 @@ def _collection_source_payload(
     summary: HierarchicalDocumentSummary,
     structure: DocumentStructure | None,
     query: str,
+    recipe: ReportRecipe | None = None,
 ) -> tuple[str, str]:
     """Build reserved source facts plus optional balanced/relevant evidence."""
+    recipe = recipe or default_recipe()
     critical_parts: list[str] = []
     supplemental_parts: list[str] = []
     if structure is not None and structure.chunks:
         anchor = min(structure.chunks, key=lambda chunk: chunk.position)
-        fact_lines = _extract_source_fact_lines(anchor.content)
+        fact_lines = _extract_source_fact_lines(anchor.content, recipe=recipe)
         citation = f"{file_name} / {' / '.join(anchor.section_path)}"
         citation += _page_label(anchor.page_start, anchor.page_end)
         if fact_lines:
@@ -529,18 +537,23 @@ def _collection_source_payload(
                 f"{rendered_facts}"
             )
 
+        fact_query_labels = {
+            "topic_line",
+            "topic_continuation",
+            recipe.source_fact_labels.quote_fact_key,
+        }
         lesson_fact_query = " ".join(
             line
             for label, line in fact_lines
-            if label in {"topic_line", "topic_continuation", "scripture_line"}
+            if label in fact_query_labels
         ).strip()
         source_query = lesson_fact_query or query
         explanation_pattern = re.compile(
-            r"经文解释|解释和讨论|释经|exegesis|interpret",
+            recipe.evidence_section_markers[0],
             re.IGNORECASE,
         )
         application_pattern = re.compile(
-            r"生活运用|生活应用|实际应用|反思与应用|application",
+            recipe.evidence_section_markers[1],
             re.IGNORECASE,
         )
         explanation_chunks = _leading_chunks_for_best_sections(
@@ -633,8 +646,14 @@ def _collection_source_payload(
     )
 
 
-def _extract_source_fact_lines(text: str) -> tuple[tuple[str, str], ...]:
-    """Extract exact opening identity/topic/scripture lines without interpreting them."""
+def _extract_source_fact_lines(
+    text: str,
+    *,
+    recipe: ReportRecipe | None = None,
+) -> tuple[tuple[str, str], ...]:
+    """Extract exact opening identity/topic/quote lines without interpreting them."""
+    recipe = recipe or default_recipe()
+    labels = recipe.source_fact_labels
     lines = [
         line.strip()
         for line in text.splitlines()
@@ -643,45 +662,42 @@ def _extract_source_fact_lines(text: str) -> tuple[tuple[str, str], ...]:
     if not lines:
         return ()
 
+    def _match_prefix(line: str, prefixes: tuple[str, ...]) -> bool:
+        return any(
+            re.match(rf"^(?:{re.escape(prefix)})\s*[：:]", line, re.IGNORECASE)
+            for prefix in prefixes
+        )
+
     facts: list[tuple[str, str]] = [("document_heading", lines[0])]
     topic_index = next(
         (
             index
             for index, line in enumerate(lines)
-            if re.match(r"^(?:题目|題目|主题|主題|title)\s*[：:]", line, re.IGNORECASE)
+            if _match_prefix(line, labels.topic_line)
         ),
         None,
     )
     if topic_index is not None:
         facts.append(("topic_line", lines[topic_index]))
         # 原因：系列名和本课题目在真实 DOCX 中经常被拆成相邻两行。
-        # 作用：保留原行而不自行拼写题目，同时在“经文/时长”等元数据前停止。
+        # 作用：保留原行而不自行拼写题目，同时在引用/元数据标签前停止。
         for continuation in lines[topic_index + 1 : topic_index + 3]:
-            if re.match(
-                (
-                    r"^(?:经文|經文|时长|時長|时间|時間|"
-                    r"scripture|passage|duration|time)\s*[：:]"
-                ),
-                continuation,
-                re.IGNORECASE,
-            ):
+            if _match_prefix(continuation, labels.topic_stop_labels):
                 break
             facts.append(("topic_continuation", continuation))
 
-    scripture_line = next(
+    quote_line = next(
         (
             line
             for line in lines
-            if re.match(
-                r"^(?:经文|經文|scripture|passage|text)\s*[：:]",
-                line,
-                re.IGNORECASE,
-            )
+            if _match_prefix(line, labels.quote_line)
         ),
         None,
     )
-    if scripture_line is not None:
-        facts.append(("scripture_line", scripture_line))
+    if quote_line is not None:
+        # 原因：下游 grounded_facts 按稳定标签名读取，不能把 recipe 前缀当作键。
+        # 作用：统一用 recipe 指定的 quote 事实键（通用 quote_line / 圣经 scripture_line）。
+        facts.append((labels.quote_fact_key, quote_line))
     elif topic_index is None and len(lines) > 1:
         facts.append(("opening_line", lines[1]))
     return tuple(facts)
@@ -706,11 +722,13 @@ _COLLECTION_GROUNDING_RULES = """GROUNDING_RULES (mandatory):
 
 def _documents_contain_explicit_rubric(
     documents: Mapping[str, DocumentStructure],
+    *,
+    recipe: ReportRecipe | None = None,
 ) -> bool:
     """Detect only explicit grading language in source text, never in the user prompt."""
+    recipe = recipe or default_recipe()
     rubric_pattern = re.compile(
-        r"\brubric\b|grading\s+criteria|marking\s+scheme|"
-        r"评分标准|评分细则|评分量表|评分规则|打分标准",
+        "|".join(rf"(?:{marker})" for marker in recipe.rubric_markers),
         re.IGNORECASE,
     )
     return any(
@@ -726,6 +744,7 @@ def _pack_collection_evidence(
     covered_sources: tuple[str, ...],
     explicit_rubric_found: bool,
     max_tokens: int,
+    grounding_rules_text: str = "",
 ) -> str:
     """Reserve exact facts for every source, then fairly divide supplemental evidence."""
     source_names = tuple(payloads)
@@ -754,7 +773,7 @@ def _pack_collection_evidence(
     # 作用：manifest、规则、每份文件标题、SOURCE_FACTS、核心释经句和应用证据先固定，
     # 剩余预算再用于较长的 query evidence 与 overview。
     fixed_render = "\n\n".join(
-        [manifest, rubric_marker, _COLLECTION_GROUNDING_RULES, *base_blocks]
+        [manifest, rubric_marker, grounding_rules_text, *base_blocks]
     )
     fixed_tokens = estimate_tokens(fixed_render)
     evidence_sources = tuple(
@@ -789,7 +808,7 @@ def _pack_collection_evidence(
             for index, source in enumerate(source_names)
         ]
         rendered = "\n\n".join(
-            [manifest, rubric_marker, _COLLECTION_GROUNDING_RULES, *blocks]
+            [manifest, rubric_marker, grounding_rules_text, *blocks]
         )
         rendered_tokens = estimate_tokens(rendered)
         if rendered_tokens <= max_tokens:

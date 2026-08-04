@@ -33,6 +33,7 @@ from qwopus_agent.memory.graph_backend import PersistentKnowledgeGraph
 from qwopus_agent.memory.graph_extraction import RuleBasedGraphExtractor
 from qwopus_agent.memory.graph_models import GraphChunk
 from qwopus_agent.memory.knowledge_graph import KnowledgeGraphIndex
+from qwopus_agent.reports.bible_recipe import BIBLE_RECIPE
 from qwopus_agent.utils.token_budget import TokenBudgetManager, estimate_tokens
 from tests.minirag_fakes import make_test_minirag
 
@@ -286,6 +287,7 @@ class SmolagentsToolsTests(unittest.TestCase):
                 documents=documents,
                 query="逐课比较全部文件的题目、经文和正文主题。",
                 budget_manager=budget,
+                recipe=BIBLE_RECIPE,
             )
         observation = tool.forward()
 

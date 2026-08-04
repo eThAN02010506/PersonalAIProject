@@ -7,9 +7,7 @@ from typing import Literal
 from qwopus_agent.analysis.pandas_sandbox import PANDAS_SANDBOX_CODE_GUIDANCE
 from qwopus_agent.integrations import smolagents_spreadsheets
 from qwopus_agent.prompts import smolagents as smolagents_prompts
-from qwopus_agent.reports import grounded
-
-_ALL_SOURCE_REQUEST_PATTERN = grounded._ALL_SOURCE_REQUEST_PATTERN
+from qwopus_agent.reports.recipe import ReportRecipe, default_recipe
 
 
 def format_file_analysis_agent_prompt(
@@ -19,14 +17,17 @@ def format_file_analysis_agent_prompt(
     analysis_mode: str = "question",
     has_collection_summary: bool = False,
     response_detail: Literal["concise", "balanced", "detailed"] = "detailed",
+    recipe: ReportRecipe | None = None,
 ) -> str:
     """Build the task prompt for the smolagents uploaded-file driver."""
+    active_recipe = recipe or default_recipe()
     question = user_question.strip() or "Summarize the uploaded files."
     requires_collection_summary = requires_collection_summary_for_prompt(
         available=has_collection_summary,
         file_count=len(file_names),
         user_question=question,
         analysis_mode=analysis_mode,
+        recipe=active_recipe,
     )
     document_file_count = len(set(file_names).difference(spreadsheet_names))
     requires_document_summary = requires_document_summary_for_prompt(
@@ -66,7 +67,7 @@ def format_file_analysis_agent_prompt(
             "marker says no explicit rubric was found, state that fact instead of creating "
             "scores or weights."
         )
-        if _ALL_SOURCE_REQUEST_PATTERN.search(question):
+        if active_recipe.all_source_request_pattern.search(question):
             lines.append(
                 "The user explicitly requested all sources: the document-understanding section "
                 "must name and substantively summarize every listed file. If a complete Draft "
@@ -175,15 +176,17 @@ def requires_collection_summary_for_prompt(
     file_count: int,
     user_question: str,
     analysis_mode: str,
+    recipe: ReportRecipe | None = None,
 ) -> bool:
     """Require collection coverage only for exhaustive multi-document tasks."""
     if not available or file_count <= 1:
         return False
+    active_recipe = recipe or default_recipe()
     # 原因：具体事实问题可逐文件检索；无条件强制 collection 会浪费步骤并导致弱模型失败。
     # 作用：全文模式和明确要求全部来源时仍保证覆盖，其余任务允许按问题选择文件工具。
     return (
         analysis_mode == "full"
-        or _ALL_SOURCE_REQUEST_PATTERN.search(user_question) is not None
+        or active_recipe.all_source_request_pattern.search(user_question) is not None
     )
 
 

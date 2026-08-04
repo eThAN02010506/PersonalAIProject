@@ -46,6 +46,7 @@ from qwopus_agent.integrations.smolagents_tools import (
     build_minirag_search_tool,
 )
 from qwopus_agent.memory import MiniRAG
+from qwopus_agent.reports.recipe import ReportRecipe, default_recipe
 from qwopus_agent.utils.conversation_log import append_conversation_event
 from qwopus_agent.utils.logging_config import get_logger
 from qwopus_agent.utils.token_budget import TokenBudgetManager
@@ -93,6 +94,7 @@ def analyze_uploaded_files(
     document_store: DocumentStore | None = None,
     analysis_mode: str = "question",
     response_detail: Literal["concise", "balanced", "detailed"] = "detailed",
+    recipe: ReportRecipe | None = None,
 ) -> UploadAnalysisOutcome:
     """Analyze uploaded files, update MiniRAG, and optionally call the LLM."""
     if not uploaded_files:
@@ -324,6 +326,7 @@ def analyze_uploaded_files(
         memory_hit_count=memory_hit_count,
         direct_mode=direct_mode,
         debug_steps=debug_steps,
+        recipe=recipe,
     )
     debug_runs.extend(model_debug_runs)
 
@@ -475,8 +478,10 @@ def _run_model_analysis(
     memory_hit_count: int,
     direct_mode: bool,
     debug_steps: list[str],
+    recipe: ReportRecipe | None = None,
 ) -> tuple[AnalysisResult, tuple[AgentDebugRun, ...]]:
     """Run the model phase after local parsing and indexing are complete."""
+    active_recipe = recipe or default_recipe()
     if not question:
         debug_steps.append("未输入分析问题，因此没有调用模型生成最终答案。")
         return result, ()
@@ -492,6 +497,7 @@ def _run_model_analysis(
         has_collection_summary=(
             analysis_mode != "section" and len(document_summaries) > 1
         ),
+        recipe=active_recipe,
     )
     online, connection_message = check_model_connection(settings)
     debug_steps.append(f"模型连接检测：{connection_message}")
@@ -519,6 +525,7 @@ def _run_model_analysis(
         direct_mode=direct_mode,
         question=question,
         analysis_mode=analysis_mode,
+        recipe=active_recipe,
     )
     # 原因：smolagents 是文件分析的统一驱动，服务层只注入当前任务允许访问的能力。
     # 作用：Agent 自行选择文档、Excel 沙箱或 MiniRAG Tool，且无法访问未上传的路径。
@@ -533,6 +540,7 @@ def _run_model_analysis(
         # 作用：文件 Agent 收到用户本轮的详略偏好，而不是始终使用隐式默认值。
         response_detail=response_detail,
         spreadsheet_paths=spreadsheet_paths,
+        recipe=active_recipe,
     )
     logger.info(
         "analysis_llm_completed files=%s answer_length=%s",
@@ -661,6 +669,7 @@ def _build_analysis_tools(
     direct_mode: bool,
     question: str,
     analysis_mode: str,
+    recipe: ReportRecipe | None = None,
 ) -> list[Any]:
     """Compose task-scoped Tool adapters without adding business decisions."""
     tools: list[Any] = []
@@ -706,6 +715,7 @@ def _build_analysis_tools(
                     documents=document_structures,
                     query=question,
                     budget_manager=budget_manager,
+                    recipe=recipe,
                 )
             )
     if spreadsheet_contexts:

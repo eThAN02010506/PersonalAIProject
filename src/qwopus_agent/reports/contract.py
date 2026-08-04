@@ -1,4 +1,10 @@
-"""Validation and deterministic repair for structured grounded reports."""
+"""Validation and deterministic repair for structured grounded reports.
+
+The quality checks here are generic over source slots: a recipe decides how
+file names map to item labels and which per-item candidate checks apply, so
+the same validator works for arbitrary multi-document collections and for
+domain recipes (for example Bible lessons with scripture-range checks).
+"""
 
 from __future__ import annotations
 
@@ -7,22 +13,17 @@ from dataclasses import dataclass
 from typing import Any
 
 from qwopus_agent.integrations.smolagents_debug import extract_agent_tool_calls
-from qwopus_agent.reports import grounded
+from qwopus_agent.reports import grounded, grounded_facts
+from qwopus_agent.reports.recipe import default_recipe
 
-_ALL_SOURCE_REQUEST_PATTERN = grounded._ALL_SOURCE_REQUEST_PATTERN
-_SCRIPTURE_REFERENCE_PATTERN = grounded._SCRIPTURE_REFERENCE_PATTERN
-_LessonGroundingSpec = grounded._LessonGroundingSpec
-_canonical_lesson_heading = grounded._canonical_lesson_heading
-_lesson_grounding_specs = grounded._lesson_grounding_specs
-_lesson_number_from_label = grounded._lesson_number_from_label
-_normalized_fact_text = grounded._normalized_fact_text
-_render_grounded_lesson_fallback = grounded._render_grounded_lesson_fallback
+_ALL_SOURCE_REQUEST_PATTERN = grounded_facts._ALL_SOURCE_REQUEST_PATTERN
+_SourceGroundingSpec = grounded_facts.SourceGroundingSpec
+_normalized_fact_text = grounded_facts._normalized_fact_text
+_source_answer_label = grounded_facts._source_answer_label
 _render_grounded_source_inventory = grounded._render_grounded_source_inventory
-_scripture_reference_is_supported = grounded._scripture_reference_is_supported
-_scripture_reference_key = grounded._scripture_reference_key
-_source_answer_label = grounded._source_answer_label
+_source_topic = grounded_facts._source_topic
 _title_is_source_understanding = grounded._title_is_source_understanding
-_title_requires_full_draft = grounded._title_requires_full_draft
+_title_requires_full_draft = grounded_facts._title_requires_full_draft
 _extract_agent_tool_calls = extract_agent_tool_calls
 
 
@@ -37,8 +38,8 @@ class _NumberedSectionSpan:
 
 
 @dataclass(frozen=True)
-class _LessonSubsection:
-    """One Markdown lesson subsection parsed from a full Draft section."""
+class _SourceSubsection:
+    """One Markdown source-slot subsection parsed from a full Draft section."""
 
     number: int
     start: int
@@ -72,21 +73,11 @@ _DRAFT_META_INSTRUCTION_PATTERN = re.compile(
     r"\b(?:this\s+paragraph\s+should|you\s+should\s+write)\b",
     re.IGNORECASE,
 )
-_INVENTED_RUBRIC_SCORE_PATTERN = re.compile(
-    r"(?:总分|满分)\s*[：:]?\s*\d+\s*分|"
-    r"(?:每项|每条|各项).{0,16}\d+\s*分|"
-    r"(?:达到|满足)?\s*\d+\s*分标准|"
-    r"\b(?:total|worth)\s*(?:of\s*)?\d+\s*(?:points?|marks?)\b",
-    re.IGNORECASE,
+_SOURCE_HEADING_PATTERN = re.compile(
+    r"(?im)^\s*(?:(?:#{2,6})\s+|\*\*\s*)(?P<label>[^\r\n]+?)(?:\*\*)?\s*$"
 )
-_LESSON_HEADING_PATTERN = re.compile(
-    r"(?im)^\s*(?:(?:#{2,6})\s+|\*\*\s*)"
-    r"(?P<label>"
-    r"第[一二三四五六七八九十百〇零两\d]+课|"
-    r"lesson[\s_-]*\d+"
-    r")"
-    r"(?P<title>[^\r\n]*?)(?:\*\*)?\s*$"
-)
+
+
 def _numbered_section_spans(
     answer: str,
     requested: dict[int, str],
@@ -125,8 +116,6 @@ def _numbered_section_spans(
 
     def style_score(item: tuple[str, list[re.Match[str]]]) -> tuple[int, int]:
         style, matches = item
-        # 原因：第 7 节等正文内部常用 ### 1 / ### 2 组织子项，旧逻辑会把它们误作顶层。
-        # 作用：优先选择覆盖最多请求编号的同级序列；数量相同时选择更浅的 Markdown 层级。
         level = int(style[1:]) if style.startswith("h") else 7
         return len(matches), -level
 
@@ -156,7 +145,7 @@ def _section_body_is_sufficient(body: str, title: str) -> bool:
     """Apply language-aware minimum substance checks without treating punctuation as content."""
     if not body or _SECTION_PLACEHOLDER_PATTERN.fullmatch(body):
         return False
-    cjk_characters = len(re.findall(r"[\u3400-\u9fff]", body))
+    cjk_characters = len(re.findall(r"[㐀-鿿]", body))
     latin_words = len(re.findall(r"[A-Za-z0-9_]+", body))
     combined_units = cjk_characters + latin_words
     list_items = len(_SECTION_LIST_ITEM_PATTERN.findall(body))
@@ -205,7 +194,6 @@ def _section_body_is_sufficient(body: str, title: str) -> bool:
         )
     )
     if is_full_draft:
-        # 中文以单字承载的语义密度高于空格分词英文；分别设门槛避免短中文报告被误拒。
         return cjk_characters >= 180 or latin_words >= 300 or combined_units >= 240
     if any(
         marker in normalized_title
@@ -217,8 +205,6 @@ def _section_body_is_sufficient(body: str, title: str) -> bool:
             or combined_units >= 48
             or list_items >= 4
         )
-    # 原因：简洁中文分析可能用十余字完成一个小节，通用 token 下限会把真实内容判成缺失。
-    # 作用：普通节只拒绝空白、占位符和极短敷衍文本；结构型清单可由两个实质条目通过。
     return (
         cjk_characters >= 12
         or latin_words >= 18
@@ -230,8 +216,11 @@ def _section_body_is_sufficient(body: str, title: str) -> bool:
 def _missing_requested_sections(
     answer: str,
     requested: dict[int, str],
+    *,
+    recipe: Any = None,
 ) -> dict[int, str]:
     """Return absent or placeholder-sized report sections from an explicit contract."""
+    del recipe
     if not requested:
         return {}
     spans = _numbered_section_spans(answer, requested)
@@ -260,18 +249,72 @@ def _collection_grounding_evidence(steps: list[dict[str, Any]]) -> str:
     return "\n\n".join(evidence)
 
 
-def _lesson_subsections(draft_body: str) -> tuple[_LessonSubsection, ...]:
-    """Parse only anchored Markdown lesson headings, never incidental prose mentions."""
-    matches = list(_LESSON_HEADING_PATTERN.finditer(draft_body))
-    subsections: list[_LessonSubsection] = []
-    for index, match in enumerate(matches):
-        number = _lesson_number_from_label(match.group("label"))
-        if number is None:
+def _source_subsections(
+    draft_body: str,
+    specs: tuple[_SourceGroundingSpec, ...],
+    recipe: Any,
+) -> tuple[_SourceSubsection, ...]:
+    """Parse only anchored source-slot headings, never incidental prose mentions."""
+    if not specs:
+        return ()
+    spec_by_label: dict[str, _SourceGroundingSpec] = {}
+    for spec in specs:
+        spec_by_label[spec.canonical_label.casefold()] = spec
+        for alias in recipe.item_aliases(spec.file_name):
+            spec_by_label[alias.casefold()] = spec
+
+    matches = list(_SOURCE_HEADING_PATTERN.finditer(draft_body))
+    # 原因：渲染稿中 **经文与主题：** 等加粗行也会命中通用标题正则，但并非来源槽位。
+    # 作用：先筛出能解析到 spec 的匹配，再以"下一个槽位"作为 body 边界，避免截断。
+    resolved_matches: list[re.Match[str]] = []
+    for match in matches:
+        label = match.group("label").strip()
+        normalized = label.casefold()
+        found_spec = next(
+            (
+                candidate_spec
+                for candidate, candidate_spec in spec_by_label.items()
+                if (
+                    normalized == candidate
+                    or normalized.startswith(candidate + "：")
+                    or normalized.startswith(candidate + ":")
+                    or normalized.startswith(candidate + "——")
+                    or normalized.startswith(candidate + "—")
+                )
+            ),
+            None,
+        )
+        if found_spec is not None:
+            resolved_matches.append(match)
+
+    subsections: list[_SourceSubsection] = []
+    for index, match in enumerate(resolved_matches):
+        label = match.group("label").strip()
+        normalized = label.casefold()
+        resolved_spec = next(
+            (
+                candidate_spec
+                for candidate, candidate_spec in spec_by_label.items()
+                if (
+                    normalized == candidate
+                    or normalized.startswith(candidate + "：")
+                    or normalized.startswith(candidate + ":")
+                    or normalized.startswith(candidate + "——")
+                    or normalized.startswith(candidate + "—")
+                )
+            ),
+            None,
+        )
+        if resolved_spec is None:
             continue
-        end = matches[index + 1].start() if index + 1 < len(matches) else len(draft_body)
+        end = (
+            resolved_matches[index + 1].start()
+            if index + 1 < len(resolved_matches)
+            else len(draft_body)
+        )
         subsections.append(
-            _LessonSubsection(
-                number=number,
+            _SourceSubsection(
+                number=resolved_spec.number,
                 start=match.start(),
                 end=end,
                 heading=match.group(0).strip(),
@@ -281,14 +324,14 @@ def _lesson_subsections(draft_body: str) -> tuple[_LessonSubsection, ...]:
     return tuple(subsections)
 
 
-def _lesson_candidate_issues(
-    subsection: _LessonSubsection,
-    spec: _LessonGroundingSpec,
-) -> tuple[str, ...]:
-    """Validate one generated lesson only against that lesson's own source facts."""
+def _base_candidate_issues(
+    subsection: _SourceSubsection,
+    spec: _SourceGroundingSpec,
+) -> list[str]:
+    """Generic per-slot substance checks shared by every recipe."""
     issues: list[str] = []
     combined = f"{subsection.heading}\n{subsection.body}"
-    cjk_characters = len(re.findall(r"[\u3400-\u9fff]", subsection.body))
+    cjk_characters = len(re.findall(r"[㐀-鿿]", subsection.body))
     latin_words = len(re.findall(r"[A-Za-z0-9_]+", subsection.body))
     if cjk_characters + latin_words < 55:
         issues.append("subsection is underdeveloped")
@@ -306,41 +349,34 @@ def _lesson_candidate_issues(
     ]
     if missing_topics:
         issues.append("missing exact source topic")
+    return issues
 
-    references = tuple(
-        match.group(0).strip()
-        for match in _SCRIPTURE_REFERENCE_PATTERN.finditer(combined)
-    )
-    if spec.allowed_scriptures:
-        if not references:
-            issues.append("missing source scripture")
-        unsupported = [
-            reference
-            for reference in references
-            if not _scripture_reference_is_supported(
-                _scripture_reference_key(reference),
-                spec.allowed_scriptures,
-            )
-        ]
-        if unsupported:
-            issues.append(
-                "scripture belongs outside this lesson: " + ", ".join(unsupported)
-            )
-    elif references:
-        issues.append("scripture was added without a source fact")
+
+def _source_candidate_issues(
+    subsection: _SourceSubsection,
+    spec: _SourceGroundingSpec,
+    recipe: Any,
+) -> tuple[str, ...]:
+    """Run generic plus recipe-specific per-slot checks against the source facts."""
+    issues = _base_candidate_issues(subsection, spec)
+    issues.extend(recipe.validate_candidate_issues(subsection, spec, recipe))
     return tuple(issues)
 
 
-def _lesson_slot_manifest(specs: tuple[_LessonGroundingSpec, ...]) -> str:
-    """Render the exact ordered lesson contract used by the model repair prompt."""
+def _source_slot_manifest(
+    specs: tuple[_SourceGroundingSpec, ...],
+    recipe: Any = None,
+) -> str:
+    """Render the exact ordered source-slot contract used by the model repair prompt."""
+    del recipe
     if not specs:
         return ""
-    lines = ["MANDATORY_LESSON_SLOTS (write each exactly once, in this order):"]
+    lines = ["MANDATORY_SOURCE_SLOTS (write each exactly once, in this order):"]
     for spec in specs:
         facts = [
             f"source={spec.file_name}",
             *spec.topic_lines,
-            *spec.scripture_lines,
+            *spec.passage_lines,
         ]
         lines.append(f"- {spec.canonical_label} | " + " | ".join(facts))
     return "\n".join(lines)
@@ -353,8 +389,10 @@ def _report_quality_issues(
     file_names: list[str],
     user_question: str,
     collection_evidence: str,
+    recipe: Any = None,
 ) -> dict[int, list[str]]:
     """Return source-grounding and exhaustive-deliverable defects by report section."""
+    recipe = recipe or default_recipe()
     if not requested or not collection_evidence:
         return {}
     spans = _numbered_section_spans(answer, requested)
@@ -365,21 +403,12 @@ def _report_quality_issues(
     def add(number: int, message: str) -> None:
         issues.setdefault(number, []).append(message)
 
-    if _ALL_SOURCE_REQUEST_PATTERN.search(user_question):
+    if recipe.all_source_request_pattern.search(user_question):
         understanding_number = next(
             (
                 number
                 for number, title in requested.items()
-                if any(
-                    marker in title.casefold()
-                    for marker in (
-                        "文档理解",
-                        "文件理解",
-                        "材料理解",
-                        "document understanding",
-                        "source understanding",
-                    )
-                )
+                if _title_is_source_understanding(title)
             ),
             None,
         )
@@ -402,56 +431,56 @@ def _report_quality_issues(
                     + ", ".join(missing_labels),
                 )
 
-    lesson_specs = _lesson_grounding_specs(file_names, collection_evidence)
+    source_specs = recipe.build_grounding_specs(file_names, collection_evidence)
     for number, title in requested.items():
         if not _title_requires_full_draft(title):
             continue
         span = spans.get(number)
         if span is None:
             continue
-        subsections = _lesson_subsections(span.body)
-        expected_numbers = [spec.number for spec in lesson_specs]
+        subsections = _source_subsections(span.body, source_specs, recipe)
+        expected_numbers = [spec.number for spec in source_specs]
         observed_numbers = [subsection.number for subsection in subsections]
         subsection_counts = {
-            lesson_number: observed_numbers.count(lesson_number)
-            for lesson_number in set(observed_numbers)
+            source_number: observed_numbers.count(source_number)
+            for source_number in set(observed_numbers)
         }
-        missing_lessons = [
+        missing_sources = [
             spec.canonical_label
-            for spec in lesson_specs
+            for spec in source_specs
             if subsection_counts.get(spec.number, 0) == 0
         ]
-        if missing_lessons:
+        if missing_sources:
             add(
                 number,
-                "the complete Draft must contain a substantive subsection for every lesson; "
-                "missing lesson labels: "
-                + ", ".join(missing_lessons),
+                "the complete Draft must contain a substantive subsection for every source; "
+                "missing source labels: "
+                + ", ".join(missing_sources),
             )
-        duplicate_lessons = [
+        duplicate_sources = [
             spec.canonical_label
-            for spec in lesson_specs
+            for spec in source_specs
             if subsection_counts.get(spec.number, 0) > 1
         ]
-        if duplicate_lessons:
+        if duplicate_sources:
             add(
                 number,
-                "each lesson must appear exactly once; duplicate lesson headings: "
-                + ", ".join(duplicate_lessons),
+                "each source must appear exactly once; duplicate source headings: "
+                + ", ".join(duplicate_sources),
             )
-        unexpected_lessons = sorted(
+        unexpected_sources = sorted(
             set(observed_numbers).difference(expected_numbers)
         )
-        if unexpected_lessons:
+        if unexpected_sources:
             add(
                 number,
-                "remove lesson headings that are not backed by selected sources: "
-                + ", ".join(str(value) for value in unexpected_lessons),
+                "remove source headings that are not backed by selected sources: "
+                + ", ".join(str(value) for value in unexpected_sources),
             )
         observed_expected = [
-            lesson_number
-            for lesson_number in observed_numbers
-            if lesson_number in expected_numbers
+            source_number
+            for source_number in observed_numbers
+            if source_number in expected_numbers
         ]
         if (
             len(observed_expected) == len(expected_numbers)
@@ -459,7 +488,7 @@ def _report_quality_issues(
         ):
             add(
                 number,
-                "lesson subsections must follow source lesson order; "
+                "source subsections must follow source order; "
                 f"expected={expected_numbers}, observed={observed_expected}",
             )
 
@@ -469,13 +498,13 @@ def _report_quality_issues(
                 for subsection in subsections
                 if subsection.number == spec.number
             ]
-            for spec in lesson_specs
+            for spec in source_specs
         }
-        for spec in lesson_specs:
+        for spec in source_specs:
             candidates = subsections_by_number[spec.number]
             if len(candidates) != 1:
                 continue
-            candidate_issues = _lesson_candidate_issues(candidates[0], spec)
+            candidate_issues = _source_candidate_issues(candidates[0], spec, recipe)
             if candidate_issues:
                 add(
                     number,
@@ -509,25 +538,24 @@ def _report_quality_issues(
         if boilerplate:
             add(
                 number,
-                "replace repeated cross-lesson boilerplate with source-specific analysis",
+                "replace repeated cross-source boilerplate with source-specific analysis",
             )
-        cjk_characters = len(re.findall(r"[\u3400-\u9fff]", span.body))
+        cjk_characters = len(re.findall(r"[㐀-鿿]", span.body))
         latin_words = len(re.findall(r"[A-Za-z0-9_]+", span.body))
-        minimum_units = max(160, len(lesson_specs) * 70)
+        minimum_units = max(160, len(source_specs) * 70)
         if cjk_characters + latin_words < minimum_units:
             add(
                 number,
                 f"the complete Draft is underdeveloped; provide at least {minimum_units} "
-                "substantive Chinese characters or words across the required lessons",
+                "substantive Chinese characters or words across the required sources",
             )
 
-    allowed_scriptures = {
+    quote_fact_key = re.escape(recipe.source_fact_labels.quote_fact_key)
+    quote_pattern = re.compile(rf"(?m)^-\s*{quote_fact_key}:\s*(.+)$")
+    allowed_references = {
         key
-        for line in re.findall(
-            r"(?m)^-\s*scripture_line:\s*(.+)$",
-            collection_evidence,
-        )
-        if (key := _scripture_reference_key(line)) is not None
+        for line in re.findall(quote_pattern, collection_evidence)
+        if (key := recipe.reference_key(line)) is not None
     }
     grounding_markers = (
         "文档理解",
@@ -541,10 +569,9 @@ def _report_quality_issues(
         "完整草稿",
         "生成",
     )
-    if allowed_scriptures:
+    if allowed_references:
         for number, span in spans.items():
             title = requested[number]
-            # 完整 Draft 已按课次使用各自来源的许可集检查，不能再退回全集 allowlist。
             if _title_requires_full_draft(title):
                 continue
             if not (
@@ -554,17 +581,17 @@ def _report_quality_issues(
             unsupported = sorted(
                 {
                     match.group(0).strip()
-                    for match in _SCRIPTURE_REFERENCE_PATTERN.finditer(span.body)
-                    if not _scripture_reference_is_supported(
-                        _scripture_reference_key(match.group(0)),
-                        allowed_scriptures,
+                    for match in recipe.reference_pattern.finditer(span.body)
+                    if not recipe.reference_is_supported(
+                        recipe.reference_key(match.group(0)),
+                        allowed_references,
                     )
                 }
             )
             if unsupported:
                 add(
                     number,
-                    "remove or correct scripture references absent from SOURCE_FACTS: "
+                    "remove or correct references absent from SOURCE_FACTS: "
                     + ", ".join(unsupported),
                 )
 
@@ -573,7 +600,7 @@ def _report_quality_issues(
             invented_scores = sorted(
                 {
                     match.group(0).strip()
-                    for match in _INVENTED_RUBRIC_SCORE_PATTERN.finditer(span.body)
+                    for match in recipe.invented_score_pattern.finditer(span.body)
                 }
             )
             if invented_scores:
@@ -586,19 +613,20 @@ def _report_quality_issues(
     return issues
 
 
-def _best_grounded_lesson_candidate(
+def _best_grounded_source_candidate(
     *,
     refinement_body: str,
     original_body: str,
-    spec: _LessonGroundingSpec,
-) -> _LessonSubsection | None:
+    spec: _SourceGroundingSpec,
+    recipe: Any,
+) -> _SourceSubsection | None:
     """Prefer a valid repaired candidate, then a valid original candidate."""
     for draft_body in (refinement_body, original_body):
         candidates = [
             subsection
-            for subsection in _lesson_subsections(draft_body)
+            for subsection in _source_subsections(draft_body, (spec,), recipe)
             if subsection.number == spec.number
-            and not _lesson_candidate_issues(subsection, spec)
+            and not _source_candidate_issues(subsection, spec, recipe)
         ]
         if candidates:
             return max(
@@ -608,25 +636,27 @@ def _best_grounded_lesson_candidate(
     return None
 
 
-def _merge_full_draft_lesson_slots(
+def _merge_full_draft_source_slots(
     *,
     original_body: str,
     refinement_body: str,
-    specs: tuple[_LessonGroundingSpec, ...],
+    specs: tuple[_SourceGroundingSpec, ...],
+    recipe: Any,
 ) -> str:
-    """Rebuild a Draft from one canonical, ordered, source-grounded slot per lesson."""
+    """Rebuild a Draft from one canonical, ordered, source-grounded slot per source."""
     rendered: list[str] = []
     for spec in specs:
-        candidate = _best_grounded_lesson_candidate(
+        candidate = _best_grounded_source_candidate(
             refinement_body=refinement_body,
             original_body=original_body,
             spec=spec,
+            recipe=recipe,
         )
         if candidate is None:
-            rendered.append(_render_grounded_lesson_fallback(spec))
+            rendered.append(recipe.render_fallback(spec))
             continue
         rendered.append(
-            f"{_canonical_lesson_heading(spec)}\n\n{candidate.body.strip()}"
+            f"{recipe.render_item_heading(spec)}\n\n{candidate.body.strip()}"
         )
     return "\n\n".join(rendered)
 
@@ -652,9 +682,11 @@ def _apply_grounded_report_fallbacks(
     quality_issues: dict[int, list[str]],
     file_names: list[str],
     collection_evidence: str,
-    lesson_specs: tuple[_LessonGroundingSpec, ...],
+    source_specs: tuple[_SourceGroundingSpec, ...],
+    recipe: Any = None,
 ) -> str:
-    """Deterministically repair source inventory and lesson slots after model formatting drift."""
+    """Deterministically repair source inventory and source slots after formatting drift."""
+    recipe = recipe or default_recipe()
     spans = _numbered_section_spans(answer, requested)
     edits: list[tuple[int, int, str]] = []
     for number, title in target_sections.items():
@@ -662,17 +694,19 @@ def _apply_grounded_report_fallbacks(
         if span is None or number not in quality_issues:
             continue
         body = span.body
-        if _title_requires_full_draft(title) and lesson_specs:
-            body = _merge_full_draft_lesson_slots(
+        if _title_requires_full_draft(title) and source_specs:
+            body = _merge_full_draft_source_slots(
                 original_body=span.body,
                 refinement_body=refinement,
-                specs=lesson_specs,
+                specs=source_specs,
+                recipe=recipe,
             )
         elif _title_is_source_understanding(title):
             inventory = _render_grounded_source_inventory(
                 file_names=file_names,
                 collection_evidence=collection_evidence,
                 existing_body=body,
+                recipe=recipe,
             )
             if inventory:
                 body = f"{body.rstrip()}\n\n{inventory}"
@@ -710,15 +744,16 @@ def _merge_numbered_section_refinement(
     refinement: str,
     requested: dict[int, str],
     target_sections: dict[int, str],
-    lesson_specs: tuple[_LessonGroundingSpec, ...] = (),
+    source_specs: tuple[_SourceGroundingSpec, ...] = (),
+    recipe: Any = None,
 ) -> str:
     """Replace only requested deficient sections while retaining accepted answer sections."""
+    recipe = recipe or default_recipe()
     original_spans = _numbered_section_spans(original, requested)
     refinement_spans = _numbered_section_spans(refinement, target_sections)
     if not refinement_spans:
         return original
 
-    # A response with no contract headings has no reliable boundary for a safe merge.
     if not original_spans:
         return "\n\n".join(
             refinement[refinement_spans[number].start : refinement_spans[number].end].strip()
@@ -737,12 +772,13 @@ def _merge_numbered_section_refinement(
             refinement_span.start : refinement_span.end
         ].strip()
         original_span = original_spans.get(number)
-        if _title_requires_full_draft(requested[number]) and lesson_specs:
+        if _title_requires_full_draft(requested[number]) and source_specs:
             original_body = original_span.body if original_span is not None else ""
-            lesson_body = _merge_full_draft_lesson_slots(
+            source_body = _merge_full_draft_source_slots(
                 original_body=original_body,
                 refinement_body=refinement_span.body,
-                specs=lesson_specs,
+                specs=source_specs,
+                recipe=recipe,
             )
             heading_source = (
                 original[original_span.start : original_span.end].strip()
@@ -754,7 +790,7 @@ def _merge_numbered_section_refinement(
                 for line in heading_source.splitlines()
                 if line.strip()
             )
-            replacement = f"{heading}\n\n{lesson_body}"
+            replacement = f"{heading}\n\n{source_body}"
         else:
             replacement = refinement_segment
         if original_span is not None:
@@ -786,7 +822,6 @@ def _merge_numbered_section_refinement(
         edits.append((insert_at, insert_at, insertion))
 
     merged = original
-    # 同一位置先替换既有不足节，再插入它前面的缺失节，避免偏移或次序反转。
     for start, end, replacement in sorted(
         edits,
         key=lambda edit: (edit[0], edit[1]),

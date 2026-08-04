@@ -558,6 +558,73 @@ class AnalysisServiceTests(unittest.TestCase):
                 any("本地证据合成" in step for step in outcome.debug_steps)
             )
 
+    def test_analyze_uploaded_files_propagates_recipe_to_runner_and_collection_tool(self) -> None:
+        """Selecting a recipe at the service entry reaches both the runner and tool builder."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            lesson_21 = root / "lesson-21.md"
+            lesson_22 = root / "lesson-22.md"
+            lesson_21.write_text(
+                "# Lesson 21\n\nTitle: Active humility\n\n"
+                "The source distinguishes humility from self-erasure.",
+                encoding="utf-8",
+            )
+            lesson_22.write_text(
+                "# Lesson 22\n\nTitle: Free obedience\n\n"
+                "The source distinguishes trust from blind compliance.",
+                encoding="utf-8",
+            )
+            settings = SmolagentsModelSettings(
+                model_id="online-model",
+                base_url="http://127.0.0.1:9999/v1",
+            )
+            captured: dict[str, object] = {}
+
+            def fake_runner(**kwargs):
+                captured["runner_recipe"] = kwargs.get("recipe")
+                return DocumentAnalysisRun(
+                    answer="Recipe-aware analysis completed.",
+                    debug_steps=["analysis finished"],
+                    tool_calls=[],
+                    inspected_file_names=("lesson-21.md", "lesson-22.md"),
+                )
+
+            from qwopus_agent.reports.bible_recipe import BIBLE_RECIPE
+
+            with (
+                patch(
+                    "qwopus_agent.services.analysis_service.resolve_model_settings",
+                    side_effect=lambda current: current,
+                ),
+                patch(
+                    "qwopus_agent.services.analysis_service.check_model_connection",
+                    return_value=(True, "online"),
+                ),
+                patch(
+                    "qwopus_agent.services.analysis_service.run_smolagents_file_analysis_with_debug",
+                    side_effect=fake_runner,
+                ),
+                patch(
+                    "qwopus_agent.services.analysis_service.build_document_collection_summary_tool"
+                ) as build_collection_tool,
+            ):
+                outcome = analyze_uploaded_files(
+                    uploaded_files=[
+                        UploadedFileInput(name="lesson-21.md", local_path=lesson_21),
+                        UploadedFileInput(name="lesson-22.md", local_path=lesson_22),
+                    ],
+                    user_question="Compare both files",
+                    settings=settings,
+                    minirag=None,
+                    analysis_mode="full",
+                    recipe=BIBLE_RECIPE,
+                )
+
+            self.assertEqual(outcome.result.llm_analysis, "Recipe-aware analysis completed.")
+            self.assertIs(captured["runner_recipe"], BIBLE_RECIPE)
+            _, tool_kwargs = build_collection_tool.call_args
+            self.assertIs(tool_kwargs.get("recipe"), BIBLE_RECIPE)
+
 
 if __name__ == "__main__":
     unittest.main()

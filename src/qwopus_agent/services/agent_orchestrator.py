@@ -580,6 +580,7 @@ class AgentOrchestrator:
             "selected_sections": request.selected_sections,
             "analysis_mode": request.analysis_mode,
             "response_detail": request.response_detail,
+            "recipe": None,
         }
         if self.document_store is not None:
             analysis_options["document_store"] = self.document_store
