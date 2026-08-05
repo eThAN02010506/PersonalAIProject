@@ -153,6 +153,7 @@ def build_document_router(
             min_source_relevance=payload.min_source_relevance,
             response_detail=payload.response_detail,
             analysis_mode=payload.analysis_mode,
+            recipe=payload.recipe,
             selected_sections=payload.selected_sections,
             report_title="Qwopus Saved Documents Analysis",
             report_basename=f"qwopus_saved_documents_analysis_{uuid4().hex[:12]}",

@@ -831,6 +831,37 @@ class ApiTests(unittest.TestCase):
         read_uploads.assert_not_awaited()
         orchestrator.assert_not_called()
 
+    def test_upload_analysis_rejects_unknown_recipe_before_orchestration(self) -> None:
+        conversation_id = self.client.post(
+            "/api/conversations",
+            json={"title": "Documents"},
+        ).json()["id"]
+
+        with (
+            patch(
+                "qwopus_agent.api.routes.analysis._read_uploads",
+                new_callable=AsyncMock,
+            ) as read_uploads,
+            patch(
+                "qwopus_agent.api.routes.analysis.AgentOrchestrator"
+            ) as orchestrator,
+        ):
+            response = self.client.post(
+                "/api/analysis",
+                files={"files": ("sample.txt", b"content", "text/plain")},
+                data={
+                    "conversation_id": conversation_id,
+                    "question": "Summarize",
+                    "recipe": "unknown",
+                },
+            )
+
+        # 原因：未知 recipe 名称必须在请求边界被 Literal 校验拒绝，不能落到编排层。
+        # 作用：锁定 recipe 选择器 fail-closed，避免拼写错误静默退化为默认配方。
+        self.assertEqual(response.status_code, 422)
+        read_uploads.assert_not_awaited()
+        orchestrator.assert_not_called()
+
     def test_model_settings_switches_remote_endpoint_without_env_changes(self) -> None:
         response = self.client.put(
             "/api/model-settings",
@@ -891,6 +922,7 @@ class ApiTests(unittest.TestCase):
                     "question": "Summarize",
                     "min_source_relevance": "0.8",
                     "analysis_mode": "section",
+                    "recipe": "bible",
                     "selected_sections": (
                         f'{{"{structure.document_id}":["{structure.sections[0].id}"]}}'
                     ),
@@ -920,6 +952,7 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(request.uploaded_files[0].content, b"real bytes")
         self.assertEqual(request.min_source_relevance, 0.8)
         self.assertEqual(request.analysis_mode, "section")
+        self.assertEqual(request.recipe, "bible")
         self.assertEqual(
             request.selected_sections[structure.document_id],
             (structure.sections[0].id,),

@@ -24,6 +24,7 @@ from qwopus_agent.integrations.smolagents_runtime import (
     run_agent_chat_turn_with_debug,
 )
 from qwopus_agent.memory import DEFAULT_CONVERSATION_KNOWLEDGE_ROOT
+from qwopus_agent.reports.recipe import recipe_from_name
 from qwopus_agent.services.answer_pipeline import (
     build_answer_plan,
     build_evidence_ledger,
@@ -580,7 +581,7 @@ class AgentOrchestrator:
             "selected_sections": request.selected_sections,
             "analysis_mode": request.analysis_mode,
             "response_detail": request.response_detail,
-            "recipe": None,
+            "recipe": recipe_from_name(request.recipe),
         }
         if self.document_store is not None:
             analysis_options["document_store"] = self.document_store

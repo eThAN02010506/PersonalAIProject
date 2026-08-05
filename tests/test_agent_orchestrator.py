@@ -14,6 +14,7 @@ from qwopus_agent.integrations.smolagents_runtime import (
     ChatAgentRun,
     SmolagentsModelSettings,
 )
+from qwopus_agent.reports.bible_recipe import BIBLE_RECIPE
 from qwopus_agent.services.agent_orchestrator import (
     AgentOrchestrator,
     _CapabilityResult,
@@ -927,7 +928,10 @@ class AgentOrchestratorTests(unittest.TestCase):
             llm_analysis="document answer",
         )
 
-        def fake_analysis(**_kwargs):
+        captured: dict[str, object] = {}
+
+        def fake_analysis(**kwargs):
+            captured["recipe"] = kwargs.get("recipe")
             return SimpleNamespace(
                 result=local_result,
                 debug_steps=["local parse completed"],
@@ -966,6 +970,7 @@ class AgentOrchestratorTests(unittest.TestCase):
                             OrchestrationFile(name="notes.txt", content=b"notes"),
                         ),
                         generate_report=True,
+                        recipe="bible",
                     )
                 )
             )
@@ -973,6 +978,9 @@ class AgentOrchestratorTests(unittest.TestCase):
         self.assertEqual(result.route, "multi_agent")
         self.assertIs(result.analysis_result, local_result)
         self.assertIs(result.report, report)
+        # 原因：用户选择的 recipe 名称必须在编排层解析为可用的 ReportRecipe 实例。
+        # 作用：锁定字符串选择器到 BIBLE_RECIPE 的解析边界。
+        self.assertIs(captured["recipe"], BIBLE_RECIPE)
         self.assertIn("notes.txt", result.final_answer)
         self.assertEqual(list(generator.kwargs["tables"]), ["summary"])
         self.assertEqual(

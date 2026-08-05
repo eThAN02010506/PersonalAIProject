@@ -26,6 +26,7 @@ class ConversationTurn(BaseModel):
 
 InterpretationMode = Literal["precise", "contextual", "exploratory"]
 AgentOutputRole = Literal["final", "evidence", "review"]
+RecipeName = Literal["generic", "bible"]
 DEFAULT_MAX_EVIDENCE_SOURCES = 12
 MAX_EVIDENCE_SOURCES = 20
 TaskType = Literal[
@@ -196,6 +197,9 @@ class OrchestrationRequest(BaseModel):
     # 原因：问题检索、章节阅读和全文总结需要不同的工具策略。
     # 作用：把用户选择作为请求数据传入 Agent，而不是由前端改写自然语言问题。
     analysis_mode: Literal["question", "section", "full"] = "question"
+    # 原因：不同文档集合需要不同的报告 recipe，不能进程级全局固定。
+    # 作用：把用户选择的 recipe 名称作为单次请求数据传入，由编排层解析为 ReportRecipe。
+    recipe: RecipeName = "generic"
     # 原因：章节选择属于单次请求范围，不能写入进程级全局状态。
     # 作用：键为文档 id、值为章节 id，文档工具据此限制可读证据。
     selected_sections: dict[str, tuple[str, ...]] = Field(default_factory=dict)

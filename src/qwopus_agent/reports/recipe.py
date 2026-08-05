@@ -28,6 +28,7 @@ __all__ = [
     "SectionKind",
     "SourceFactLabels",
     "default_recipe",
+    "recipe_from_name",
 ]
 
 
@@ -130,3 +131,14 @@ def set_default_recipe(recipe: ReportRecipe) -> None:
     """Replace the process-wide generic recipe (used by tests and embedding)."""
     global _default_recipe
     _default_recipe = recipe
+
+
+def recipe_from_name(name: str) -> ReportRecipe:
+    """Resolve one stable recipe name to its process-wide ReportRecipe."""
+    if name == "generic":
+        return default_recipe()
+    if name == "bible":
+        from qwopus_agent.reports.bible_recipe import BIBLE_RECIPE
+
+        return BIBLE_RECIPE
+    raise ValueError(f"Unknown report recipe: {name!r}")

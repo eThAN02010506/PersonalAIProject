@@ -19,6 +19,15 @@ from qwopus_agent.reports.grounded import (
     DEFAULT_RECIPE,
     _render_deterministic_grounded_report,
 )
+from qwopus_agent.reports.recipe import default_recipe, recipe_from_name
+
+
+class RecipeNameTests(unittest.TestCase):
+    def test_recipe_from_name_resolves_both_names(self) -> None:
+        self.assertIs(recipe_from_name("generic"), default_recipe())
+        self.assertIs(recipe_from_name("bible"), BIBLE_RECIPE)
+        with self.assertRaisesRegex(ValueError, "Unknown report recipe"):
+            recipe_from_name("unknown")
 
 
 def _generic_prompt() -> str:
@@ -189,7 +198,11 @@ class BibleRecipeTests(unittest.TestCase):
         )
         messages = issues.get(1, [])
         self.assertTrue(
-            any("remove or correct references absent from SOURCE_FACTS" in message for message in messages),
+            any(
+                "remove or correct references absent from SOURCE_FACTS"
+                in message
+                for message in messages
+            ),
             f"expected an unsourced-reference issue, got: {messages}",
         )
 
