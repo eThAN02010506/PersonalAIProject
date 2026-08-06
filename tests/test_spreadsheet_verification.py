@@ -192,6 +192,71 @@ class VerificationEndToEndTests(unittest.TestCase):
         self.assertEqual(result, "")
         self.assertIn("excel_statistics", missing_tools)
 
+    def test_local_comparison_values_reads_rows_and_tables(self) -> None:
+        # 回归测试：describe 的 mean 在 rows，regression 的 r_squared 在 tables，
+        # ANOVA 的 p_value 在 tables 且必须过滤 NaN 行。
+        import qwopus_agent.integrations.spreadsheet_verification as module
+
+        # describe → mean 在 rows
+        describe = module._run_local_method(
+            "excel_statistics",
+            "describe",
+            self.path,
+            "计算 Sepal.Length 的均值",
+        )
+        mean_values = module._local_comparison_values("describe", describe.data)
+        self.assertTrue(mean_values)
+        self.assertAlmostEqual(mean_values[0], self.true_mean, places=3)
+
+        # iqr_outliers → outlier_count 在 details
+        iqr = module._run_local_method(
+            "excel_statistics",
+            "iqr_outliers",
+            self.path,
+            "Sepal.Length IQR 离群点",
+        )
+        self.assertEqual(module._local_comparison_values("iqr_outliers", iqr.data), (0.0,))
+
+        # linear_regression → r_squared 在 named tables
+        with tempfile.TemporaryDirectory() as tmpdir:
+            regression_path = Path(tmpdir) / "regression.xlsx"
+            pd.DataFrame(
+                {
+                    "y": [2.0, 3.0, 4.0, 5.0, 6.0],
+                    "x": [1.0, 2.0, 3.0, 4.0, 5.0],
+                }
+            ).to_excel(regression_path, index=False)
+            regression = module._run_local_method(
+                "excel_modeling",
+                "linear_regression",
+                regression_path,
+                "回归 y 对 x",
+            )
+            r_squared = module._local_comparison_values(
+                "linear_regression", regression.data
+            )
+            self.assertTrue(r_squared)
+            self.assertGreater(r_squared[0], 0.9)  # 完全线性数据 R² 应接近 1
+
+        # one_way_anova → p_value 在 ANOVA 表，且不含 NaN 行
+        with tempfile.TemporaryDirectory() as tmpdir:
+            anova_path = Path(tmpdir) / "anova.xlsx"
+            pd.DataFrame(
+                {
+                    "Sepal.Length": [5.1, 4.9, 5.8, 6.4, 5.5, 6.0, 5.2, 4.8],
+                    "Species": ["a", "a", "a", "b", "b", "b", "c", "c"],
+                }
+            ).to_excel(anova_path, index=False)
+            anova = module._run_local_method(
+                "excel_modeling",
+                "one_way_anova",
+                anova_path,
+                "按 Species 对 Sepal.Length 做方差分析",
+            )
+            anova_values = module._local_comparison_values("one_way_anova", anova.data)
+            self.assertTrue(anova_values)
+            self.assertTrue(all(value == value for value in anova_values))  # 无 NaN
+
 
 if __name__ == "__main__":
     unittest.main()

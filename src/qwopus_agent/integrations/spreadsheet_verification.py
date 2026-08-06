@@ -227,7 +227,15 @@ def _derive_arguments(
             ),
             non_numeric_columns[0] if non_numeric_columns else "",
         )
-        return {"group_column": group}
+        outcome = next(
+            (
+                column
+                for column in numeric_columns
+                if column.casefold() in lowered
+            ),
+            numeric_columns[0] if numeric_columns else "",
+        )
+        return {"outcome_column": outcome, "group_column": group}
     named = [
         column
         for column in numeric_columns
@@ -292,7 +300,7 @@ _VERIFIABLE_METHODS = {
     "normality_test": "p_value",
     "chi_square_independence": "p_value",
     "linear_regression": "r_squared",
-    "one_way_anova": "f_p_value",
+    "one_way_anova": "p_value",
     "one_sample_t_test": "p_value",
     "mean_confidence_interval": "ci_lower",
 }
@@ -314,10 +322,6 @@ _COMPARISON_EXTRACTORS = {
     "r_squared": re.compile(
         r"(?:r.?squared|R²|r²)\D{0,12}?(\d[\d.]*)", re.I
     ),
-    "f_p_value": re.compile(
-        r"(?:f[- ]?p|p[- ]?value|p值)\D{0,12}?(\d*\.?\d+(?:e-?\d+)?)",
-        re.I,
-    ),
     "ci_lower": re.compile(r"ci[-_ ]?lower\D{0,12}?(-?\d[\d,.]*)", re.I),
 }
 
@@ -336,39 +340,42 @@ def _local_comparison_values(
     method_name: str,
     data: dict[str, Any],
 ) -> tuple[float, ...] | None:
-    """Extract the local numeric value(s) to compare against for a method."""
-    details = data.get("details")
-    if not isinstance(details, dict):
-        return None
+    """Extract the local numeric value(s) to compare against for a method.
+
+    统计方法的 headline 值(mean/p_value/ci_lower/r_squared/outlier_count)通常
+    在结果表 rows 里,建模方法的 r_squared/f_p_value 在 named tables 里。依次
+    从 rows、named tables、details 收集。
+    """
     key = _VERIFIABLE_METHODS[method_name]
-    if key == "outlier_count":
-        value = details.get("outlier_count")
-        return (float(value),) if isinstance(value, (int, float)) else None
-    if key == "p_value":
-        value = details.get("p_value")
-        return (float(value),) if isinstance(value, (int, float)) else None
-    if key == "f_p_value":
-        value = details.get("f_p_value")
-        return (float(value),) if isinstance(value, (int, float)) else None
-    if key == "r_squared":
-        value = details.get("r_squared")
-        return (float(value),) if isinstance(value, (int, float)) else None
-    if key == "missing":
-        value = details.get("missing_count") or details.get("missing")
-        return (float(value),) if isinstance(value, (int, float)) else None
-    if key == "ci_lower":
-        value = details.get("ci_lower")
-        return (float(value),) if isinstance(value, (int, float)) else None
-    if key in {"mean", "median"}:
-        rows = data.get("rows")
-        if not isinstance(rows, list):
-            return None
-        values: list[float] = []
-        for row in rows:
-            value = row.get(key)
-            if isinstance(value, (int, float)):
-                values.append(float(value))
-        return tuple(values) if values else None
+    details = data.get("details")
+    rows = data.get("rows")
+    if isinstance(rows, list):
+        row_values = [
+            float(value)
+            for row in rows
+            if isinstance(row, dict)
+            and isinstance((value := row.get(key)), (int, float))
+            and float(value) == float(value)
+        ]
+        if row_values:
+            return tuple(row_values)
+    tables = data.get("tables")
+    if isinstance(tables, dict):
+        table_values: list[float] = []
+        for table in tables.values():
+            if not isinstance(table, list):
+                continue
+            for row in table:
+                if isinstance(row, dict) and isinstance(
+                    (value := row.get(key)), (int, float)
+                ) and float(value) == float(value):
+                    table_values.append(float(value))
+        if table_values:
+            return tuple(table_values)
+    if isinstance(details, dict):
+        value = details.get(key)
+        if isinstance(value, (int, float)):
+            return (float(value),)
     return None
 
 
