@@ -119,7 +119,8 @@ class VerificationEndToEndTests(unittest.TestCase):
         )
         self.assertIn("复核 describe", prose)
 
-    def test_verify_one_method_rejects_wrong_self_computed_mean(self) -> None:
+    def test_verify_one_method_degrades_on_wrong_self_computed_mean(self) -> None:
+        # B：本地复算成功但值不匹配时降级为展示本地核验表，不再引用模型自算值。
         narrative = "Sepal.Length 的平均值是 6.2。"
         result = verify_one_method(
             ("excel_statistics", "describe"),
@@ -129,9 +130,13 @@ class VerificationEndToEndTests(unittest.TestCase):
             narrative=narrative,
             debug_steps=[],
         )
-        self.assertIsNone(result)
+        self.assertIsNotNone(result)
+        synthetic_step, prose = result
+        self.assertIn("重新计算", prose)
+        self.assertNotIn("6.2", prose)
 
-    def test_verify_one_method_returns_none_without_number(self) -> None:
+    def test_verify_one_method_degrades_without_number(self) -> None:
+        # B：模型没写数字时同样降级为本地核验表，而不是 fail-closed。
         narrative = "数据分布看起来比较集中。"
         result = verify_one_method(
             ("excel_statistics", "describe"),
@@ -141,7 +146,9 @@ class VerificationEndToEndTests(unittest.TestCase):
             narrative=narrative,
             debug_steps=[],
         )
-        self.assertIsNone(result)
+        self.assertIsNotNone(result)
+        synthetic_step, prose = result
+        self.assertIn("重新计算", prose)
 
     def test_local_verify_appends_step_and_discards_missing_tool(self) -> None:
         steps = [
@@ -171,7 +178,8 @@ class VerificationEndToEndTests(unittest.TestCase):
             "excel_statistics",
         )
 
-    def test_local_verify_keeps_missing_tool_on_mismatch(self) -> None:
+    def test_local_verify_degrades_and_discards_missing_tool_on_mismatch(self) -> None:
+        # B：自算值错误时本地复算成功即降级接受，missing_tool 被清掉。
         steps = [
             {
                 "step_number": 1,
@@ -189,8 +197,8 @@ class VerificationEndToEndTests(unittest.TestCase):
             required_spreadsheet_methods=(("excel_statistics", "describe"),),
             debug_steps=[],
         )
-        self.assertEqual(result, "")
-        self.assertIn("excel_statistics", missing_tools)
+        self.assertTrue(result)
+        self.assertNotIn("excel_statistics", missing_tools)
 
     def test_local_comparison_values_reads_rows_and_tables(self) -> None:
         # 回归测试：describe 的 mean 在 rows，regression 的 r_squared 在 tables，
@@ -256,6 +264,78 @@ class VerificationEndToEndTests(unittest.TestCase):
             anova_values = module._local_comparison_values("one_way_anova", anova.data)
             self.assertTrue(anova_values)
             self.assertTrue(all(value == value for value in anova_values))  # 无 NaN
+
+    def test_schema_targets_parses_table_and_columns(self) -> None:
+        import qwopus_agent.integrations.spreadsheet_verification as module
+
+        steps = [
+            {
+                "step_number": 1,
+                "observations": (
+                    "# Spreadsheet Analysis: iris.xlsx\n"
+                    "## Sheet: Sheet1\n"
+                    "- Rows: 150\n"
+                    "- Column names: Sepal.Length, Sepal.Width, Species\n"
+                ),
+                "tool_calls": [
+                    {"function": {"name": "excel_schema", "arguments": {}}}
+                ],
+            }
+        ]
+        targets = module._schema_targets(steps)
+        self.assertIn("Sheet1", targets)
+        self.assertIn("Sepal.Length", targets["Sheet1"])
+        self.assertIn("Species", targets["Sheet1"])
+
+    def test_choose_table_prefers_schema_table_name(self) -> None:
+        import pandas as pd
+
+        import qwopus_agent.integrations.spreadsheet_verification as module
+
+        frames = {
+            "Data::table_1": pd.DataFrame({"value": [1, 2]}),
+            "Sheet1": pd.DataFrame({"Sepal.Length": [5.1], "Species": ["a"]}),
+        }
+        chosen = module._choose_table(
+            frames,
+            "分析 Sheet1 的数据",
+            {"Sheet1": ["Sepal.Length", "Species"]},
+        )
+        self.assertEqual(chosen, "Sheet1")
+
+    def test_verify_prefers_schema_columns_for_value_columns(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "multi.xlsx"
+            pd.DataFrame(
+                {
+                    "Sepal.Length": [5.1, 4.9, 5.8, 6.4, 5.5],
+                    "Sepal.Width": [3.5, 3.0, 3.2, 3.1, 2.8],
+                }
+            ).to_excel(path, index=False)
+            schema_steps = [
+                {
+                    "step_number": 1,
+                    "observations": (
+                        "# Spreadsheet Analysis: multi.xlsx\n"
+                        "## Sheet: Sheet1\n"
+                        "- Column names: Sepal.Length, Sepal.Width\n"
+                    ),
+                    "tool_calls": [
+                        {"function": {"name": "excel_schema", "arguments": {}}}
+                    ],
+                }
+            ]
+            narrative = "Sepal.Length 的平均值是 5.54。"
+            result = verify_one_method(
+                ("excel_statistics", "describe"),
+                spreadsheet_names=["multi.xlsx"],
+                spreadsheet_paths={"multi.xlsx": path},
+                user_question="计算 Sepal.Length 的平均值",
+                narrative=narrative,
+                debug_steps=[],
+                steps=schema_steps,
+            )
+            self.assertIsNotNone(result)
 
 
 if __name__ == "__main__":

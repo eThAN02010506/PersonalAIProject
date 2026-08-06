@@ -4,8 +4,10 @@ When a weak model writes numeric statistics (mean, IQR outlier count, p-value,
 R-squared) in its final answer without calling the local Skill tools, the
 runtime currently fail-closes.  This module lets the runtime re-compute the
 required method locally and accept the answer when the model's claimed prose
-value matches the local result within tolerance.  Mismatches and missing
-numbers stay fail-closed: the final tables always come from the local Skill.
+value matches the local result within tolerance.  When the local recompute
+succeeds but the claimed value is missing or mismatched, the runtime degrades
+to showing the verified local table instead of failing.  Only a failed local
+recompute stays fail-closed: the final tables always come from the local Skill.
 """
 
 from __future__ import annotations
@@ -16,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from qwopus_agent.analysis.excel_processing import read_spreadsheet
+from qwopus_agent.integrations import smolagents_debug
 from qwopus_agent.skills import SkillRequest
 from qwopus_agent.skills.base import BaseSkill
 from qwopus_agent.skills.excel_modeling import ExcelModelingSkill
@@ -40,9 +43,10 @@ def local_verify_missing_spreadsheet_methods(
 ) -> str:
     """Recompute each still-missing required method and verify the model's prose value.
 
-    Returns a replacement narrative sentence when at least one method verified;
-    appends the synthetic tool step and discards the missing tool so the local
-    table reaches the final answer.  Returns ``""`` when nothing verified.
+    Returns a replacement narrative sentence when at least one method verified
+    or degraded to a local table; appends the synthetic tool step and discards
+    the missing tool so the local table reaches the final answer.  Returns
+    ``""`` when nothing could be recomputed.
     """
     if not spreadsheet_paths:
         return ""
@@ -60,6 +64,7 @@ def local_verify_missing_spreadsheet_methods(
             narrative=model_narrative,
             debug_steps=debug_steps,
             step_number=len(steps),
+            steps=steps,
         )
         if verified is None:
             continue
@@ -80,16 +85,20 @@ def verify_one_method(
     narrative: str,
     debug_steps: list[str],
     step_number: int = 0,
+    steps: list[dict[str, Any]] | None = None,
 ) -> tuple[dict[str, Any], str] | None:
-    """Recompute one required method and compare against the model's prose claim.
+    """Recompute one required method and accept when locally recomputable.
 
-    Returns ``(synthetic_step, prose)`` when the local value matches a number the
-    model stated, else ``None`` (fail-closed).  The prose is a short sentence the
-    runner can substitute as the final answer narrative.
+    Returns ``(synthetic_step, prose)`` when the local recompute succeeds:
+    with a verified prose when the model's claimed value matches, or a
+    degraded prose that shows the local table without citing the model's value
+    when the claim is missing or mismatched.  Returns ``None`` only when the
+    local recompute itself fails (no trusted table can be provided).
     """
     tool_name, method_name = method
     if method_name not in _VERIFIABLE_METHODS:
         return None
+    schema_targets = _schema_targets(steps or [])
     for spreadsheet_name in spreadsheet_names:
         path = spreadsheet_paths.get(spreadsheet_name)
         if path is None:
@@ -100,6 +109,7 @@ def verify_one_method(
                 method_name,
                 path,
                 user_question,
+                schema_targets=schema_targets,
             )
         except (OSError, ValueError, TypeError) as exc:
             debug_steps.append(
@@ -107,12 +117,12 @@ def verify_one_method(
             )
             continue
         if not response.success or not response.data:
+            debug_steps.append(
+                f"本地校验复算无结果：{spreadsheet_name} / {method_name}"
+            )
             continue
         local_values = _local_comparison_values(method_name, response.data)
         if not local_values:
-            continue
-        claimed = _extract_claimed_value(method_name, narrative)
-        if claimed is None or not _values_match(local_values, claimed):
             continue
         synthetic_step = {
             "step_number": step_number + 1,
@@ -129,15 +139,60 @@ def verify_one_method(
                 }
             ],
         }
-        prose = (
-            f"已在 {spreadsheet_name} 上复核 {method_name}："
-            f"{_prose_claim(method_name, claimed)}。"
-        )
-        debug_steps.append(
-            f"本地校验通过：{spreadsheet_name} / {method_name} / 自算值与本地复算一致"
-        )
+        claimed = _extract_claimed_value(method_name, narrative)
+        if claimed is not None and _values_match(local_values, claimed):
+            prose = (
+                f"已在 {spreadsheet_name} 上复核 {method_name}："
+                f"{_prose_claim(method_name, claimed)}。"
+            )
+            debug_steps.append(
+                f"本地校验通过：{spreadsheet_name} / {method_name} / "
+                "自算值与本地复算一致"
+            )
+        else:
+            # 原因：模型自算值缺失或与本地不符，但本地复算已成功。
+            # 作用：降级为展示本地核验表，不再引用模型自算值，避免用户拿到报错。
+            prose = (
+                f"已在 {spreadsheet_name} 上按 {method_name} 重新计算，"
+                "核验表见下方。"
+            )
+            debug_steps.append(
+                f"本地校验降级：{spreadsheet_name} / {method_name} / "
+                "自算值缺失或不符，改用本地核验表"
+            )
         return synthetic_step, prose
     return None
+
+
+def _schema_targets(steps: list[dict[str, Any]]) -> dict[str, list[str]]:
+    """Parse exact table names and column names from excel_schema observations.
+
+    原因：模型自算前通常已调用 excel_schema，其输出含确切表名和列名，
+    比从问题文字猜测可靠得多。
+    作用：优先用这些 schema 信息推导本地复算的目标表与列。
+    """
+    targets: dict[str, list[str]] = {}
+    for observation in smolagents_debug.extract_tool_observations(
+        steps, "excel_schema"
+    ):
+        table_names = re.findall(r"(?m)^##\s+Sheet:\s*([^\r\n]+)", observation)
+        column_matches = re.findall(
+            r"(?m)^-+\s*Column names?:\s*([^\r\n]+)", observation
+        )
+        columns: list[str] = []
+        for line in column_matches:
+            columns.extend(
+                column.strip()
+                for column in line.split(",")
+                if column.strip()
+            )
+        for table_name in table_names:
+            table_name = table_name.strip()
+            targets.setdefault(table_name, [])
+            for column in columns:
+                if column not in targets[table_name]:
+                    targets[table_name].append(column)
+    return targets
 
 
 def _run_local_method(
@@ -145,6 +200,7 @@ def _run_local_method(
     method_name: str,
     path: Path,
     user_question: str,
+    schema_targets: dict[str, list[str]] | None = None,
 ) -> Any:
     """Run the local Skill once and return its SkillResponse."""
     skill: BaseSkill = (
@@ -153,13 +209,20 @@ def _run_local_method(
         else ExcelModelingSkill()
     )
     frames = read_spreadsheet(path).analysis_frames()
-    table_name = _choose_table(frames, user_question)
+    table_name = _choose_table(frames, user_question, schema_targets or {})
     arguments: dict[str, Any] = {
         "file_path": str(path),
         "table_name": table_name,
         "method": method_name,
     }
-    arguments.update(_derive_arguments(method_name, frames[table_name], user_question))
+    arguments.update(
+        _derive_arguments(
+            method_name,
+            frames[table_name],
+            user_question,
+            schema_targets or {},
+        )
+    )
     return asyncio.run(
         skill.run(
             SkillRequest(
@@ -170,13 +233,39 @@ def _run_local_method(
     )
 
 
-def _choose_table(frames: dict[str, Any], user_question: str) -> str:
-    """Pick the frame whose columns best match the user question."""
+def _choose_table(
+    frames: dict[str, Any],
+    user_question: str,
+    schema_targets: dict[str, list[str]] | None = None,
+) -> str:
+    """Pick the frame whose columns best match the user question or schema."""
     if len(frames) == 1:
         return next(iter(frames))
     lowered = user_question.casefold()
+    schema_targets = schema_targets or {}
+    # 原因：schema 输出含模型已看过的确切表名和列名，比问题文字匹配可靠。
+    # 作用：优先选 schema 表名或列名命中的表，回退到问题文字匹配。
+    for table_name in schema_targets:
+        if table_name.casefold() in lowered:
+            for candidate in frames:
+                if candidate.casefold() in table_name.casefold():
+                    return candidate
+            return next(iter(frames))
+    schema_columns = {
+        column.casefold()
+        for columns in schema_targets.values()
+        for column in columns
+    }
     scored = [
-        (sum(1 for column in frame.columns if str(column).casefold() in lowered), name)
+        (
+            sum(
+                1
+                for column in frame.columns
+                if str(column).casefold() in lowered
+                or str(column).casefold() in schema_columns
+            ),
+            name,
+        )
         for name, frame in frames.items()
     ]
     best_name, best_score = max(
@@ -190,9 +279,15 @@ def _derive_arguments(
     method_name: str,
     frame: Any,
     user_question: str,
+    schema_targets: dict[str, list[str]] | None = None,
 ) -> dict[str, Any]:
     """Map a required method to concrete Skill arguments from the selected frame."""
     lowered = user_question.casefold()
+    schema_columns = [
+        column
+        for columns in (schema_targets or {}).values()
+        for column in columns
+    ]
     numeric_columns = [
         str(column)
         for column in frame.select_dtypes(include="number").columns
@@ -202,6 +297,19 @@ def _derive_arguments(
         for column in frame.columns
         if str(column) not in numeric_columns
     ]
+    # 优先使用 schema 中出现的列名，避免同名列或缩写歧义。
+    schema_numeric = [
+        column for column in numeric_columns if column in schema_columns
+    ]
+    if schema_numeric:
+        numeric_columns = schema_numeric
+    schema_non_numeric = [
+        column
+        for column in non_numeric_columns
+        if column in schema_columns
+    ]
+    if schema_non_numeric:
+        non_numeric_columns = schema_non_numeric
     if method_name == "linear_regression":
         outcome = next(
             (
