@@ -48,7 +48,6 @@ export function DocumentWorkspace({
   const [question, setQuestion] = useState("");
   const [generateReport, setGenerateReport] = useState(false);
   const [analysisMode, setAnalysisMode] = useState<"question" | "section" | "full">("question");
-  const [recipe, setRecipe] = useState<"generic" | "bible">("generic");
   const [selectedSections, setSelectedSections] = useState<Record<string, string[]>>({});
   const [isRunning, setIsRunning] = useState(false);
   const [result, setResult] = useState<AnalysisResult | null>(null);
@@ -94,7 +93,6 @@ export function DocumentWorkspace({
     setResult(null);
     setSelectedSections({});
     setAnalysisMode("question");
-    setRecipe("generic");
     event.target.value = "";
   };
 
@@ -105,7 +103,6 @@ export function DocumentWorkspace({
     setResult(null);
     setSelectedSections({});
     setAnalysisMode("question");
-    setRecipe("generic");
   };
 
   const changeSourceMode = (mode: "upload" | "folder") => {
@@ -114,7 +111,6 @@ export function DocumentWorkspace({
     setError(null);
     setSelectedSections({});
     setAnalysisMode("question");
-    setRecipe("generic");
   };
 
   const scanFolder = async () => {
@@ -233,7 +229,6 @@ export function DocumentWorkspace({
         minSourceRelevance,
         responseDetail,
         analysisMode,
-        recipe,
         selectedSections,
       });
       setResult(analysisResult);
@@ -263,7 +258,6 @@ export function DocumentWorkspace({
               minSourceRelevance,
               responseDetail,
               analysisMode,
-              recipe,
               selectedSections,
             )
           : await api.analyzeLocalFolder({
@@ -274,7 +268,6 @@ export function DocumentWorkspace({
               generateReport,
               responseDetail,
               analysisMode,
-              recipe,
               selectedSections,
             });
       setResult(analysisResult);
@@ -503,18 +496,6 @@ export function DocumentWorkspace({
               type="button"
             >
               {mode === "question" ? "Specific question" : mode === "section" ? "Sections" : "Full summary"}
-            </button>
-          ))}
-        </div>
-        <div className="analysis-mode" aria-label="Report recipe">
-          {(["generic", "bible"] as const).map((option) => (
-            <button
-              className={recipe === option ? "active" : ""}
-              key={option}
-              onClick={() => setRecipe(option)}
-              type="button"
-            >
-              {option === "generic" ? "General documents" : "Bible lessons"}
             </button>
           ))}
         </div>

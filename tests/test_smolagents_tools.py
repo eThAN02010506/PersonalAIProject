@@ -33,7 +33,7 @@ from qwopus_agent.memory.graph_backend import PersistentKnowledgeGraph
 from qwopus_agent.memory.graph_extraction import RuleBasedGraphExtractor
 from qwopus_agent.memory.graph_models import GraphChunk
 from qwopus_agent.memory.knowledge_graph import KnowledgeGraphIndex
-from qwopus_agent.reports.bible_recipe import BIBLE_RECIPE
+from qwopus_agent.reports.recipe import default_recipe
 from qwopus_agent.utils.token_budget import TokenBudgetManager, estimate_tokens
 from tests.minirag_fakes import make_test_minirag
 
@@ -287,7 +287,7 @@ class SmolagentsToolsTests(unittest.TestCase):
                 documents=documents,
                 query="逐课比较全部文件的题目、经文和正文主题。",
                 budget_manager=budget,
-                recipe=BIBLE_RECIPE,
+                recipe=default_recipe(),
             )
         observation = tool.forward()
 
@@ -305,17 +305,17 @@ class SmolagentsToolsTests(unittest.TestCase):
             self.assertIn(f"topic_line: {topic}", block)
             if continuation:
                 self.assertIn(f"topic_continuation: {continuation}", block)
-            self.assertIn(f"scripture_line: {scripture}", block)
+            self.assertIn(f"quote_line: {scripture}", block)
             self.assertLess(block.index("SOURCE_FACTS"), block.index("QUERY_RELEVANT_EVIDENCE"))
 
         lesson_29 = source_block("腓立比书查经第29课.docx")
         lesson_30 = source_block("腓立比书查经第30课.docx")
         lesson_31 = source_block("腓立比书查经第31课.docx")
-        self.assertNotIn("scripture_line: 经文：腓立比书2章22-24节", lesson_29)
-        self.assertNotIn("scripture_line: 经文：腓立比书2章25节", lesson_30)
+        self.assertNotIn("quote_line: 经文：腓立比书2章22-24节", lesson_29)
+        self.assertNotIn("quote_line: 经文：腓立比书2章25节", lesson_30)
         self.assertNotIn("一个靠谱的人，是怎样炼成的", lesson_31)
         self.assertIn("Never infer, renumber, reconstruct", observation)
-        self.assertIn("Similar adjacent lessons remain distinct", observation)
+        self.assertIn("Similar adjacent sources remain distinct", observation)
         self.assertIn("QWOPUS_EXPLICIT_RUBRIC_FOUND=false", observation)
         self.assertLessEqual(estimate_tokens(observation), budget.synthesis_budget)
 

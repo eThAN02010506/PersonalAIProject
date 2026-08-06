@@ -10,6 +10,7 @@ htmlcov/
 .DS_Store
 .idea/
 .codex-restored-chats/
+.claude/launch.json
 
 # 原因：本地模型、搜索和 LAN 配置可能包含真实凭据，公开可见仓库也不能提交这些值。
 # 作用：保留可审查的示例配置，同时隔离所有开发者自己的环境文件和私钥。

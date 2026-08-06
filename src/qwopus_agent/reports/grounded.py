@@ -104,7 +104,10 @@ def _render_grounded_source_inventory(
             *grounded_facts._source_fact_values(block, "document_heading"),
             *grounded_facts._source_fact_values(block, "topic_line"),
             *grounded_facts._source_fact_values(block, "topic_continuation"),
-            *grounded_facts._source_fact_values(block, "quote_line"),
+            *grounded_facts._source_fact_values(
+                block,
+                recipe.source_fact_labels.quote_fact_key,
+            ),
             *grounded_facts._source_fact_values(block, "opening_line"),
         ]
         evidence = re.sub(
@@ -371,6 +374,14 @@ def _render_deterministic_grounded_report(
         if source_specs is not None
         else recipe.build_grounding_specs(file_names, collection_evidence)
     )
+    if not specs and any(
+        recipe.section_classifier(title) is SectionKind.FULL_DRAFT
+        for title in requested.values()
+    ):
+        raise RuntimeError(
+            "A complete Draft requires at least one grounded source; none of the "
+            "selected files was recognized by the active recipe."
+        )
     sections: list[str] = []
     for number, title in requested.items():
         kind = recipe.section_classifier(title)
@@ -482,13 +493,27 @@ _GENERIC_SOURCE_FACT_LABELS = SourceFactLabels(
     document_heading=("document_heading",),
     topic_line=("题目", "題目", "主题", "主題", "title"),
     topic_continuation=("topic_continuation",),
-    quote_line=("引用", "引文", "quote", "quotation", "passage"),
+    quote_line=(
+        "引用",
+        "引文",
+        "quote",
+        "quotation",
+        "passage",
+        "经文",
+        "經文",
+        "scripture",
+        "text",
+    ),
     opening_line=("opening_line",),
     topic_stop_labels=(
         "引用",
         "引文",
         "quote",
         "passage",
+        "经文",
+        "經文",
+        "scripture",
+        "text",
         "duration",
         "time",
     ),
@@ -501,19 +526,15 @@ def _generic_item_label_from_name(file_name: str) -> str | None:
 
 
 def _generic_item_aliases(file_name: str) -> tuple[str, ...]:
+    """Accept the file stem plus any lesson-number alias the file name carries."""
     label = _source_answer_label(file_name)
-    return (label,) if label else ()
-
-
-def _generic_reference_key(_text: str) -> tuple[str, tuple[int, ...]] | None:
-    return None
-
-
-def _generic_reference_is_supported(
-    key: tuple[str, tuple[int, ...]] | None,
-    allowed: frozenset[tuple[str, tuple[int, ...]]],
-) -> bool:
-    return False
+    aliases = [label] if label else []
+    lesson_label = grounded_facts._lesson_answer_label(file_name)
+    if lesson_label is not None:
+        number = grounded_facts._lesson_number_from_label(lesson_label)
+        if number is not None:
+            aliases.append(f"第{number}课")
+    return tuple(dict.fromkeys(alias for alias in aliases if alias))
 
 
 DEFAULT_RECIPE = ReportRecipe(
@@ -535,7 +556,7 @@ DEFAULT_RECIPE = ReportRecipe(
         r"\b(?:total|worth)\s*(?:of\s*)?\d+\s*(?:points?|marks?)\b",
         re.IGNORECASE,
     ),
-    reference_pattern=re.compile(r"(?!)"),
+    reference_pattern=grounded_facts.SCRIPTURE_REFERENCE_PATTERN,
     all_source_request_pattern=_ALL_SOURCE_REQUEST_PATTERN,
     grounding_rules_text=(
         "GROUNDING_RULES (mandatory):\n"
@@ -546,6 +567,9 @@ DEFAULT_RECIPE = ReportRecipe(
         "document_search.\n"
         "- Keep every # File block isolated. Similar adjacent sources remain distinct; "
         "never copy one source's topic, reference, quotation, or example into another.\n"
+        "- A scripture reference such as 腓立比书2章8节 is a quotation: it must come from the "
+        "source's own quote facts, never from a neighboring file, and cited ranges must stay "
+        "inside the source's allowed verse interval.\n"
         "- CORE_INTERPRETATION_EVIDENCE, QUERY_RELEVANT_EVIDENCE, "
         "SECONDARY_INTERPRETATION_EVIDENCE, and APPLICATION_EVIDENCE are verbatim "
         "excerpts selected inside that source; cite their file block and available "
@@ -555,22 +579,6 @@ DEFAULT_RECIPE = ReportRecipe(
         "an explicit grading rubric. When it is false, say that no rubric was supplied "
         "and never invent points, weights, totals, or professor criteria."
     ),
-    section_markers={
-        SectionKind.SOURCE_UNDERSTANDING: (
-            "文档理解",
-            "文件理解",
-            "材料理解",
-            "document understanding",
-            "source understanding",
-        ),
-        SectionKind.STRATEGY: ("策略", "strategy"),
-        SectionKind.OUTLINE: ("outline", "大纲", "框架"),
-        SectionKind.PARAGRAPH: ("逐段", "paragraph"),
-        SectionKind.FULL_DRAFT: (),
-        SectionKind.EXAMPLES: ("例子", "示例", "example"),
-        SectionKind.DRAFT_REVIEW: ("后分析", "复盘", "点评"),
-        SectionKind.CHECKLIST: ("checklist", "检查", "清单"),
-    },
     evidence_section_markers=(
         r"核心解读|核心解释|解读和讨论|释经|interpretation|exegesis",
         r"具体应用|生活应用|实际应用|反思与应用|application",
@@ -583,8 +591,8 @@ DEFAULT_RECIPE = ReportRecipe(
     item_label_from_name=_generic_item_label_from_name,
     item_aliases=_generic_item_aliases,
     render_item_heading=_canonical_source_heading,
-    reference_key=_generic_reference_key,
-    reference_is_supported=_generic_reference_is_supported,
+    reference_key=grounded_facts._scripture_reference_key,
+    reference_is_supported=grounded_facts._scripture_reference_is_supported,
     build_grounding_specs=_build_generic_grounding_specs,
     render_fallback=_render_generic_source_fallback,
     section_classifier=_classify_section,
@@ -598,5 +606,5 @@ DEFAULT_RECIPE = ReportRecipe(
         SectionKind.DRAFT_REVIEW: _render_grounded_draft_review,
         SectionKind.CHECKLIST: _render_grounded_checklist,
     },
-    validate_candidate_issues=lambda *args, **kwargs: (),
+    validate_candidate_issues=grounded_facts._scripture_candidate_issues,
 )

@@ -3,10 +3,9 @@
 This module intentionally has no dependency on report rendering or smolagents,
 so source parsing and evidence validation remain independently testable.
 
-The parsing helpers here are generic: a recipe supplies the item label
-extractor, reference validator, and spec builder so that domain-specific
-concepts (for example Bible lessons in
-:mod:`qwopus_agent.reports.bible_recipe`) never leak into this module.
+The parsing helpers here are generic: lesson numbers are recognized from file
+names as a best-effort ordering key, and scripture references are normalized
+for source-grounded validation, without any Bible-specific report vocabulary.
 """
 
 from __future__ import annotations
@@ -16,6 +15,7 @@ import re
 import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from qwopus_agent.utils.token_budget import truncate_to_tokens
 
@@ -49,6 +49,256 @@ _ALL_SOURCE_REQUEST_PATTERN = re.compile(
     r"\s+(?:file|document|source|material)s?\b",
     re.IGNORECASE | re.DOTALL,
 )
+
+
+# Scripture books and aliases ------------------------------------------------
+
+_SCRIPTURE_BOOKS = (
+    "帖撒罗尼迦前书",
+    "帖撒罗尼迦后书",
+    "哥林多前书",
+    "哥林多后书",
+    "撒母耳记上",
+    "撒母耳记下",
+    "历代志上",
+    "历代志下",
+    "提摩太前书",
+    "提摩太后书",
+    "彼得前书",
+    "彼得后书",
+    "约翰一书",
+    "约翰二书",
+    "约翰三书",
+    "列王纪上",
+    "列王纪下",
+    "耶利米哀歌",
+    "使徒行传",
+    "马太福音",
+    "马可福音",
+    "路加福音",
+    "约翰福音",
+    "创世记",
+    "出埃及记",
+    "利未记",
+    "民数记",
+    "申命记",
+    "约书亚记",
+    "士师记",
+    "路得记",
+    "以斯拉记",
+    "尼希米记",
+    "以斯帖记",
+    "约伯记",
+    "传道书",
+    "以赛亚书",
+    "耶利米书",
+    "以西结书",
+    "但以理书",
+    "何西阿书",
+    "约珥书",
+    "阿摩司书",
+    "俄巴底亚书",
+    "约拿书",
+    "弥迦书",
+    "那鸿书",
+    "哈巴谷书",
+    "西番雅书",
+    "哈该书",
+    "撒迦利亚书",
+    "玛拉基书",
+    "罗马书",
+    "加拉太书",
+    "以弗所书",
+    "腓立比书",
+    "歌罗西书",
+    "提多书",
+    "腓利门书",
+    "希伯来书",
+    "雅各书",
+    "犹大书",
+    "启示录",
+    "诗篇",
+    "箴言",
+    "雅歌",
+)
+_SCRIPTURE_BOOK_ALIASES = {
+    alias: canonical
+    for canonical in _SCRIPTURE_BOOKS
+    for alias in (
+        canonical,
+        canonical[:-1] if canonical.endswith("书") else canonical,
+    )
+}
+_SCRIPTURE_BOOK_MATCHES = tuple(
+    sorted(_SCRIPTURE_BOOK_ALIASES, key=len, reverse=True)
+)
+SCRIPTURE_REFERENCE_PATTERN = re.compile(
+    rf"(?:{'|'.join(map(re.escape, _SCRIPTURE_BOOK_MATCHES))})"
+    r"\s*\d+\s*章\s*\d+\s*节?"
+    r"(?:\s*(?:上|下)?半节)?"
+    r"(?:\s*[-‐‑‒–—至]\s*\d+\s*节?)?"
+)
+
+_LESSON_LABEL_CHINESE = re.compile(r"第[一二三四五六七八九十百〇零两\d]+课")
+_LESSON_LABEL_ENGLISH = re.compile(r"\blesson[\s_-]*\d+\b", re.IGNORECASE)
+_LESSON_LABEL_NUMBER_CHINESE = re.compile(
+    r"第(?P<number>[一二三四五六七八九十百〇零两\d]+)课"
+)
+_LESSON_LABEL_NUMBER_ENGLISH = re.compile(
+    r"\blesson[\s_-]*(?P<number>\d+)\b", re.IGNORECASE
+)
+
+
+def _lesson_answer_label(file_name: str) -> str | None:
+    """Extract a course/lesson identifier from a file name, if it carries one."""
+    stem = _source_answer_label(file_name)
+    chinese = _LESSON_LABEL_CHINESE.search(stem)
+    if chinese is not None:
+        return chinese.group(0)
+    english = _LESSON_LABEL_ENGLISH.search(stem)
+    return english.group(0) if english is not None else None
+
+
+def _chinese_integer(value: str) -> int | None:
+    """Parse Chinese numerals (up to 万) used in lesson file names."""
+    if value.isdigit():
+        return int(value)
+    digits = {
+        "〇": 0,
+        "零": 0,
+        "一": 1,
+        "二": 2,
+        "两": 2,
+        "三": 3,
+        "四": 4,
+        "五": 5,
+        "六": 6,
+        "七": 7,
+        "八": 8,
+        "九": 9,
+    }
+    if not any(unit in value for unit in "十百千万"):
+        parsed = [digits.get(character) for character in value]
+        if not parsed or any(number is None for number in parsed):
+            return None
+        return int("".join(str(number) for number in parsed))
+    section = 0
+    total = 0
+    for character in value:
+        digit = digits.get(character)
+        if digit is not None:
+            section = digit
+        elif character == "万":
+            total = (total + section) * 10000
+            section = 0
+        elif character == "千":
+            total += (section or 1) * 1000
+            section = 0
+        elif character == "百":
+            total += (section or 1) * 100
+            section = 0
+        elif character == "十":
+            total += (section or 1) * 10
+            section = 0
+        else:
+            return None
+    return total + section
+
+
+def _lesson_number_from_label(label: str) -> int | None:
+    """Normalize a Chinese or English lesson heading to its integer identifier."""
+    chinese = _LESSON_LABEL_NUMBER_CHINESE.search(label)
+    if chinese is not None:
+        return _chinese_integer(chinese.group("number"))
+    english = _LESSON_LABEL_NUMBER_ENGLISH.search(label)
+    return int(english.group("number")) if english is not None else None
+
+
+def _scripture_reference_key(text: str) -> tuple[str, tuple[int, ...]] | None:
+    """Normalize a Chinese scripture reference to book plus chapter/verse numbers."""
+    matched_book = next(
+        (name for name in _SCRIPTURE_BOOK_MATCHES if name in text),
+        None,
+    )
+    numbers = tuple(int(value) for value in re.findall(r"\d+", text)[:3])
+    if matched_book is None or len(numbers) < 2:
+        return None
+    return _SCRIPTURE_BOOK_ALIASES[matched_book], numbers
+
+
+def _scripture_reference_is_supported(
+    key: tuple[str, tuple[int, ...]] | None,
+    allowed: frozenset[tuple[str, tuple[int, ...]]],
+) -> bool:
+    """Allow only references wholly contained by one source-grounded verse interval."""
+    if key is None:
+        return False
+    book, numbers = key
+    chapter = numbers[0]
+    cited_start = numbers[1]
+    cited_end = numbers[2] if len(numbers) > 2 else cited_start
+    return any(
+        allowed_book == book
+        and len(allowed_numbers) >= 2
+        and allowed_numbers[0] == chapter
+        and allowed_numbers[1] <= cited_start
+        and cited_end
+        <= (
+            allowed_numbers[2]
+            if len(allowed_numbers) > 2
+            else allowed_numbers[1]
+        )
+        for allowed_book, allowed_numbers in allowed
+    )
+
+
+def _generic_reference_key(_text: str) -> tuple[str, tuple[int, ...]] | None:
+    return None
+
+
+def _generic_reference_is_supported(
+    key: tuple[str, tuple[int, ...]] | None,
+    allowed: frozenset[tuple[str, tuple[int, ...]]],
+) -> bool:
+    return False
+
+
+def _scripture_candidate_issues(
+    subsection: Any,
+    spec: SourceGroundingSpec,
+    recipe: Any,
+) -> tuple[str, ...]:
+    """Validate one generated source only against that source's own facts.
+
+    The recipe is unused for the scripture checks themselves; the subsection
+    object shape is duck-typed to keep this module free of report contracts.
+    """
+    from qwopus_agent.reports.contract import _base_candidate_issues
+
+    issues = _base_candidate_issues(subsection, spec)
+    combined = f"{subsection.heading}\n{subsection.body}"
+    references = tuple(
+        match.group(0).strip()
+        for match in SCRIPTURE_REFERENCE_PATTERN.finditer(combined)
+    )
+    if spec.allowed_references:
+        if not references:
+            issues.append("missing source reference")
+        unsupported = [
+            reference
+            for reference in references
+            if not _scripture_reference_is_supported(
+                _scripture_reference_key(reference),
+                spec.allowed_references,
+            )
+        ]
+        if unsupported:
+            issues.append(
+                "reference belongs outside this source: " + ", ".join(unsupported)
+            )
+    elif references:
+        issues.append("reference was added without a source fact")
+    return tuple(issues)
 
 
 def _requested_numbered_sections(user_question: str) -> dict[int, str]:
@@ -447,14 +697,17 @@ def build_generic_grounding_specs(
     file_names: list[str],
     collection_evidence: str,
 ) -> tuple[SourceGroundingSpec, ...]:
-    """Build one spec per parser file in deterministic file order.
+    """Build one spec per parser file, ordering lesson files by lesson number.
 
-    This is the generic recipe's spec builder: every file is one independent
-    source slot, and any domain item that the recipe does not recognize is
-    simply treated as another source in the selected order.
+    Every file is one independent source slot.  Files whose name carries a
+    lesson number (``第N课`` / ``lesson N``) are sorted by that number first;
+    all other files keep the selected upload order.  Scripture references read
+    from the quote_line facts are kept as the source's allowed reference set.
     """
     source_blocks = _collection_source_blocks(collection_evidence)
-    specs: list[SourceGroundingSpec] = []
+    lesson_specs: list[SourceGroundingSpec] = []
+    other_specs: list[SourceGroundingSpec] = []
+    seen_numbers: set[int] = set()
     for index, file_name in enumerate(file_names):
         block = source_blocks.get(file_name, "")
         # 原因：没有 collection 证据的文件没有可渲染的来源槽位，也不能做 fallback。
@@ -462,7 +715,37 @@ def build_generic_grounding_specs(
         if not block:
             continue
         passage_lines = _source_fact_values(block, "quote_line")
-        specs.append(
+        lesson_label = _lesson_answer_label(file_name)
+        number = _lesson_number_from_label(lesson_label) if lesson_label else None
+        if number is not None and number not in seen_numbers:
+            seen_numbers.add(number)
+            canonical_label = lesson_label or _source_answer_label(file_name)
+            allowed_references = frozenset(
+                key
+                for line in passage_lines
+                if (key := _scripture_reference_key(line)) is not None
+            )
+            lesson_specs.append(
+                SourceGroundingSpec(
+                    number=number,
+                    canonical_label=canonical_label,
+                    file_name=file_name,
+                    document_heading=next(
+                        iter(_source_fact_values(block, "document_heading")),
+                        None,
+                    ),
+                    topic_lines=(
+                        *_source_fact_values(block, "topic_line"),
+                        *_source_fact_values(block, "topic_continuation"),
+                    ),
+                    passage_lines=passage_lines,
+                    allowed_references=allowed_references,
+                    evidence_excerpt=_source_evidence_excerpt(block),
+                    application_excerpt=_source_application_excerpt(block),
+                )
+            )
+            continue
+        other_specs.append(
             SourceGroundingSpec(
                 number=index,
                 canonical_label=_source_answer_label(file_name),
@@ -481,4 +764,5 @@ def build_generic_grounding_specs(
                 application_excerpt=_source_application_excerpt(block),
             )
         )
-    return tuple(specs)
+    lesson_specs.sort(key=lambda spec: spec.number)
+    return tuple([*lesson_specs, *other_specs])

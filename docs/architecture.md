@@ -104,6 +104,15 @@ side-effect-free dry run. Model-generated arbitrary Python is not accepted or de
 `ReportGenerator` is the unified report module. It writes Markdown, Excel, real PNG/SVG charts, and a
 PDF artifact from one request.
 
+Exhaustive multi-source document reports are composed by the grounded composer in
+`reports/grounded.py`. A single generic recipe treats every parser file as one isolated source slot:
+lesson-named files (第N课 / lesson N) are ordered by lesson number, quoted scripture lines are
+captured under the source's quote facts and validated against its allowed verse range, and each slot
+keeps its own evidence boundary. The same recipe covers Bible-study lessons, method documents, and
+arbitrary collections without a separate mode. `reports/grounded_facts.py` owns the parsing and
+normalization (Chinese numerals, scripture references, source slots) and stays free of rendering
+dependencies so it remains independently testable.
+
 ### Prompts
 
 `qwopus_agent.prompts` owns model-facing task construction, response-depth rules, language policy,

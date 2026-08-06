@@ -688,6 +688,7 @@ def _apply_grounded_report_fallbacks(
     """Deterministically repair source inventory and source slots after formatting drift."""
     recipe = recipe or default_recipe()
     spans = _numbered_section_spans(answer, requested)
+    refinement_spans = _numbered_section_spans(refinement, requested)
     edits: list[tuple[int, int, str]] = []
     for number, title in target_sections.items():
         span = spans.get(number)
@@ -695,9 +696,13 @@ def _apply_grounded_report_fallbacks(
             continue
         body = span.body
         if _title_requires_full_draft(title) and source_specs:
+            refinement_span = refinement_spans.get(number)
+            refinement_body = (
+                refinement_span.body if refinement_span is not None else refinement
+            )
             body = _merge_full_draft_source_slots(
                 original_body=span.body,
-                refinement_body=refinement,
+                refinement_body=refinement_body,
                 specs=source_specs,
                 recipe=recipe,
             )

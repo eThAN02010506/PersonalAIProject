@@ -542,12 +542,12 @@ def _collection_source_payload(
             "topic_continuation",
             recipe.source_fact_labels.quote_fact_key,
         }
-        lesson_fact_query = " ".join(
+        source_fact_query = " ".join(
             line
             for label, line in fact_lines
             if label in fact_query_labels
         ).strip()
-        source_query = lesson_fact_query or query
+        source_query = source_fact_query or query
         explanation_pattern = re.compile(
             recipe.evidence_section_markers[0],
             re.IGNORECASE,
@@ -696,7 +696,7 @@ def _extract_source_fact_lines(
     )
     if quote_line is not None:
         # 原因：下游 grounded_facts 按稳定标签名读取，不能把 recipe 前缀当作键。
-        # 作用：统一用 recipe 指定的 quote 事实键（通用 quote_line / 圣经 scripture_line）。
+        # 作用：统一用 recipe 指定的 quote 事实键（含经文行的捕获）。
         facts.append((labels.quote_fact_key, quote_line))
     elif topic_index is None and len(lines) > 1:
         facts.append(("opening_line", lines[1]))
@@ -705,11 +705,11 @@ def _extract_source_fact_lines(
 
 _COLLECTION_GROUNDING_RULES = """GROUNDING_RULES (mandatory):
 - SOURCE_FACTS are verbatim source excerpts and are the only authority for each file's document
-  heading, lesson topic, and scripture reference.
-- Never infer, renumber, reconstruct, or complete a scripture reference or quotation from
+  heading, topic, and reference.
+- Never infer, renumber, reconstruct, or complete a reference or quotation from
   memory or from a neighboring file. If evidence is absent, say so or call document_search.
-- Keep every # File block isolated. Similar adjacent lessons remain distinct; never copy one
-  lesson's topic, scripture, quotation, or example into another.
+- Keep every # File block isolated. Similar adjacent sources remain distinct; never copy one
+  source's topic, reference, quotation, or example into another.
 - CORE_INTERPRETATION_EVIDENCE, QUERY_RELEVANT_EVIDENCE,
   SECONDARY_INTERPRETATION_EVIDENCE, and APPLICATION_EVIDENCE are verbatim excerpts selected
   inside that source; cite their file block and available chunk_id for source-specific claims.

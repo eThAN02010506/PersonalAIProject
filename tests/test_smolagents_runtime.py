@@ -27,7 +27,7 @@ from qwopus_agent.integrations.smolagents_runtime import (
     run_smolagents_file_analysis_with_debug,
 )
 from qwopus_agent.integrations.smolagents_spreadsheets import remove_markdown_tables
-from qwopus_agent.reports.bible_recipe import BIBLE_RECIPE
+from qwopus_agent.reports.recipe import default_recipe
 from qwopus_agent.services.orchestration_models import AnswerContract, AnswerPlan
 from qwopus_agent.skills import (
     BaseSkill,
@@ -127,7 +127,7 @@ def _grounded_collection_observation(
         "SOURCE_FACTS:\n"
         "- document_heading: Lesson 21\n"
         "- topic_line: Title: Active humility\n"
-        "- scripture_line: 经文：腓立比书2章8节\n"
+        "- quote_line: 经文：腓立比书2章8节\n"
         "QUERY_RELEVANT_EVIDENCE [chunk_id=21-q]:\n"
         "材料不是把卑微解释为自我贬低，而是主动走向低处。\n"
         "APPLICATION_EVIDENCE [chunk_id=21-a]:\n"
@@ -136,7 +136,7 @@ def _grounded_collection_observation(
         "SOURCE_FACTS:\n"
         "- document_heading: Lesson 22\n"
         "- topic_line: Title: Free obedience\n"
-        "- scripture_line: 经文：腓立比书2章8节\n"
+        "- quote_line: 经文：腓立比书2章8节\n"
         "QUERY_RELEVANT_EVIDENCE [chunk_id=22-q]:\n"
         "材料说明顺服不是盲从，而是理解之后仍然选择信靠和回应。\n"
         "APPLICATION_EVIDENCE [chunk_id=22-a]:\n"
@@ -1684,11 +1684,11 @@ class SmolagentsRuntimeTests(unittest.TestCase):
             "# File: 腓立比书查经第二十一课.docx\n"
             "SOURCE_FACTS:\n"
             "- document_heading: 腓立比书查经第二十一课\n"
-            "- scripture_line: 经文：腓立比书2章8节\n\n"
+            "- quote_line: 经文：腓立比书2章8节\n\n"
             "# File: 腓立比书查经第二十二课.docx\n"
             "SOURCE_FACTS:\n"
             "- document_heading: 腓立比书查经第二十二课\n"
-            "- scripture_line: 经文：腓立比书2章9-11节"
+            "- quote_line: 经文：腓立比书2章9-11节"
         )
         collection_step = {
             "tool_calls": [
@@ -1719,6 +1719,8 @@ class SmolagentsRuntimeTests(unittest.TestCase):
                     "## 1. 文档理解与任务拆解\n"
                     "所有材料均已检查。材料没有提供显式 rubric，因此不虚构分值。\n\n"
                     "## 6. 生成完整报告 Draft\n"
+                    "### bible-method\n"
+                    "方法材料用于控制上下文、思想流和结构，不直接作为正文来源。\n\n"
                     "### 第21课\n"
                     f"经文：腓立比书2章8节\n{draft_detail}\n\n"
                     "### 第22课\n"
@@ -1743,7 +1745,7 @@ class SmolagentsRuntimeTests(unittest.TestCase):
             ),
             tools=[types.SimpleNamespace(name="document_collection_summary")],
             settings=settings,
-            recipe=BIBLE_RECIPE,
+            recipe=default_recipe(),
         )
 
         self.assertIn("bible-method", result.answer)
@@ -1776,19 +1778,19 @@ class SmolagentsRuntimeTests(unittest.TestCase):
             "# File: 腓立比书查经第二十三课.docx\n"
             "SOURCE_FACTS:\n"
             "- document_heading: 腓立比书查经第二十三课\n"
-            "- scripture_line: 经文：腓立比书2章9-11节\n"
+            "- quote_line: 经文：腓立比书2章9-11节\n"
             "QUERY_RELEVANT_EVIDENCE [chunk_id=23]:\n"
             "材料说明上帝高举基督，并把荣耀归给父上帝。\n\n"
             "# File: 腓立比书查经第二十一课.docx\n"
             "SOURCE_FACTS:\n"
             "- document_heading: 腓立比书查经第二十一课\n"
-            "- scripture_line: 经文：腓立比书2章8节\n"
+            "- quote_line: 经文：腓立比书2章8节\n"
             "QUERY_RELEVANT_EVIDENCE [chunk_id=21]:\n"
             "材料围绕基督主动卑微、走向低处及其生活应用展开。\n\n"
             "# File: 腓立比书查经第二十二课.docx\n"
             "SOURCE_FACTS:\n"
             "- document_heading: 腓立比书查经第二十二课\n"
-            "- scripture_line: 经文：腓立比书2章8节\n"
+            "- quote_line: 经文：腓立比书2章8节\n"
             "QUERY_RELEVANT_EVIDENCE [chunk_id=22]:\n"
             "材料从关系和自由的角度解释顺服，并提供讨论与应用问题。"
         )
@@ -1844,7 +1846,7 @@ class SmolagentsRuntimeTests(unittest.TestCase):
             ),
             tools=[types.SimpleNamespace(name="document_collection_summary")],
             settings=settings,
-            recipe=BIBLE_RECIPE,
+            recipe=default_recipe(),
         )
 
         self.assertIn(accepted_understanding, result.answer)
@@ -1935,7 +1937,7 @@ class SmolagentsRuntimeTests(unittest.TestCase):
             user_question=_grounded_report_prompt(),
             tools=[collection_tool],
             settings=settings,
-            recipe=BIBLE_RECIPE,
+            recipe=default_recipe(),
         )
 
         self.assertIsNone(FakeToolCallingAgent.last_instance)
@@ -2001,7 +2003,7 @@ class SmolagentsRuntimeTests(unittest.TestCase):
                 user_question=_grounded_report_prompt("自由发挥"),
                 tools=[collection_tool],
                 settings=settings,
-                recipe=BIBLE_RECIPE,
+                recipe=default_recipe(),
             )
 
     def test_collection_summary_requires_a_complete_tool_coverage_manifest(self) -> None:

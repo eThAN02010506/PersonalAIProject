@@ -399,7 +399,6 @@ class LocalFolderAnalysisRequest(BaseModel):
     generate_report: bool = False
     response_detail: Literal["concise", "balanced", "detailed"] = "detailed"
     analysis_mode: Literal["question", "section", "full"] = "question"
-    recipe: Literal["generic", "bible"] = "generic"
     selected_sections: dict[str, tuple[str, ...]] = Field(default_factory=dict)
 
 
@@ -465,7 +464,6 @@ class SavedDocumentsAnalysisRequest(BaseModel):
     min_source_relevance: float = Field(default=0.55, ge=0.25, le=0.95)
     response_detail: Literal["concise", "balanced", "detailed"] = "detailed"
     analysis_mode: Literal["question", "section", "full"] = "question"
-    recipe: Literal["generic", "bible"] = "generic"
     selected_sections: dict[str, tuple[str, ...]] = Field(default_factory=dict)
 
     @model_validator(mode="after")

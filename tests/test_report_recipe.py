@@ -1,11 +1,12 @@
 """Recipe contract tests for the grounded report composer.
 
-These tests verify the three guarantees of the recipe design:
+These tests verify the guarantees of the merged generic recipe:
 
 1. ``DEFAULT_RECIPE`` treats every parser file as one independent source slot
    and composes a deterministic grounded report without any domain vocabulary.
-2. ``BIBLE_RECIPE`` preserves the Bible-study behavior (lesson ordering,
-   scripture-range validation, and Bible wording) when explicitly selected.
+2. Lesson-named files (``第N课`` / ``lesson N``) are ordered by lesson number,
+   scripture references are captured and validated against each source's
+   allowed verse range, and the report still uses the generic wording.
 3. A minimal custom recipe can be built from the generic recipe and drives the
    same shared composer without changing pipeline code.
 """
@@ -14,20 +15,45 @@ from __future__ import annotations
 
 import unittest
 
-from qwopus_agent.reports.bible_recipe import BIBLE_RECIPE
 from qwopus_agent.reports.grounded import (
     DEFAULT_RECIPE,
     _render_deterministic_grounded_report,
 )
-from qwopus_agent.reports.recipe import default_recipe, recipe_from_name
 
 
-class RecipeNameTests(unittest.TestCase):
-    def test_recipe_from_name_resolves_both_names(self) -> None:
-        self.assertIs(recipe_from_name("generic"), default_recipe())
-        self.assertIs(recipe_from_name("bible"), BIBLE_RECIPE)
-        with self.assertRaisesRegex(ValueError, "Unknown report recipe"):
-            recipe_from_name("unknown")
+class LessonNumeralTests(unittest.TestCase):
+    def test_chinese_integer_parses_common_lesson_numbers(self) -> None:
+        from qwopus_agent.reports.grounded_facts import _chinese_integer
+
+        cases = {
+            "一": 1,
+            "十": 10,
+            "十二": 12,
+            "二十": 20,
+            "二十五": 25,
+            "一百": 100,
+            "一百零五": 105,
+            "一百一十": 110,
+            "二百零三": 203,
+            "一千": 1000,
+            "一千零一": 1001,
+            "一万": 10000,
+            "一万二千": 12000,
+            "〇": 0,
+            "两": 2,
+        }
+        for numeral, expected in cases.items():
+            self.assertEqual(
+                _chinese_integer(numeral),
+                expected,
+                f"{numeral!r} should parse to {expected}",
+            )
+
+    def test_chinese_integer_rejects_unrecognized_characters(self) -> None:
+        from qwopus_agent.reports.grounded_facts import _chinese_integer
+
+        self.assertIsNone(_chinese_integer("abc"))
+        self.assertIsNone(_chinese_integer("一a二"))
 
 
 def _generic_prompt() -> str:
@@ -77,7 +103,7 @@ def _bible_collection() -> str:
         "SOURCE_FACTS:\n"
         "- document_heading: Lesson 21\n"
         "- topic_line: Title: Active humility\n"
-        "- scripture_line: 经文：腓立比书2章8节\n"
+        "- quote_line: 经文：腓立比书2章8节\n"
         "QUERY_RELEVANT_EVIDENCE [chunk_id=21-q]:\n"
         "材料不是把卑微解释为自我贬低，而是主动走向低处。\n"
         "APPLICATION_EVIDENCE [chunk_id=21-a]:\n"
@@ -86,7 +112,7 @@ def _bible_collection() -> str:
         "SOURCE_FACTS:\n"
         "- document_heading: Lesson 22\n"
         "- topic_line: Title: Free obedience\n"
-        "- scripture_line: 经文：腓立比书2章8节\n"
+        "- quote_line: 经文：腓立比书2章8节\n"
         "QUERY_RELEVANT_EVIDENCE [chunk_id=22-q]:\n"
         "材料说明顺服不是盲从，而是理解之后仍然选择信靠和回应。\n"
         "APPLICATION_EVIDENCE [chunk_id=22-a]:\n"
@@ -145,20 +171,20 @@ class DefaultRecipeTests(unittest.TestCase):
         self.assertEqual(specs[0].allowed_references, frozenset())
 
 
-class BibleRecipeTests(unittest.TestCase):
-    def test_bible_recipe_orders_lessons_and_validates_scripture(self) -> None:
+class MergedRecipeLessonTests(unittest.TestCase):
+    def test_generic_recipe_orders_lessons_and_validates_scripture(self) -> None:
         files = ["lesson-22.docx", "lesson-21.docx"]
         evidence = _bible_collection()
-        specs = BIBLE_RECIPE.build_grounding_specs(files, evidence)
-        # 圣经 recipe 按课号排序，忽略输入顺序。
+        specs = DEFAULT_RECIPE.build_grounding_specs(files, evidence)
+        # 通用 recipe 也按课号排序，忽略输入顺序。
         self.assertEqual([spec.number for spec in specs], [21, 22])
         # allowed_references 只含来源经文的 key。
         self.assertTrue(specs[0].allowed_references)
         book, numbers = next(iter(specs[0].allowed_references))
         self.assertEqual(book, "腓立比书")
 
-    def test_bible_recipe_rejects_out_of_range_scripture(self) -> None:
-        from qwopus_agent.reports.bible_recipe import (
+    def test_generic_recipe_rejects_out_of_range_scripture(self) -> None:
+        from qwopus_agent.reports.grounded_facts import (
             _scripture_reference_is_supported,
             _scripture_reference_key,
         )
@@ -177,8 +203,8 @@ class BibleRecipeTests(unittest.TestCase):
             )
         )
 
-    def test_bible_recipe_top_level_check_rejects_unsourced_scripture(self) -> None:
-        """The report-level reference check reads scripture_line, not hard-coded quote_line."""
+    def test_generic_recipe_top_level_check_rejects_unsourced_scripture(self) -> None:
+        """The report-level reference check reads the recipe quote fact key."""
         from qwopus_agent.reports.contract import _report_quality_issues
 
         files = ["lesson-21.docx"]
@@ -194,7 +220,7 @@ class BibleRecipeTests(unittest.TestCase):
             file_names=files,
             user_question="请逐一阅读所有文件并按以下结构输出。",
             collection_evidence=evidence,
-            recipe=BIBLE_RECIPE,
+            recipe=DEFAULT_RECIPE,
         )
         messages = issues.get(1, [])
         self.assertTrue(
@@ -206,14 +232,17 @@ class BibleRecipeTests(unittest.TestCase):
             f"expected an unsourced-reference issue, got: {messages}",
         )
 
-    def test_bible_recipe_composes_with_bible_wording(self) -> None:
+    def test_generic_recipe_composes_lesson_report_with_generic_wording(self) -> None:
         files = ["lesson-21.docx", "lesson-22.docx"]
         evidence = _bible_collection()
         requested = _requested_sections(_generic_prompt())
-        report = _render(requested, files, evidence, BIBLE_RECIPE)
+        report = _render(requested, files, evidence, DEFAULT_RECIPE)
         self.assertIn("### lesson-21", report)
         self.assertIn("### lesson-22", report)
-        self.assertIn("经文与主题", report)
+        # 引用以 passage_lines 形式出现，不再是“材料未单列引用”。
+        self.assertIn("腓立比书2章8节", report)
+        # 措辞保持通用，不引入圣经专属标签。
+        self.assertNotIn("经文与主题", report)
         self.assertIn("表面让步、内里压抑", report)
 
 
@@ -241,6 +270,32 @@ class CustomRecipeTests(unittest.TestCase):
 
         with self.assertRaises(dataclasses.FrozenInstanceError):
             DEFAULT_RECIPE.composer_thresholds.min_parser_files = 99
+
+
+class GroundedComposerGuardTests(unittest.TestCase):
+    def test_composer_thresholds_gate_selection(self) -> None:
+        import dataclasses
+
+        from qwopus_agent.reports.grounded import (
+            should_use_grounded_report_composer,
+        )
+
+        strict_recipe = dataclasses.replace(
+            DEFAULT_RECIPE,
+            composer_thresholds=dataclasses.replace(
+                DEFAULT_RECIPE.composer_thresholds,
+                min_sections=100,
+            ),
+        )
+        self.assertFalse(
+            should_use_grounded_report_composer(
+                file_names=["report-a.pdf", "report-b.pdf"],
+                spreadsheet_names=[],
+                user_question=_generic_prompt(),
+                has_collection_summary=True,
+                recipe=strict_recipe,
+            )
+        )
 
 
 if __name__ == "__main__":

@@ -106,7 +106,6 @@ def build_analysis_router(
             Literal["question", "section", "full"],
             Form(),
         ] = "question",
-        recipe: Annotated[Literal["generic", "bible"], Form()] = "generic",
         selected_sections: Annotated[str, Form()] = "{}",
     ) -> AnalysisView:
         user = current_user(request)
@@ -132,7 +131,6 @@ def build_analysis_router(
             min_source_relevance=min_source_relevance,
             response_detail=response_detail,
             analysis_mode=analysis_mode,
-            recipe=recipe,
             selected_sections=scoped_sections,
             report_title="Qwopus Analysis Report",
             report_basename=f"qwopus_web_analysis_{uuid4().hex[:12]}",

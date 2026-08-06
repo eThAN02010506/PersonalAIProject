@@ -106,7 +106,6 @@ def build_local_folder_router(
             generate_report=payload.generate_report,
             response_detail=payload.response_detail,
             analysis_mode=payload.analysis_mode,
-            recipe=payload.recipe,
             selected_sections=payload.selected_sections,
             report_title="Qwopus Local Folder Analysis",
             report_basename=f"qwopus_folder_analysis_{uuid4().hex[:12]}",

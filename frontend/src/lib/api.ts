@@ -300,7 +300,6 @@ export const api = {
     minSourceRelevance: number;
     responseDetail: "concise" | "balanced" | "detailed";
     analysisMode: "question" | "section" | "full";
-    recipe: "generic" | "bible";
     selectedSections: Record<string, string[]>;
   }) =>
     request<AnalysisResult>("/api/documents/analyze", {
@@ -314,7 +313,6 @@ export const api = {
         min_source_relevance: payload.minSourceRelevance,
         response_detail: payload.responseDetail,
         analysis_mode: payload.analysisMode,
-        recipe: payload.recipe,
         selected_sections: payload.selectedSections,
       }),
     }),
@@ -455,7 +453,6 @@ export const api = {
     minSourceRelevance: number,
     responseDetail: "concise" | "balanced" | "detailed",
     analysisMode: "question" | "section" | "full",
-    recipe: "generic" | "bible",
     selectedSections: Record<string, string[]>,
   ) => {
     const form = new FormData();
@@ -468,7 +465,6 @@ export const api = {
     form.append("min_source_relevance", String(minSourceRelevance));
     form.append("response_detail", responseDetail);
     form.append("analysis_mode", analysisMode);
-    form.append("recipe", recipe);
     form.append("selected_sections", JSON.stringify(selectedSections));
     return request<AnalysisResult>("/api/analysis", { method: "POST", body: form });
   },
@@ -481,7 +477,6 @@ export const api = {
     generateReport: boolean;
     responseDetail: "concise" | "balanced" | "detailed";
     analysisMode: "question" | "section" | "full";
-    recipe: "generic" | "bible";
     selectedSections: Record<string, string[]>;
   }) =>
     request<AnalysisResult>("/api/local-folders/analyze", {
@@ -495,7 +490,6 @@ export const api = {
         generate_report: payload.generateReport,
         response_detail: payload.responseDetail,
         analysis_mode: payload.analysisMode,
-        recipe: payload.recipe,
         selected_sections: payload.selectedSections,
       }),
     }),

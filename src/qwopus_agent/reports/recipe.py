@@ -5,10 +5,8 @@ for arbitrary source collections while allowing a domain-specific recipe to
 override parsing labels, item ordering, reference validation, and renderers.
 
 The generic :data:`DEFAULT_RECIPE` treats every parser file as one
-independently rendered source slot.  A domain recipe (for example the
-Bible-study lesson workflow in :mod:`qwopus_agent.reports.bible_recipe`)
-narrows the item extractor and reference checks without changing the shared
-composer, quality validation, or repair pipeline.
+independently rendered source slot, orders lesson-named files by lesson number,
+and validates scripture references against each source's allowed verse range.
 """
 
 from __future__ import annotations
@@ -28,7 +26,6 @@ __all__ = [
     "SectionKind",
     "SourceFactLabels",
     "default_recipe",
-    "recipe_from_name",
 ]
 
 
@@ -87,7 +84,6 @@ class ReportRecipe:
     reference_pattern: re.Pattern[str]
     all_source_request_pattern: re.Pattern[str]
     grounding_rules_text: str
-    section_markers: Mapping[SectionKind, tuple[str, ...]]
     evidence_section_markers: tuple[str, ...]
     evidence_claim_boost_terms: tuple[str, ...]
 
@@ -108,37 +104,14 @@ class ReportRecipe:
     composer_thresholds: ComposerThresholds = ComposerThresholds()
 
 
-_default_recipe: ReportRecipe | None = None
-
-
 def default_recipe() -> ReportRecipe:
-    """Return the process-wide generic recipe, resolving it lazily.
+    """Return the canonical generic recipe, resolving it lazily.
 
     The generic recipe binds rendering functions defined in
     :mod:`qwopus_agent.reports.grounded`, which itself imports parsing helpers
     from :mod:`qwopus_agent.reports.grounded_facts`.  Resolving lazily here
     keeps that import graph acyclic at module load time.
     """
-    global _default_recipe
-    if _default_recipe is None:
-        from qwopus_agent.reports import grounded as _grounded
+    from qwopus_agent.reports import grounded as _grounded
 
-        _default_recipe = _grounded.DEFAULT_RECIPE
-    return _default_recipe
-
-
-def set_default_recipe(recipe: ReportRecipe) -> None:
-    """Replace the process-wide generic recipe (used by tests and embedding)."""
-    global _default_recipe
-    _default_recipe = recipe
-
-
-def recipe_from_name(name: str) -> ReportRecipe:
-    """Resolve one stable recipe name to its process-wide ReportRecipe."""
-    if name == "generic":
-        return default_recipe()
-    if name == "bible":
-        from qwopus_agent.reports.bible_recipe import BIBLE_RECIPE
-
-        return BIBLE_RECIPE
-    raise ValueError(f"Unknown report recipe: {name!r}")
+    return _grounded.DEFAULT_RECIPE

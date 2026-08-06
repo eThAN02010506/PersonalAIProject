@@ -16,7 +16,7 @@ chat owner can explicitly share that chat and its attached files.
 | --- | --- |
 | Model layer | `BaseLLM`, provider registry, `LocalMLXLLM`, and a generic OpenAI-compatible adapter |
 | Agent runtime | smolagents-driven chat, separate Planner and Executor, DAG execution, supervised Multi-Agent delegation, shared state, debate, and arbitration |
-| Documents | Multi-file PDF, DOCX, Markdown, TXT, PNG, and JPEG analysis with Markdown normalization |
+| Documents | Multi-file PDF, DOCX, Markdown, TXT, PNG, and JPEG analysis with Markdown normalization. One generic grounded-composer recipe covers every document type: lesson-named files (第N课 / lesson N) are ordered by number, quoted scripture lines are captured and validated against each source's allowed verse range, and all other sources render as independent slots |
 | Spreadsheets | CSV, XLSX, and legacy XLS intake, workbook profiling, reviewed descriptive/inferential statistics and modeling Skills, plus restricted pandas for custom calculations |
 | Knowledge | Persistent conversation-scoped MiniRAG vectors plus an evidence-bound knowledge graph and bounded multi-hop search |
 | Web research | Optional Tavily search plus separately authorized, isolated Playwright page rendering |
@@ -348,6 +348,16 @@ upload
   to chat** to add selected documents to the active conversation.
 - Local-folder mode scans an absolute path, renders a selectable file tree, and
   analyzes only selected originals. It does not copy or index those files.
+
+When the question requests an exhaustive multi-file deliverable, the
+grounded composer builds the report deterministically from the collection
+evidence instead of relying on one long model generation. It treats every file
+as one isolated source slot: lesson-named files (第N课 / lesson N) are ordered
+by lesson number, scripture references are captured under the source's quote
+facts and validated against its allowed verse range, and each slot keeps its
+own evidence boundary so adjacent sources are never merged into a generic
+theme. The same recipe therefore covers Bible-study lessons, method documents,
+and arbitrary collections without a separate mode.
 
 Spreadsheet analysis intentionally never sends the entire workbook to the
 model:
