@@ -240,7 +240,8 @@ Multi-Agent 协作、报告生成和可复用 Skill，帮助用户完成可追�
 - 混合类型和空表头不能导致 `select_dtypes` 一类未处理错误；
 - 工作簿原始全量数据不进入模型提示；
 - 沙箱超时、越权或结果过大时明确拒绝；
-- macOS 使用 Seatbelt 进一步禁止网络、写文件和 fork。
+- macOS 使用 Seatbelt 进一步禁止网络、写文件和 fork；
+- 模型若自算统计值（均值、IQR 离群点数量、p 值、R²）却未调用本地 Skill 工具，运行时本地复算并校验该值：一致则接受并附本地表，不一致或缺失数字则 fail-closed，保证最终统计值可核对。
 
 当前边界：
 
@@ -423,6 +424,7 @@ Debug Console 显示：
 | FR-DOC-02 | 标题/章节/页码感知切片 | 已实现 | UC-04 |
 | FR-DOC-03 | 穷尽式多来源报告的确定性 grounded 合成（来源槽位、课号排序、引用校验） | 已实现 | UC-04 |
 | FR-XLS-01 | schema + sample + pandas 沙箱 | 已实现，有边界 | UC-06 |
+| FR-XLS-02 | 模型自算统计值的本地复算校验（一致接受、不一致 fail-closed） | 已实现 | UC-06 |
 | FR-KNW-01 | MiniRAG `insert` / `search` 外观 | 已实现 | UC-07 |
 | FR-KNW-02 | 会话和账号知识持久化隔离 | 已实现 | UC-07、UC-08 |
 | FR-KNW-03 | 有证据图谱和多跳路径 | 已实现，有边界 | UC-07 |

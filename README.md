@@ -381,6 +381,11 @@ intervals and model diagnostics, plus one-way ANOVA with group summaries,
 effect sizes, a Levene variance diagnostic, and optional Tukey HSD comparisons.
 These Skills use SciPy and statsmodels directly; the LLM selects a method and
 explains the verified result but does not calculate coefficients or p-values.
+When the model states a self-computed statistic (mean, IQR outlier count,
+p-value, R-squared) without calling the local tool, the runtime re-computes the
+required method locally and verifies the claimed value against it: a match is
+accepted with the local table attached, while a mismatch or a missing number
+fails closed so the answer never ships an unverified statistic.
 
 General workbook analysis reports verifiable per-column statistics such as
 count, mean, standard deviation, standard error, minimum, quartiles, median,

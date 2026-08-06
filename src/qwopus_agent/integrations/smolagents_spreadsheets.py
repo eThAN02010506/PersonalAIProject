@@ -45,6 +45,28 @@ def spreadsheet_intent_guidance(user_question: str) -> str:
     return " ".join(lines)
 
 
+def spreadsheet_self_computed_warning(
+    required_methods: tuple[tuple[str, str], ...],
+) -> str:
+    """Return a strong warning for weak models that skip the Excel compute tools.
+
+    原因：弱模型会直接在 final_answer 里给出自算数值，但这些数值不会进入
+    最终表格（运行时只接受本地 Skill 工具返回的表）。
+    作用：明确告诉模型自算无效，必须调用本地计算工具。
+    """
+    if not required_methods:
+        return ""
+    names = ", ".join(".".join(method) for method in required_methods)
+    return (
+        "Self-computed statistics are NOT accepted as final tables: reported "
+        "values are verified against a local recomputation when the tool was "
+        "skipped. Prefer calling "
+        f"{names} so every reported value comes from its returned table before "
+        "writing the answer; do not compute mean, p-value, coefficient, or "
+        "R-squared yourself."
+    )
+
+
 def has_required_spreadsheet_method(
     steps: list[dict[str, Any]],
     *,

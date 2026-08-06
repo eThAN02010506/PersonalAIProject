@@ -553,6 +553,27 @@ class SmolagentsToolsTests(unittest.TestCase):
         self.assertIn("ownership.pdf, page 4", result)
         self.assertEqual(phases, ["retrieving", "generating"])
 
+    def test_spreadsheet_self_computed_warning_guides_weak_models(self) -> None:
+        from qwopus_agent.integrations.smolagents_spreadsheets import (
+            spreadsheet_self_computed_warning,
+        )
+
+        # 必需方法缺失时给出强指令，明令自算数值不被接受。
+        warning = spreadsheet_self_computed_warning(
+            (("excel_statistics", "describe"),)
+        )
+        self.assertIn("Self-computed statistics are NOT accepted", warning)
+        self.assertIn("excel_statistics.describe", warning)
+        self.assertIn("do not compute mean, p-value, coefficient", warning)
+
+        regression_warning = spreadsheet_self_computed_warning(
+            (("excel_modeling", "linear_regression"),)
+        )
+        self.assertIn("excel_modeling.linear_regression", regression_warning)
+
+        # 无必需方法时不产生任何附加警告。
+        self.assertEqual(spreadsheet_self_computed_warning(()), "")
+
 
 if __name__ == "__main__":
     unittest.main()

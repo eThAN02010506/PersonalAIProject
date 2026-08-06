@@ -1,0 +1,197 @@
+"""Tests for model self-computed spreadsheet value verification."""
+
+from __future__ import annotations
+
+import tempfile
+import unittest
+from pathlib import Path
+
+import pandas as pd
+
+from qwopus_agent.integrations.spreadsheet_verification import (
+    _close_enough,
+    _extract_claimed_value,
+    _values_match,
+    local_verify_missing_spreadsheet_methods,
+    verify_one_method,
+)
+
+
+class ClaimedValueExtractionTests(unittest.TestCase):
+    def test_extracts_chinese_mean(self) -> None:
+        self.assertEqual(
+            _extract_claimed_value("describe", "Sepal.Length 的平均值是 5.8433。"),
+            (5.8433,),
+        )
+
+    def test_extracts_english_mean(self) -> None:
+        self.assertEqual(
+            _extract_claimed_value("describe", "The mean of Sepal.Length is 5.8433."),
+            (5.8433,),
+        )
+
+    def test_extracts_median(self) -> None:
+        self.assertEqual(
+            _extract_claimed_value("quantiles", "中位数是 5.8。"),
+            (5.8,),
+        )
+
+    def test_extracts_outlier_count_zero(self) -> None:
+        self.assertEqual(
+            _extract_claimed_value("iqr_outliers", "outlier_count: 0"),
+            (0,),
+        )
+
+    def test_extracts_outlier_count_positive(self) -> None:
+        self.assertEqual(
+            _extract_claimed_value("zscore_outliers", "outlier_count is 3"),
+            (3,),
+        )
+
+    def test_extracts_p_value_scientific_notation(self) -> None:
+        self.assertEqual(
+            _extract_claimed_value(
+                "normality_test", "p-value = 0.056824, 不拒绝正态。"
+            ),
+            (0.056824,),
+        )
+
+    def test_extracts_r_squared(self) -> None:
+        self.assertEqual(
+            _extract_claimed_value("linear_regression", "R² = 0.013823"),
+            (0.013823,),
+        )
+
+    def test_returns_none_when_no_number(self) -> None:
+        self.assertIsNone(
+            _extract_claimed_value("describe", "数据看起来比较集中。")
+        )
+
+
+class ValueMatchTests(unittest.TestCase):
+    def test_accepts_rounded_local_value(self) -> None:
+        # 模型报 4 位小数，本地 6 位，容差内应接受。
+        self.assertTrue(_values_match((5.843333,), (5.8433,)))
+
+    def test_rejects_wrong_value(self) -> None:
+        self.assertFalse(_values_match((5.843333,), (6.2,)))
+
+    def test_accepts_exact_integer_count(self) -> None:
+        self.assertTrue(_values_match((3,), (3,)))
+        self.assertFalse(_values_match((3,), (4,)))
+
+    def test_close_enough_abs_and_rel_tolerance(self) -> None:
+        self.assertTrue(_close_enough(5.843333, 5.8433))
+        self.assertTrue(_close_enough(1000.0, 1000.5))
+        self.assertFalse(_close_enough(5.84, 6.2))
+
+
+class VerificationEndToEndTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.path = Path(self._tmp.name) / "iris.xlsx"
+        data = [5.1, 4.9, 5.8, 6.4, 5.843333, 5.2, 5.0, 6.1, 6.3, 5.7]
+        pd.DataFrame(
+            {
+                "Sepal.Length": data,
+                "Sepal.Width": [3.5, 3.0, 3.2, 3.1, 2.8, 3.6, 3.9, 3.4, 3.0, 3.7],
+            }
+        ).to_excel(self.path, index=False)
+        self.true_mean = round(sum(data) / len(data), 4)
+        self.paths = {"iris.xlsx": self.path}
+
+    def test_verify_one_method_accepts_correct_self_computed_mean(self) -> None:
+        narrative = f"Sepal.Length 的平均值是 {self.true_mean}。"
+        result = verify_one_method(
+            ("excel_statistics", "describe"),
+            spreadsheet_names=["iris.xlsx"],
+            spreadsheet_paths=self.paths,
+            user_question="计算 Sepal.Length 的平均值并返回表格",
+            narrative=narrative,
+            debug_steps=[],
+        )
+        self.assertIsNotNone(result)
+        synthetic_step, prose = result
+        self.assertEqual(
+            synthetic_step["tool_calls"][0]["function"]["name"],
+            "excel_statistics",
+        )
+        self.assertIn("复核 describe", prose)
+
+    def test_verify_one_method_rejects_wrong_self_computed_mean(self) -> None:
+        narrative = "Sepal.Length 的平均值是 6.2。"
+        result = verify_one_method(
+            ("excel_statistics", "describe"),
+            spreadsheet_names=["iris.xlsx"],
+            spreadsheet_paths=self.paths,
+            user_question="计算 Sepal.Length 的平均值并返回表格",
+            narrative=narrative,
+            debug_steps=[],
+        )
+        self.assertIsNone(result)
+
+    def test_verify_one_method_returns_none_without_number(self) -> None:
+        narrative = "数据分布看起来比较集中。"
+        result = verify_one_method(
+            ("excel_statistics", "describe"),
+            spreadsheet_names=["iris.xlsx"],
+            spreadsheet_paths=self.paths,
+            user_question="计算 Sepal.Length 的平均值并返回表格",
+            narrative=narrative,
+            debug_steps=[],
+        )
+        self.assertIsNone(result)
+
+    def test_local_verify_appends_step_and_discards_missing_tool(self) -> None:
+        steps = [
+            {
+                "step_number": 1,
+                "observations": f"Sepal.Length 的平均值是 {self.true_mean}。",
+                "tool_calls": [
+                    {"function": {"name": "excel_schema", "arguments": {}}}
+                ],
+            }
+        ]
+        missing_tools = {"excel_statistics"}
+        result = local_verify_missing_spreadsheet_methods(
+            steps,
+            spreadsheet_paths=self.paths,
+            spreadsheet_names=["iris.xlsx"],
+            user_question="计算 Sepal.Length 的平均值并返回表格",
+            missing_tools=missing_tools,
+            required_spreadsheet_methods=(("excel_statistics", "describe"),),
+            debug_steps=[],
+        )
+        self.assertTrue(result)
+        self.assertNotIn("excel_statistics", missing_tools)
+        self.assertEqual(len(steps), 2)
+        self.assertEqual(
+            steps[-1]["tool_calls"][0]["function"]["name"],
+            "excel_statistics",
+        )
+
+    def test_local_verify_keeps_missing_tool_on_mismatch(self) -> None:
+        steps = [
+            {
+                "step_number": 1,
+                "observations": "Sepal.Length 的平均值是 9.9。",
+                "tool_calls": [],
+            }
+        ]
+        missing_tools = {"excel_statistics"}
+        result = local_verify_missing_spreadsheet_methods(
+            steps,
+            spreadsheet_paths=self.paths,
+            spreadsheet_names=["iris.xlsx"],
+            user_question="计算 Sepal.Length 的平均值并返回表格",
+            missing_tools=missing_tools,
+            required_spreadsheet_methods=(("excel_statistics", "describe"),),
+            debug_steps=[],
+        )
+        self.assertEqual(result, "")
+        self.assertIn("excel_statistics", missing_tools)
+
+
+if __name__ == "__main__":
+    unittest.main()

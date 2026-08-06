@@ -12,6 +12,7 @@ from qwopus_agent.integrations import (
     smolagents_file_prompts,
     smolagents_model,
     smolagents_spreadsheets,
+    spreadsheet_verification,
 )
 from qwopus_agent.integrations.smolagents_results import DocumentAnalysisRun
 from qwopus_agent.reports import contract as report_contract
@@ -43,6 +44,12 @@ _sanitize_spreadsheet_narrative = smolagents_spreadsheets.sanitize_spreadsheet_n
 _spreadsheet_computation_summary = smolagents_spreadsheets.spreadsheet_computation_summary
 _spreadsheet_intent_guidance = smolagents_spreadsheets.spreadsheet_intent_guidance
 _spreadsheet_result_tables = smolagents_spreadsheets.spreadsheet_result_tables
+_spreadsheet_self_computed_warning = (
+    smolagents_spreadsheets.spreadsheet_self_computed_warning
+)
+_local_verify_missing_spreadsheet_methods = (
+    spreadsheet_verification.local_verify_missing_spreadsheet_methods
+)
 _apply_grounded_report_fallbacks = report_contract._apply_grounded_report_fallbacks
 _collection_grounding_evidence = report_contract._collection_grounding_evidence
 _is_model_generation_failure_output = report_contract._is_model_generation_failure_output
@@ -349,6 +356,7 @@ def run_smolagents_file_analysis_with_debug(
                 f"Before answering, call every missing required tool: {missing_tool_instruction}. "
                 f"Required spreadsheet computation: {required_method_instruction}. "
                 f"{spreadsheet_intent_guidance} "
+                f"{_spreadsheet_self_computed_warning(required_spreadsheet_methods)} "
                 "Inspect every missing file with document_summary, document_search, "
                 "document_read_section, or document_collection_summary: "
                 f"{missing_file_instruction}. "
@@ -496,6 +504,25 @@ def run_smolagents_file_analysis_with_debug(
         final_answer = fallback_answer
         tool_calls.append("excel_statistics")
         successful_tool_calls.append("excel_statistics")
+    elif missing_tools.intersection({"excel_statistics", "excel_modeling"}):
+        # 原因：模型可能自算统计值却跳过本地工具，直接报错会让强模型的正确自算白跑。
+        # 作用：本地复算并校验模型叙述数值，一致才接受；不一致仍走 fail-closed。
+        verified_before = set(missing_tools)
+        verified_answer = _local_verify_missing_spreadsheet_methods(
+            all_steps,
+            spreadsheet_paths=spreadsheet_paths or {},
+            spreadsheet_names=spreadsheet_names,
+            user_question=user_question,
+            missing_tools=missing_tools,
+            required_spreadsheet_methods=required_spreadsheet_methods,
+            debug_steps=debug_steps,
+            narrative=final_answer,
+        )
+        if verified_answer:
+            final_answer = verified_answer
+            for verified_tool in verified_before.difference(missing_tools):
+                tool_calls.append(verified_tool)
+                successful_tool_calls.append(verified_tool)
     if missing_tools:
         missing_names = ", ".join(sorted(missing_tools))
         raise RuntimeError(f"smolagents did not call required file tools: {missing_names}.")

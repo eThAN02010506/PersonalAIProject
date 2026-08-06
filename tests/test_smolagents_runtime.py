@@ -2861,6 +2861,66 @@ class SmolagentsRuntimeTests(unittest.TestCase):
                 settings=settings,
             )
 
+    def test_file_analysis_accepts_self_computed_mean_via_verification(self) -> None:
+        settings = SmolagentsModelSettings(
+            model_id="any-model",
+            base_url="http://127.0.0.1:8080/v1",
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "iris.xlsx"
+            data = [5.1, 4.9, 5.8, 6.4, 5.843333, 5.2, 5.0, 6.1, 6.3, 5.7]
+            pd.DataFrame(
+                {
+                    "Sepal.Length": data,
+                    "Sepal.Width": [3.5, 3.0, 3.2, 3.1, 2.8, 3.6, 3.9, 3.4, 3.0, 3.7],
+                }
+            ).to_excel(path, index=False)
+            true_mean = round(sum(data) / len(data), 4)
+            # 模型只自算 mean 并写进叙述，从未调用 excel_statistics。
+            FakeToolCallingAgent.queued_results = [
+                types.SimpleNamespace(
+                    output=f"Sepal.Length 的平均值是 {true_mean}。",
+                    state="success",
+                    steps=[
+                        {
+                            "step_number": 1,
+                            "observations": "Schema result",
+                            "tool_calls": [
+                                {
+                                    "function": {
+                                        "name": "excel_schema",
+                                        "arguments": {"file_name": "iris.xlsx"},
+                                    }
+                                }
+                            ],
+                        }
+                    ],
+                ),
+                types.SimpleNamespace(
+                    output=f"Sepal.Length 的平均值是 {true_mean}。",
+                    state="success",
+                    steps=[],
+                ),
+            ]
+
+            result = run_smolagents_file_analysis_with_debug(
+                file_names=["iris.xlsx"],
+                spreadsheet_names=["iris.xlsx"],
+                user_question="计算 Sepal.Length 的平均值并返回表格。",
+                tools=[object(), object()],
+                settings=settings,
+                spreadsheet_paths={"iris.xlsx": path},
+            )
+
+        # 原因：模型自算的 mean 与本地复算一致时应被接受，而不是 fail-closed。
+        # 作用：锁定真数值校验路径——最终答案含本地复核表格，且不报“未调用工具”。
+        self.assertIn("复核 describe", result.answer)
+        self.assertIn("本地计算表格", result.answer)
+        self.assertIn("| Sepal.Length | 10 | 0 |", result.answer)
+        self.assertTrue(
+            any("本地校验通过" in step for step in result.debug_steps)
+        )
+
     def test_format_file_analysis_prompt_explains_excel_tool_order(self) -> None:
         prompt = format_file_analysis_agent_prompt(
             file_names=["sales.xlsx"],
@@ -3245,3 +3305,80 @@ class SmolagentsRuntimeTests(unittest.TestCase):
 
         self.assertFalse(online)
         self.assertIn("无法连接模型服务", message)
+
+    def test_file_analysis_retry_warns_against_self_computed_statistics(self) -> None:
+        settings = SmolagentsModelSettings(
+            model_id="any-model",
+            base_url="http://127.0.0.1:8080/v1",
+        )
+        # 第一轮：模型自算 mean，跳过 excel_statistics。
+        # 第二轮：模型按 retry 警告调用 excel_statistics，runtime 才接受。
+        FakeToolCallingAgent.queued_results = [
+            types.SimpleNamespace(
+                output="我算得 Sepal.Length 的均值是 5.8433。",
+                state="success",
+                steps=[
+                    {
+                        "step_number": 1,
+                        "observations": "Schema result",
+                        "tool_calls": [
+                            {
+                                "function": {
+                                    "name": "excel_schema",
+                                    "arguments": {"file_name": "iris.xlsx"},
+                                }
+                            }
+                        ],
+                    }
+                ],
+            ),
+            types.SimpleNamespace(
+                output=(
+                    "| column | count | mean | std | min | 25% | 50% | 75% | max |\n"
+                    "| --- | --- | --- | --- | --- | --- | --- | --- | --- |\n"
+                    "| Sepal.Length | 150 | 5.843333 | 0.828066 | 4.3 | 5.1 | 5.8 "
+                    "| 6.4 | 7.9 |"
+                ),
+                state="success",
+                steps=[
+                    {
+                        "step_number": 2,
+                        "observations": (
+                            "| column | count | mean | std | min | 25% | 50% | 75% | max |\n"
+                            "| --- | --- | --- | --- | --- | --- | --- | --- | --- |\n"
+                            "| Sepal.Length | 150 | 5.843333 | 0.828066 | 4.3 | 5.1 | 5.8 "
+                            "| 6.4 | 7.9 |"
+                        ),
+                        "tool_calls": [
+                            {
+                                "function": {
+                                    "name": "excel_statistics",
+                                    "arguments": {
+                                        "file_name": "iris.xlsx",
+                                        "method": "describe",
+                                    },
+                                }
+                            }
+                        ],
+                    }
+                ],
+            ),
+        ]
+
+        result = run_smolagents_file_analysis_with_debug(
+            file_names=["iris.xlsx"],
+            spreadsheet_names=["iris.xlsx"],
+            user_question="计算 Sepal.Length 的平均值并返回表格。",
+            tools=[object(), object()],
+            settings=settings,
+        )
+
+        # 原因：弱模型第一轮自算数值，retry 轮必须明确禁止自算并强制补调本地工具。
+        # 作用：锁定 retry prompt 包含 self-computed 警告，且最终只接受本地 Skill 表格。
+        self.assertIn(
+            "Self-computed statistics are NOT accepted",
+            FakeToolCallingAgent.last_instance.prompt,
+        )
+        self.assertEqual(result.tool_calls, ["excel_schema", "excel_statistics"])
+        self.assertIn("| Sepal.Length | 150 | 5.843333 |", result.answer)
+        self.assertIn("| 0.828066 |", result.answer)
