@@ -16,6 +16,7 @@ from qwopus_agent.services.chat_service import (
     CHAT_WORKER_REQUEST_SCHEMA_VERSION,
     BackgroundChatTask,
     ChatWorkerRequest,
+    _enforce_run_deadline,
     _run_chat_task,
     start_chat_task,
 )
@@ -285,6 +286,89 @@ class ChatServiceTests(unittest.TestCase):
         self.assertIn("configured timeout", result.content)
         process.terminate.assert_called_once_with()
         process.join.assert_called_once_with(timeout=2)
+
+    def test_worker_enforces_deadline_in_process(self) -> None:
+        result_queue: queue.Queue[Any] = queue.Queue()
+        progress_queue: queue.Queue[Any] = queue.Queue()
+        settings = SmolagentsModelSettings(
+            model_id="test",
+            base_url="http://local/v1",
+            timeout_seconds=1,
+            run_timeout_seconds=1,
+        )
+        request = self._request(settings=settings)
+        started = time.monotonic()
+
+        def slow_orchestrator(
+            _self: Any,
+            request: OrchestrationRequest,
+            progress_callback: Callable[[str], None] | None = None,
+        ) -> OrchestrationResult:
+            # 原因：真实编排可能长时间阻塞在模型请求上；用主线程 sleep 模拟。
+            # 作用：让 SIGALRM 看门狗在 sleep 期间触发，验证超时必然中断。
+            time.sleep(5)
+            raise AssertionError("orchestrator should have been interrupted")
+
+        with (
+            patch(
+                "qwopus_agent.services.chat_service.AgentOrchestrator.run_sync",
+                slow_orchestrator,
+            ),
+            patch(
+                "qwopus_agent.services.chat_service._enforce_run_deadline",
+                return_value=_enforce_run_deadline(0.2),
+            ),
+        ):
+            _run_chat_task(result_queue, progress_queue, request)
+
+        elapsed = time.monotonic() - started
+        status, content = result_queue.get_nowait()[:2]
+        # 原因：整轮超时必须在进程内强制，不依赖父进程轮询。
+        # 作用：锁定 worker 在约 1 秒内回传 failed + 超时消息，而不是等 5 秒。
+        self.assertEqual(status, "failed")
+        self.assertIn("configured timeout", content)
+        self.assertLess(elapsed, 4.0, f"deadline not enforced, took {elapsed:.1f}s")
+
+    def test_worker_timeout_records_run_timeout_phase_event(self) -> None:
+        result_queue: queue.Queue[Any] = queue.Queue()
+        progress_queue: queue.Queue[Any] = queue.Queue()
+        settings = SmolagentsModelSettings(
+            model_id="test",
+            base_url="http://local/v1",
+            timeout_seconds=1,
+            run_timeout_seconds=1,
+        )
+        request = self._request(settings=settings)
+
+        def slow_orchestrator(
+            _self: Any,
+            request: OrchestrationRequest,
+            progress_callback: Callable[[str], None] | None = None,
+        ) -> OrchestrationResult:
+            time.sleep(5)
+            raise AssertionError("orchestrator should have been interrupted")
+
+        with (
+            patch(
+                "qwopus_agent.services.chat_service.AgentOrchestrator.run_sync",
+                slow_orchestrator,
+            ),
+            patch(
+                "qwopus_agent.services.chat_service._enforce_run_deadline",
+                return_value=_enforce_run_deadline(0.2),
+            ),
+        ):
+            _run_chat_task(result_queue, progress_queue, request)
+
+        payload = result_queue.get_nowait()
+        trace = tuple(payload[2])
+        # 原因：超时路径不能丢阶段耗时指标。
+        # 作用：锁定失败结果带 run_timeout 事件和 duration_seconds。
+        self.assertTrue(trace)
+        event = trace[0]
+        self.assertEqual(event["phase"], "run_timeout")
+        self.assertEqual(event["status"], "failed")
+        self.assertGreaterEqual(event["duration_seconds"], 0)
 
 
 if __name__ == "__main__":
