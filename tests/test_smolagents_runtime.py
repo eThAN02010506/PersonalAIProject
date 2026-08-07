@@ -3441,6 +3441,46 @@ class SpreadsheetIntentMappingTests(unittest.TestCase):
             (("excel_statistics", "normality_test"),),
         )
 
+    def test_specific_column_mean_not_stolen_by_bare_ci(self) -> None:
+        # 裸 "ci" 会子串命中 "specific"，不能被 mean_confidence_interval 抢走。
+        self.assertEqual(
+            required_spreadsheet_methods("specific column mean"),
+            (("excel_statistics", "describe"),),
+        )
+        # "confidence interval" 仍正确路由到 CI。
+        self.assertEqual(
+            required_spreadsheet_methods("95% confidence interval"),
+            (("excel_statistics", "mean_confidence_interval"),),
+        )
+
+    def test_paired_t_test_stays_on_t_test(self) -> None:
+        # "配对 t 检验" 明确是 t 检验，不能被 wilcoxon 的 "配对" 抢走。
+        self.assertEqual(
+            required_spreadsheet_methods("配对 t 检验"),
+            (("excel_statistics", "one_sample_t_test"),),
+        )
+        # "wilcoxon" 专用词仍路由到 wilcoxon。
+        self.assertEqual(
+            required_spreadsheet_methods("wilcoxon 配对检验"),
+            (("excel_statistics", "wilcoxon_signed_rank"),),
+        )
+
+    def test_top_n_question_not_routed_to_rank(self) -> None:
+        # "前 10" 是 top-N 排行/范围，不是逐行排名，不能被 rank 抢走。
+        self.assertEqual(
+            required_spreadsheet_methods("销售额前 10 的产品"),
+            (),
+        )
+        self.assertEqual(
+            required_spreadsheet_methods("前 10 行的均值"),
+            (("excel_statistics", "describe"),),
+        )
+        # 明确的排名意图仍路由到 rank。
+        self.assertEqual(
+            required_spreadsheet_methods("按分数排名"),
+            (("excel_statistics", "rank"),),
+        )
+
     def test_pivot_question_routes_to_pivot(self) -> None:
         self.assertEqual(
             required_spreadsheet_methods("透视各区域的收入"),

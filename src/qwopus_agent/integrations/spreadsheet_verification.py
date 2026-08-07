@@ -56,8 +56,11 @@ def local_verify_missing_spreadsheet_methods(
         return "", False
     if not narrative:
         return "", False
-    degraded = False
+    # 原因：schema 目标只依赖固定 steps，对每个方法重算是纯浪费。
+    # 作用：只解析一次，所有 verify_one_method 复用同一份表名/列名。
+    schema_targets = _schema_targets(steps or [])
     degraded_prose = ""
+    verified_tools: set[str] = set()
     for tool_name, method in required_spreadsheet_methods:
         if tool_name not in missing_tools:
             continue
@@ -70,19 +73,24 @@ def local_verify_missing_spreadsheet_methods(
             debug_steps=debug_steps,
             step_number=len(steps),
             steps=steps,
+            schema_targets=schema_targets,
             use_chinese=use_chinese,
         )
         if verified is None:
             continue
         synthetic_step, prose, is_verified = verified
         steps.append(synthetic_step)
-        missing_tools.discard(tool_name)
+        verified_tools.add(tool_name)
         if not is_verified:
-            degraded = True
             degraded_prose = prose
+    # 原因：missing_tools 按工具名记录；同一工具下可能有多个必需方法
+    # （如诊断路由返回 missing/describe/quantiles/iqr_outliers）。
+    # 作用：先验证完该工具下所有方法，再把工具名移出缺失集，避免只验第一个就放行其余伪造值。
+    for tool_name in verified_tools:
+        missing_tools.discard(tool_name)
     # 原因：模型自算值全部匹配时保留原答案（prose 为空），只追加本地核验表；
     # 有任何降级时用中性 prose 替换，避免叙述与本地表冲突。
-    if degraded:
+    if degraded_prose:
         return degraded_prose, True
     return "", False
 
@@ -97,6 +105,7 @@ def verify_one_method(
     debug_steps: list[str],
     step_number: int = 0,
     steps: list[dict[str, Any]] | None = None,
+    schema_targets: dict[str, list[str]] | None = None,
     use_chinese: bool = True,
 ) -> tuple[dict[str, Any], str, bool] | None:
     """Recompute one required method and accept when locally recomputable.
@@ -109,7 +118,7 @@ def verify_one_method(
     tool_name, method_name = method
     if method_name not in _VERIFIABLE_METHODS:
         return None
-    schema_targets = _schema_targets(steps or [])
+    schema_targets = schema_targets or _schema_targets(steps or [])
     for spreadsheet_name in spreadsheet_names:
         path = spreadsheet_paths.get(spreadsheet_name)
         if path is None:
@@ -152,11 +161,9 @@ def verify_one_method(
         }
         claimed = _extract_claimed_value(method_name, narrative)
         strict = _VERIFIABLE_METHODS[method_name] in _STRICT_KEYS
-        matched = False
-        if claimed is not None and _values_match(
+        matched = claimed is not None and _values_match(
             local_values, claimed, strict=strict
-        ):
-            matched = True
+        )
         # 原因：describe 多列时 any-any 匹配可能把列 A 声称值当列 B 的值接受。
         # 作用：有列名上下文时要求声称列与本地列一致，避免误接受。
         if (
@@ -171,15 +178,14 @@ def verify_one_method(
                 for local_column, local_mean in local_pairs
                 for claimed_column, claimed_mean in claimed_pairs
             )
-        if matched:
-            assert claimed is not None
+        if matched and claimed is not None:
             prose = (
                 f"已在 {spreadsheet_name} 上复核 {method_name}："
-                f"{_prose_claim(method_name, claimed)}。"
+                f"{_prose_claim(method_name, claimed, use_chinese)}。"
                 if use_chinese
                 else (
                     f"Verified {method_name} on {spreadsheet_name}: "
-                    f"{_prose_claim_english(method_name, claimed)}."
+                    f"{_prose_claim(method_name, claimed, use_chinese)}."
                 )
             )
             debug_steps.append(
@@ -213,23 +219,26 @@ def _schema_targets(steps: list[dict[str, Any]]) -> dict[str, list[str]]:
     for observation in smolagents_debug.extract_tool_observations(
         steps, "excel_schema"
     ):
-        table_names = re.findall(r"(?m)^##\s+Sheet:\s*([^\r\n]+)", observation)
-        column_matches = re.findall(
-            r"(?m)^-+\s*Column names?:\s*([^\r\n]+)", observation
-        )
-        columns: list[str] = []
-        for line in column_matches:
-            columns.extend(
-                column.strip()
-                for column in line.split(",")
-                if column.strip()
+        # 原因：excel_schema 用 "## Sheet: X" 和 "## Table: X" 区分主表和次级区域。
+        # 作用：两类标题都要解析，避免漏掉区域表名导致选错目标表。
+        current_table: str | None = None
+        for line in observation.splitlines():
+            heading = re.match(r"^##\s+(?:Sheet|Table):\s*([^\r\n]+)", line)
+            if heading is not None:
+                current_table = heading.group(1).strip()
+                targets.setdefault(current_table, [])
+                continue
+            column_line = re.match(
+                r"^-\s*Column names?:\s*([^\r\n]+)", line
             )
-        for table_name in table_names:
-            table_name = table_name.strip()
-            targets.setdefault(table_name, [])
-            for column in columns:
-                if column not in targets[table_name]:
-                    targets[table_name].append(column)
+            if column_line is not None and current_table is not None:
+                for column in (
+                    column.strip()
+                    for column in column_line.group(1).split(",")
+                    if column.strip()
+                ):
+                    if column not in targets[current_table]:
+                        targets[current_table].append(column)
     return targets
 
 
@@ -326,6 +335,24 @@ def _choose_table(
     return best_name if best_score > 0 else next(iter(frames))
 
 
+def _pick_column(
+    columns: list[str],
+    lowered: str,
+    default: str,
+    *,
+    exclude: str = "",
+) -> str:
+    """Pick the first column whose name appears in the question text."""
+    return next(
+        (
+            column
+            for column in columns
+            if column != exclude and column.casefold() in lowered
+        ),
+        default,
+    )
+
+
 def _derive_arguments(
     method_name: str,
     frame: Any,
@@ -399,28 +426,20 @@ def _derive_arguments(
     # 且必须 dispatch 早于 value_columns 校验。
     # 作用：从问题文字和 schema 列名推导这些数据整理参数。
     if method_name == "pivot":
-        row_column = next(
-            (
-                column
-                for column in non_numeric_columns
-                if column.casefold() in lowered
-            ),
+        row_column = _pick_column(
+            non_numeric_columns,
+            lowered,
             non_numeric_columns[0] if non_numeric_columns else "",
         )
-        column_column = next(
-            (
-                column
-                for column in non_numeric_columns
-                if column != row_column and column.casefold() in lowered
-            ),
+        column_column = _pick_column(
+            non_numeric_columns,
+            lowered,
             non_numeric_columns[1] if len(non_numeric_columns) > 1 else "",
+            exclude=row_column,
         )
-        value_column = next(
-            (
-                column
-                for column in numeric_columns
-                if column.casefold() in lowered
-            ),
+        value_column = _pick_column(
+            numeric_columns,
+            lowered,
             numeric_columns[-1] if numeric_columns else "",
         )
         agg = (
@@ -436,12 +455,9 @@ def _derive_arguments(
         }
     if method_name == "date_extract":
         all_columns = [str(column) for column in frame.columns]
-        date_column = next(
-            (
-                column
-                for column in all_columns
-                if column.casefold() in lowered
-            ),
+        date_column = _pick_column(
+            all_columns,
+            lowered,
             next(
                 (
                     column
@@ -478,12 +494,9 @@ def _derive_arguments(
         )
         return {"columns": mentioned, "keep": keep}
     if method_name == "rank":
-        value_column = next(
-            (
-                column
-                for column in numeric_columns
-                if column.casefold() in lowered
-            ),
+        value_column = _pick_column(
+            numeric_columns,
+            lowered,
             numeric_columns[0] if numeric_columns else "",
         )
         rank_method = (
@@ -746,17 +759,14 @@ def _close_enough(local: float, claimed: float, *, strict: bool = False) -> bool
     )
 
 
-def _prose_claim(method_name: str, claimed: tuple[float, ...]) -> str:
-    """Render a stable human sentence describing the verified claimed value."""
+def _prose_claim(
+    method_name: str,
+    claimed: tuple[float, ...],
+    use_chinese: bool,
+) -> str:
+    """Render a stable sentence describing the verified claimed value."""
     key = _VERIFIABLE_METHODS[method_name]
     if key == "outlier_count":
-        return f"离群点数量 {int(claimed[0])}"
-    return f"{key} = {claimed[0]:g}"
-
-
-def _prose_claim_english(method_name: str, claimed: tuple[float, ...]) -> str:
-    """Render an English prose claim matching :func:`_prose_claim`."""
-    key = _VERIFIABLE_METHODS[method_name]
-    if key == "outlier_count":
-        return f"outlier count {int(claimed[0])}"
+        label = "离群点数量" if use_chinese else "outlier count"
+        return f"{label} {int(claimed[0])}"
     return f"{key} = {claimed[0]:g}"

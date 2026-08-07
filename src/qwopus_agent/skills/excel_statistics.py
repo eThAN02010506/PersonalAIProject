@@ -712,9 +712,15 @@ def _pivot_table(
         raise ValueError(
             f"pivot agg must be one of: {', '.join(sorted(allowed_aggs))}."
         )
-    numeric = pd.to_numeric(dataframe[value_column], errors="coerce")
     work = dataframe[[row_column, column_column]].copy()
-    work[value_column] = numeric
+    if agg == "count":
+        # 原因：count 语义是“该组合有多少个非空单元”，非数值文本（如 "N/A"）也是有效计数。
+        # 作用：count 用原始值列，不做 to_numeric 强转，避免把文本单元静默当成缺失。
+        work[value_column] = dataframe[value_column]
+    else:
+        work[value_column] = pd.to_numeric(
+            dataframe[value_column], errors="coerce"
+        )
     # 原因：aggfunc 只接受 pandas 白名单字符串，但 stubs 把类型标成 Literal 联合。
     # 作用：值已在 allowed_aggs 校验过，这里仅绕过 mypy 的 arg-type 误报。
     table = pd.pivot_table(
@@ -767,9 +773,10 @@ def _date_extract(
             f"date_extract parts must be in: {', '.join(sorted(valid_parts))}."
         )
     result = dataframe[[date_column]].copy()
+    year = parsed.dt.year
     for part in selected:
         if part == "year":
-            result[f"{date_column}_year"] = parsed.dt.year
+            result[f"{date_column}_year"] = year
         elif part == "month":
             result[f"{date_column}_month"] = parsed.dt.month
         elif part == "quarter":
@@ -777,8 +784,8 @@ def _date_extract(
         else:
             result[f"{date_column}_weekday"] = parsed.dt.dayofweek
     result = result[parsed.notna()].head(top_n).reset_index(drop=True)
-    min_year = int(parsed.dt.year.min())
-    max_year = int(parsed.dt.year.max())
+    min_year = int(year.min())
+    max_year = int(year.max())
     return result, {
         "date_column": date_column,
         "parts": ", ".join(selected),
@@ -841,6 +848,7 @@ def _rank_rows(
     ]
     if missing:
         raise KeyError(", ".join(missing))
+    result = dataframe[base_columns].copy()
     if rank_method == "ntile":
         if into_bins <= 0:
             raise ValueError("rank into_bins must be greater than zero.")
@@ -851,12 +859,18 @@ def _rank_rows(
             raise ValueError("rank ntile requires at least two numeric observations.")
         bin_count = min(into_bins, valid_count)
         bins = pd.qcut(values, q=bin_count, labels=False, duplicates="drop")
-        result = dataframe[base_columns].copy()
-        result["rank_ntile"] = bins + 1
+        actual_bins = int(bins.nunique())
+        if actual_bins < 2:
+            # 原因：全相等数据会让 qcut 折叠到单一边界并返回全 NaN。
+            # 作用：退化为单一桶（全部 rank 1），而不是输出不可读的 NaN 排名。
+            result["rank_ntile"] = 1
+            actual_bins = 1
+        else:
+            result["rank_ntile"] = bins + 1
         details: dict[str, Any] = {
             "value_column": value_column,
             "rank_method": "ntile",
-            "into_bins": int(bins.nunique()),
+            "into_bins": actual_bins,
             "total_rows": int(len(dataframe)),
         }
     else:
@@ -868,12 +882,10 @@ def _rank_rows(
         # 平均秩（平局取均值），对应 pandas 的 "average"。
         # 作用：把 R 风格默认值映射到 pandas 合法方法，保持工具契约稳定。
         pandas_method = "average" if rank_method == "rank" else rank_method
-        ranked = values.rank(
+        result["rank"] = values.rank(
             method=pandas_method,  # type: ignore[arg-type]
             na_option="keep",
         )
-        result = dataframe[base_columns].copy()
-        result["rank"] = ranked
         details = {
             "value_column": value_column,
             "rank_method": rank_method,
@@ -1100,6 +1112,58 @@ def _one_sample_t_tests(
     return pd.DataFrame(rows).round(6)
 
 
+def _split_group_samples(
+    dataframe: pd.DataFrame,
+    *,
+    value_column: str,
+    group_column: str,
+    group_values: list[str],
+    exact_groups: int | None = None,
+) -> tuple[list[pd.Series], list[str]]:
+    """Split one value column into one numeric sample per requested group.
+
+    `group_values` names exactly the groups to compare; when empty, every
+    non-null group in `group_column` is used.  `exact_groups` requires that many
+    groups when two-sample tests need exactly two; otherwise any two or more
+    groups are accepted.  Returns the numeric samples and group labels in the
+    same order, validating that there are enough groups and at least two
+    observations per sample.
+    """
+    observed_groups = list(
+        dict.fromkeys(dataframe[group_column].dropna().astype(str))
+    )
+    selected_groups = group_values or observed_groups
+    required = exact_groups if exact_groups is not None else 2
+    if len(selected_groups) < required:
+        raise ValueError(
+            f"requires at least {required} groups in group_column, got "
+            f"{len(selected_groups)}."
+        )
+    if exact_groups is not None and len(selected_groups) > exact_groups:
+        raise ValueError(
+            f"requires exactly {exact_groups} group_values, got "
+            f"{len(selected_groups)}."
+        )
+    group_series = dataframe[group_column].astype(str)
+    non_empty: list[tuple[pd.Series, str]] = []
+    for group in selected_groups:
+        sample = pd.to_numeric(
+            dataframe.loc[group_series == group, value_column],
+            errors="coerce",
+        ).dropna()
+        if not sample.empty:
+            non_empty.append((sample, group))
+    samples = [sample for sample, _ in non_empty]
+    selected_groups = [group for _, group in non_empty]
+    if len(samples) < required:
+        raise ValueError(
+            f"requires at least {required} non-empty groups in group_column."
+        )
+    if any(len(sample) < 2 for sample in samples):
+        raise ValueError("requires at least two observations per group.")
+    return samples, selected_groups
+
+
 def _two_sample_t_test(
     dataframe: pd.DataFrame,
     *,
@@ -1110,26 +1174,13 @@ def _two_sample_t_test(
 ) -> pd.DataFrame:
     """Compare two independent group means with Welch's unequal-variance test."""
     _validate_confidence_level(confidence_level)
-    observed_groups = list(
-        dict.fromkeys(dataframe[group_column].dropna().astype(str))
+    samples, selected_groups = _split_group_samples(
+        dataframe,
+        value_column=value_column,
+        group_column=group_column,
+        group_values=group_values,
+        exact_groups=2,
     )
-    selected_groups = group_values or observed_groups
-    if len(selected_groups) != 2:
-        raise ValueError(
-            "two_sample_t_test requires exactly two group_values, or a group_column "
-            "containing exactly two non-null groups."
-        )
-    group_series = dataframe[group_column].astype(str)
-    samples = [
-        pd.to_numeric(
-            dataframe.loc[group_series == group, value_column],
-            errors="coerce",
-        ).dropna()
-        for group in selected_groups
-    ]
-    if any(len(sample) < 2 for sample in samples):
-        raise ValueError("two_sample_t_test requires at least two observations per group.")
-
     first, second = samples
     first_variance = float(first.var(ddof=1))
     second_variance = float(second.var(ddof=1))
@@ -1189,25 +1240,13 @@ def _mann_whitney_u(
     group_values: list[str],
 ) -> pd.DataFrame:
     """Compare two independent groups with the non-parametric Mann-Whitney U test."""
-    observed_groups = list(
-        dict.fromkeys(dataframe[group_column].dropna().astype(str))
+    samples, selected_groups = _split_group_samples(
+        dataframe,
+        value_column=value_column,
+        group_column=group_column,
+        group_values=group_values,
+        exact_groups=2,
     )
-    selected_groups = group_values or observed_groups
-    if len(selected_groups) != 2:
-        raise ValueError(
-            "mann_whitney_u requires exactly two group_values, or a group_column "
-            "containing exactly two non-null groups."
-        )
-    group_series = dataframe[group_column].astype(str)
-    samples = [
-        pd.to_numeric(
-            dataframe.loc[group_series == group, value_column],
-            errors="coerce",
-        ).dropna()
-        for group in selected_groups
-    ]
-    if any(len(sample) < 2 for sample in samples):
-        raise ValueError("mann_whitney_u requires at least two observations per group.")
     first, second = samples
     test = stats.mannwhitneyu(
         first.to_numpy(),
@@ -1283,22 +1322,12 @@ def _kruskal_wallis(
     group_column: str,
 ) -> pd.DataFrame:
     """Compare two or more independent groups with the Kruskal-Wallis H test."""
-    group_series = dataframe[group_column].astype(str)
-    groups = list(dict.fromkeys(group_series[group_series.notna()]))
-    samples = [
-        pd.to_numeric(
-            dataframe.loc[group_series == group, value_column],
-            errors="coerce",
-        ).dropna()
-        for group in groups
-    ]
-    samples = [sample for sample in samples if not sample.empty]
-    if len(samples) < 2:
-        raise ValueError(
-            "kruskal_wallis requires at least two non-empty groups in group_column."
-        )
-    if any(len(sample) < 2 for sample in samples):
-        raise ValueError("kruskal_wallis requires at least two observations per group.")
+    samples, selected_groups = _split_group_samples(
+        dataframe,
+        value_column=value_column,
+        group_column=group_column,
+        group_values=[],
+    )
     test = stats.kruskal(*[sample.to_numpy() for sample in samples])
     p_value = float(test.pvalue)
     return pd.DataFrame(
@@ -1307,7 +1336,7 @@ def _kruskal_wallis(
                 "value_column": value_column,
                 "group_column": group_column,
                 "group_count": len(samples),
-                "groups": ", ".join(groups),
+                "groups": ", ".join(selected_groups),
                 "h_statistic": float(test.statistic),
                 "p_value": p_value,
                 "decision_at_0.05": (

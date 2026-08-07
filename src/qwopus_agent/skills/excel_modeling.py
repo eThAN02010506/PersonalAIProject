@@ -136,6 +136,25 @@ class ExcelModelingSkill(BaseSkill):
         )
 
 
+def _validate_model_columns(
+    dataframe: pd.DataFrame,
+    *,
+    method: str,
+    outcome_column: str,
+    predictor_columns: list[str],
+) -> list[str]:
+    """Validate shared regression inputs and return the required column names."""
+    if not predictor_columns:
+        raise ValueError(f"{method} requires predictor_columns.")
+    if outcome_column in predictor_columns:
+        raise ValueError("outcome_column cannot also be a predictor.")
+    required = [outcome_column, *predictor_columns]
+    missing = [column for column in required if column not in dataframe.columns]
+    if missing:
+        raise KeyError(", ".join(missing))
+    return required
+
+
 def _design_matrix(
     dataframe: pd.DataFrame,
     *,
@@ -175,15 +194,12 @@ def _logistic_regression(
     confidence_level: float,
 ) -> tuple[dict[str, pd.DataFrame], dict[str, Any]]:
     """Fit a binary logistic regression with McFadden pseudo R-squared."""
-    if not predictor_columns:
-        raise ValueError("logistic_regression requires predictor_columns.")
-    if outcome_column in predictor_columns:
-        raise ValueError("outcome_column cannot also be a predictor.")
-    required = [outcome_column, *predictor_columns]
-    missing = [column for column in required if column not in dataframe.columns]
-    if missing:
-        raise KeyError(", ".join(missing))
-
+    required = _validate_model_columns(
+        dataframe,
+        method="logistic_regression",
+        outcome_column=outcome_column,
+        predictor_columns=predictor_columns,
+    )
     model_data = dataframe[required].dropna().copy()
     raw_outcome = model_data[outcome_column].dropna()
     outcome_levels = list(dict.fromkeys(raw_outcome.astype(str)))
@@ -192,7 +208,31 @@ def _logistic_regression(
             "logistic_regression requires a binary outcome with exactly two distinct values."
         )
     if pd.api.types.is_numeric_dtype(raw_outcome):
-        binary = pd.to_numeric(raw_outcome, errors="coerce").astype(float)
+        # 原因：数值 outcome 若保留原始值（如 0.5/0.7）会违反 Logit 的 endog∈(0,1)
+        # 约束，产生伪 R² 为负、LR 统计量为负等静默垃圾结果。
+        # 作用：把两个 distinct 数值显式映射为 0/1；拒绝两个类别都落在 (0,1) 内、
+        # 无法清晰二分类的模糊分数目标。
+        numeric_values = pd.to_numeric(raw_outcome, errors="coerce")
+        if not numeric_values.notna().all():
+            raise ValueError(
+                "logistic_regression outcome must be two values without missing or "
+                "non-numeric entries."
+            )
+        numeric_levels = sorted(numeric_values.unique().tolist())
+        if len(numeric_levels) != 2:
+            raise ValueError(
+                "logistic_regression requires a binary outcome with exactly two "
+                "distinct values."
+            )
+        if all(0.0 < value < 1.0 for value in numeric_levels):
+            raise ValueError(
+                "logistic_regression cannot use a fractional outcome: both categories "
+                f"are inside (0, 1) ({numeric_levels[0]:g}/{numeric_levels[1]:g}), so "
+                "0/1 coding is ambiguous. Use a binary column instead."
+            )
+        binary = numeric_values.map(
+            {numeric_levels[0]: 0.0, numeric_levels[1]: 1.0}
+        ).astype(float)
     else:
         # 原因：非数值二分类目标（如 pass/fail、是/否）需要映射为 0/1。
         # 作用：把第一个出现的类别作为 0，第二个作为 1，并在 details 记录原始标签。
@@ -205,56 +245,69 @@ def _logistic_regression(
     if len(outcome) <= design.shape[1]:
         raise ValueError("logistic_regression needs more complete rows than coefficients.")
 
-    # 原因：完美分离或样本过小时 statsmodels 会刷 PerfectSeparation/Convergence 警告。
-    # 作用：静默这些可预期的建模提示，避免污染最终答案，仍由 fit 的异常路径 fail-closed。
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
+    # 原因：完美分离/不收敛在真实业务数据中常见，直接抛错会拒绝本该展示的模型；
+    # 但 Hessian 反转意味着标准误不可信，必须 fail-closed，否则会把不可信的
+    # 系数/置信区间当作已验证结果。
+    # 作用：只静默可预期的建模提示，捕获 Hessian 反转并明确失败。
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("ignore", sm.tools.sm_exceptions.PerfectSeparationWarning)
+        warnings.simplefilter("ignore", sm.tools.sm_exceptions.ConvergenceWarning)
+        warnings.simplefilter("ignore", sm.tools.sm_exceptions.MissingDataError)
+        warnings.simplefilter("always", sm.tools.sm_exceptions.HessianInversionWarning)
         fitted = sm.Logit(outcome, design).fit(disp=False, maxiter=100)
-    intervals = fitted.conf_int(alpha=1.0 - confidence_level)
-    coefficients = pd.DataFrame(
-        {
-            "term": fitted.params.index,
-            "estimate": fitted.params.to_numpy(),
-            "standard_error": fitted.bse.to_numpy(),
-            "z_statistic": fitted.tvalues.to_numpy(),
-            "p_value": fitted.pvalues.to_numpy(),
-            "ci_lower": intervals.iloc[:, 0].to_numpy(),
-            "ci_upper": intervals.iloc[:, 1].to_numpy(),
+        intervals = fitted.conf_int(alpha=1.0 - confidence_level)
+        coefficients = pd.DataFrame(
+            {
+                "term": fitted.params.index,
+                "estimate": fitted.params.to_numpy(),
+                "standard_error": fitted.bse.to_numpy(),
+                "z_statistic": fitted.tvalues.to_numpy(),
+                "p_value": fitted.pvalues.to_numpy(),
+                "ci_lower": intervals.iloc[:, 0].to_numpy(),
+                "ci_upper": intervals.iloc[:, 1].to_numpy(),
+            }
+        ).round(6)
+        predictions = (fitted.predict(design) >= 0.5).astype(int)
+        predicted_positive = int(predictions.sum())
+        actual_positive = int(outcome.sum())
+        accuracy = float((predictions == outcome).mean())
+        model_summary = pd.DataFrame(
+            [
+                {
+                    "observations": int(len(outcome)),
+                    "log_likelihood": float(fitted.llf),
+                    "pseudo_r_squared": float(fitted.prsquared),
+                    "likelihood_ratio": float(fitted.llr),
+                    "lr_p_value": float(fitted.llr_pvalue),
+                }
+            ]
+        ).round(6)
+        classification = pd.DataFrame(
+            [
+                {
+                    "threshold": 0.5,
+                    "predicted_positive": predicted_positive,
+                    "actual_positive": actual_positive,
+                    "accuracy": accuracy,
+                }
+            ]
+        ).round(6)
+        details = {
+            "outcome": outcome_column,
+            "predictors": predictor_columns,
+            "outcome_levels": outcome_levels,
+            "confidence_level": confidence_level,
+            "lr_p_value": float(fitted.llr_pvalue),
+            "method": "binary logistic regression (McFadden pseudo R-squared)",
         }
-    ).round(6)
-    predictions = (fitted.predict(design) >= 0.5).astype(int)
-    predicted_positive = int(predictions.sum())
-    actual_positive = int(outcome.sum())
-    accuracy = float((predictions == outcome).mean())
-    model_summary = pd.DataFrame(
-        [
-            {
-                "observations": int(len(outcome)),
-                "log_likelihood": float(fitted.llf),
-                "pseudo_r_squared": float(fitted.prsquared),
-                "likelihood_ratio": float(fitted.llr),
-                "lr_p_value": float(fitted.llr_pvalue),
-            }
-        ]
-    ).round(6)
-    classification = pd.DataFrame(
-        [
-            {
-                "threshold": 0.5,
-                "predicted_positive": predicted_positive,
-                "actual_positive": actual_positive,
-                "accuracy": accuracy,
-            }
-        ]
-    ).round(6)
-    details = {
-        "outcome": outcome_column,
-        "predictors": predictor_columns,
-        "outcome_levels": outcome_levels,
-        "confidence_level": confidence_level,
-        "lr_p_value": float(fitted.llr_pvalue),
-        "method": "binary logistic regression (McFadden pseudo R-squared)",
-    }
+    if any(
+        isinstance(record.message, sm.tools.sm_exceptions.HessianInversionWarning)
+        for record in caught
+    ):
+        raise ValueError(
+            "logistic_regression did not converge to invertible standard errors; "
+            "coefficient confidence intervals are unreliable."
+        )
     return (
         {
             "Model summary": model_summary,
@@ -273,15 +326,12 @@ def _linear_regression(
     confidence_level: float,
 ) -> tuple[dict[str, pd.DataFrame], dict[str, Any]]:
     """Fit one OLS model with numeric or categorical predictors."""
-    if not predictor_columns:
-        raise ValueError("linear_regression requires predictor_columns.")
-    if outcome_column in predictor_columns:
-        raise ValueError("outcome_column cannot also be a predictor.")
-    required = [outcome_column, *predictor_columns]
-    missing = [column for column in required if column not in dataframe.columns]
-    if missing:
-        raise KeyError(", ".join(missing))
-
+    required = _validate_model_columns(
+        dataframe,
+        method="linear_regression",
+        outcome_column=outcome_column,
+        predictor_columns=predictor_columns,
+    )
     model_data = dataframe[required].dropna().copy()
     outcome = pd.to_numeric(model_data[outcome_column], errors="coerce")
     model_data = model_data.loc[outcome.notna()]

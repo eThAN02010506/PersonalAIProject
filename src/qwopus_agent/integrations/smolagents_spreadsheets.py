@@ -13,6 +13,121 @@ from qwopus_agent.integrations import smolagents_debug
 from qwopus_agent.skills import SkillRequest
 from qwopus_agent.skills.excel_statistics import ExcelStatisticsSkill
 
+# 原因：方法词元在每次 intent 路由都会用到，作为常量只构建一次。
+# 作用：避免 required_spreadsheet_methods 每次调用都重建这一组嵌套元组。
+_METHOD_MARKERS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("lookup", ("lookup", "某项", "某一项", "某行", "某一行", "sku", "是多少")),
+    (
+        "chi_square_independence",
+        ("chi-square", "chi square", "卡方", "独立性", "independence"),
+    ),
+    (
+        "normality_test",
+        ("normality", "normal distribution", "正态", "正态性", "normal test"),
+    ),
+    ("quantiles", ("quantile", "percentile", "分位", "百分位", "p90", "p50")),
+    ("covariance", ("covariance", "协方差")),
+    ("correlation", ("correlation", "相关", "相关性")),
+    ("group_summary", ("group summary", "分组统计", "按组统计", "by group")),
+    ("missing", ("missing", "缺失", "空值", "null", "na")),
+    # 原因：z-score 与 iqr 都回答“离群点”，但弱模型会混淆两者。
+    # 作用：z-score 家族词显式路由到 zscore_outliers，裸“离群/异常”仍走 iqr。
+    (
+        "zscore_outliers",
+        ("z-score", "z score", "zscore", "z值", "z 值", "z分数", "z 分数"),
+    ),
+    ("iqr_outliers", ("outlier", "异常", "离群", "极端值")),
+    ("frequency", ("frequency", "count", "counts", "频数", "频率", "计数")),
+    (
+        "mean_confidence_interval",
+        # 原因：裸 "ci" 会子串命中 "specific"/"significant" 等常见英文词，误路由到置信区间。
+        # 作用：只保留明确表达置信区间的词，避免抢走 describe/显著性检验。
+        ("confidence interval", "置信区间", "置信"),
+    ),
+    (
+        "two_sample_t_test",
+        ("two-sample", "two sample", "双样本", "两组", "两样本", "组间比较"),
+    ),
+    (
+        "mann_whitney_u",
+        (
+            "mann-whitney",
+            "mann whitney",
+            "曼-惠特尼",
+            "曼惠特尼",
+            "u test",
+            "u检验",
+            "u 检验",
+            "秩和检验",
+            "rank-sum",
+            "rank sum",
+        ),
+    ),
+    # 原因：one_sample 用 "t 检验"/"t-test" 词，必须在 wilcoxon 的 "配对" 之前，
+    # 否则 "配对 t 检验" 会被误路由到非参 wilcoxon。
+    # 作用：显式 t 检验词优先；wilcoxon 专用词不受影响。
+    (
+        "one_sample_t_test",
+        ("t-test", "t test", "t 检验", "t检验", "单样本t"),
+    ),
+    (
+        "wilcoxon_signed_rank",
+        ("wilcoxon", "威尔科克森", "符号秩", "signed rank", "配对"),
+    ),
+    (
+        "kruskal_wallis",
+        (
+            "kruskal-wallis",
+            "kruskal",
+            "克鲁斯卡尔",
+            "多组比较",
+            "h检验",
+            "h 检验",
+        ),
+    ),
+    # 原因：pivot/date_extract/deduplicate/rank 是数据整理意图，与统计方法并列。
+    # 作用：裸 "date"/"year"/"rank" 太易误撞（date 常见于普通列名、rank 撞 rank-sum），
+    # 只用带动作的组合词做 marker，避免抢走 describe/回归等更明确的意图。
+    ("pivot", ("pivot", "透视")),
+    (
+        "deduplicate",
+        ("去重", "重复项", "重复行", "duplicate rows", "dedup", "删重复"),
+    ),
+    (
+        "date_extract",
+        (
+            "提取日期",
+            "提取年份",
+            "提取月份",
+            "提取季度",
+            "提取周几",
+            "年月日拆分",
+            "拆分日期",
+            "extract year",
+            "extract month",
+            "year and month",
+            "月份和年份",
+        ),
+    ),
+    # 原因：rank 的 marker 只用明确的“排名”动作词；"前 10"/"top 10" 常表示 top-N 排行
+    # 或“前几行”，不是逐行排名，会让 describe/lookup 意图被误路由。
+    ("rank", ("排名", "名次", "排位", "rank of", "按分数排序")),
+    (
+        "describe",
+        (
+            "summary",
+            "describe",
+            "mean",
+            "average",
+            "平均",
+            "均值",
+            "概况",
+            "统计摘要",
+            "描述统计",
+        ),
+    ),
+)
+
 
 def required_spreadsheet_method(user_question: str) -> tuple[str, str] | None:
     """Map explicit modeling requests to the deterministic local Skill method."""
@@ -190,112 +305,7 @@ def required_spreadsheet_methods(user_question: str) -> tuple[tuple[str, str], .
         )
     # 原因：弱模型常能理解“异常/分布/某项”但不会稳定选择正确 Excel Skill 方法。
     # 作用：把高频抽象统计意图映射到本地确定性方法，由运行时强制补调对应工具。
-    method_markers: tuple[tuple[str, tuple[str, ...]], ...] = (
-        ("lookup", ("lookup", "某项", "某一项", "某行", "某一行", "sku", "是多少")),
-        (
-            "chi_square_independence",
-            ("chi-square", "chi square", "卡方", "独立性", "independence"),
-        ),
-        (
-            "normality_test",
-            ("normality", "normal distribution", "正态", "正态性", "normal test"),
-        ),
-        ("quantiles", ("quantile", "percentile", "分位", "百分位", "p90", "p50")),
-        ("covariance", ("covariance", "协方差")),
-        ("correlation", ("correlation", "相关", "相关性")),
-        ("group_summary", ("group summary", "分组统计", "按组统计", "by group")),
-        ("missing", ("missing", "缺失", "空值", "null", "na")),
-        # 原因：z-score 与 iqr 都回答“离群点”，但弱模型会混淆两者。
-        # 作用：z-score 家族词显式路由到 zscore_outliers，裸“离群/异常”仍走 iqr。
-        (
-            "zscore_outliers",
-            ("z-score", "z score", "zscore", "z值", "z 值", "z分数", "z 分数"),
-        ),
-        ("iqr_outliers", ("outlier", "异常", "离群", "极端值")),
-        ("frequency", ("frequency", "count", "counts", "频数", "频率", "计数")),
-        (
-            "mean_confidence_interval",
-            ("confidence interval", "置信区间", "置信", "ci"),
-        ),
-        (
-            "two_sample_t_test",
-            ("two-sample", "two sample", "双样本", "两组", "两样本", "组间比较"),
-        ),
-        (
-            "mann_whitney_u",
-            (
-                "mann-whitney",
-                "mann whitney",
-                "曼-惠特尼",
-                "曼惠特尼",
-                "u test",
-                "u检验",
-                "u 检验",
-                "秩和检验",
-                "rank-sum",
-                "rank sum",
-            ),
-        ),
-        (
-            "wilcoxon_signed_rank",
-            ("wilcoxon", "威尔科克森", "符号秩", "signed rank", "配对"),
-        ),
-        (
-            "kruskal_wallis",
-            (
-                "kruskal-wallis",
-                "kruskal",
-                "克鲁斯卡尔",
-                "多组比较",
-                "h检验",
-                "h 检验",
-            ),
-        ),
-        (
-            "one_sample_t_test",
-            ("t-test", "t test", "t 检验", "t检验", "单样本t"),
-        ),
-        # 原因：pivot/date_extract/deduplicate/rank 是数据整理意图，与统计方法并列。
-        # 作用：裸 "date"/"year"/"rank" 太易误撞（date 常见于普通列名、rank 撞 rank-sum），
-        # 只用带动作的组合词做 marker，避免抢走 describe/回归等更明确的意图。
-        ("pivot", ("pivot", "透视")),
-        (
-            "deduplicate",
-            ("去重", "重复项", "重复行", "duplicate rows", "dedup", "删重复"),
-        ),
-        (
-            "date_extract",
-            (
-                "提取日期",
-                "提取年份",
-                "提取月份",
-                "提取季度",
-                "提取周几",
-                "年月日拆分",
-                "拆分日期",
-                "extract year",
-                "extract month",
-                "year and month",
-                "月份和年份",
-            ),
-        ),
-        ("rank", ("排名", "名次", "排位", "rank of", "按分数排序", "top 10", "前 10")),
-        (
-            "describe",
-            (
-                "summary",
-                "describe",
-                "mean",
-                "average",
-                "平均",
-                "均值",
-                "概况",
-                "统计摘要",
-                "描述统计",
-            ),
-        ),
-    )
-    for method, markers in method_markers:
+    for method, markers in _METHOD_MARKERS:
         if any(marker in normalized for marker in markers):
             return (("excel_statistics", method),)
     return ()

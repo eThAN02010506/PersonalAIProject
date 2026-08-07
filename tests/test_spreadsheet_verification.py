@@ -184,6 +184,67 @@ class VerificationEndToEndTests(unittest.TestCase):
             "excel_statistics",
         )
 
+    def test_local_verify_validates_every_method_on_shared_tool(self) -> None:
+        # 诊断路由会一次返回同一工具下的多个方法（missing/describe/quantiles）。
+        # 原因：修复前只验证第一个方法就丢弃工具名，其余方法的伪造值会被放行。
+        # 作用：锁定同一工具下每个可验证方法都产生一个合成步骤。
+        steps = [
+            {
+                "step_number": 1,
+                "observations": "",
+                "tool_calls": [],
+            }
+        ]
+        missing_tools = {"excel_statistics"}
+        required = (
+            ("excel_statistics", "missing"),
+            ("excel_statistics", "describe"),
+            ("excel_statistics", "quantiles"),
+        )
+        prose, degraded = local_verify_missing_spreadsheet_methods(
+            steps,
+            spreadsheet_paths=self.paths,
+            spreadsheet_names=["iris.xlsx"],
+            user_question="数据有什么问题",
+            missing_tools=missing_tools,
+            required_spreadsheet_methods=required,
+            debug_steps=[],
+            narrative=f"缺失 0 行，Sepal.Length 的平均值是 {self.true_mean}，中位数 5.8。",
+        )
+        # 三个方法都验证过：每个都追加合成步骤，且全部丢弃工具名。
+        self.assertEqual(len(steps), 4)
+        self.assertNotIn("excel_statistics", missing_tools)
+        for synthetic in steps[1:]:
+            self.assertEqual(
+                synthetic["tool_calls"][0]["function"]["name"],
+                "excel_statistics",
+            )
+
+    def test_local_verify_keeps_unverified_tool_fail_closed(self) -> None:
+        # 不可验证的方法（如 rank 不在 _VERIFIABLE_METHODS）不能因同工具其他方法验证而被放行。
+        steps = [
+            {
+                "step_number": 1,
+                "observations": "",
+                "tool_calls": [],
+            }
+        ]
+        missing_tools = {"excel_statistics", "excel_modeling"}
+        required = (("excel_statistics", "rank"),)
+        _, degraded = local_verify_missing_spreadsheet_methods(
+            steps,
+            spreadsheet_paths=self.paths,
+            spreadsheet_names=["iris.xlsx"],
+            user_question="按分数排名",
+            missing_tools=missing_tools,
+            required_spreadsheet_methods=required,
+            debug_steps=[],
+            narrative="排名第一的是 A。",
+        )
+        # rank 不可本地校验，工具名必须保留在缺失集 → 最终 fail-closed。
+        self.assertFalse(degraded)
+        self.assertIn("excel_statistics", missing_tools)
+
     def test_local_verify_degrades_and_discards_missing_tool_on_mismatch(self) -> None:
         # B：自算值错误时本地复算成功即降级接受，missing_tool 被清掉。
         steps = [
@@ -295,6 +356,34 @@ class VerificationEndToEndTests(unittest.TestCase):
         self.assertIn("Sheet1", targets)
         self.assertIn("Sepal.Length", targets["Sheet1"])
         self.assertIn("Species", targets["Sheet1"])
+
+    def test_schema_targets_associates_columns_with_region_tables(self) -> None:
+        import qwopus_agent.integrations.spreadsheet_verification as module
+
+        steps = [
+            {
+                "step_number": 1,
+                "observations": (
+                    "## Sheet: Sheet1\n"
+                    "- Rows: 10\n"
+                    "- Column names: region, revenue\n"
+                    "## Table: Sheet1::table_1\n"
+                    "- Rows: 5\n"
+                    "- Column names: region, sales\n"
+                ),
+                "tool_calls": [
+                    {"function": {"name": "excel_schema", "arguments": {}}}
+                ],
+            }
+        ]
+        targets = module._schema_targets(steps)
+
+        # 原因：区域表用 "## Table:" 标题，列必须关联到各自表，不能跨表混合。
+        # 作用：锁定 Sheet1 只有主表列，区域表有自己的列，且两个标题都被解析。
+        self.assertIn("Sheet1", targets)
+        self.assertIn("Sheet1::table_1", targets)
+        self.assertEqual(targets["Sheet1"], ["region", "revenue"])
+        self.assertEqual(targets["Sheet1::table_1"], ["region", "sales"])
 
     def test_choose_table_prefers_schema_table_name(self) -> None:
         import pandas as pd

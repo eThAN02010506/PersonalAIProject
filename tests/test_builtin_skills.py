@@ -765,6 +765,156 @@ class BuiltinSkillTests(unittest.TestCase):
         self.assertEqual(rows["C"], 2)
         self.assertEqual(rows["D"], 2)
 
+    def test_excel_statistics_rank_ntile_all_equal_degrades_to_single_bin(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "equal.xlsx"
+            pd.DataFrame(
+                {"student": ["A", "B", "C"], "score": [10, 10, 10]}
+            ).to_excel(path, index=False)
+            response = asyncio.run(
+                ExcelStatisticsSkill().run(
+                    SkillRequest(
+                        query="split into quartiles",
+                        arguments={
+                            "file_path": str(path),
+                            "table_name": "Sheet1",
+                            "method": "rank",
+                            "value_column": "score",
+                            "rank_method": "ntile",
+                            "into_bins": 4,
+                            "label_columns": ["student"],
+                        },
+                    )
+                )
+            )
+
+        # 原因：全相等数据会让 qcut 折叠到单一边界并返回全 NaN。
+        # 作用：锁定退化为单一桶（全部 rank 1），而不是输出不可读的 NaN 排名。
+        self.assertTrue(response.success)
+        self.assertEqual(response.data["details"]["into_bins"], 1)
+        for row in response.data["rows"]:
+            self.assertEqual(row["rank_ntile"], 1)
+
+    def test_excel_statistics_pivot_count_keeps_non_numeric_cells(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "mixed.xlsx"
+            pd.DataFrame(
+                {"region": ["a", "a", "a"], "product": ["c1", "c1", "c2"], "value": [5, "N/A", 7]}
+            ).to_excel(path, index=False)
+            response = asyncio.run(
+                ExcelStatisticsSkill().run(
+                    SkillRequest(
+                        query="pivot count",
+                        arguments={
+                            "file_path": str(path),
+                            "table_name": "Sheet1",
+                            "method": "pivot",
+                            "row_column": "region",
+                            "column_column": "product",
+                            "value_column": "value",
+                            "agg": "count",
+                        },
+                    )
+                )
+            )
+
+        # 原因：count 语义是“该组合有多少个非空单元”，非数值文本也是有效计数。
+        # 作用：锁定文本单元被计数而非静默当作缺失。
+        self.assertTrue(response.success)
+        row = response.data["rows"][0]
+        self.assertEqual(row["c1"], 2)
+        self.assertEqual(row["c2"], 1)
+
+    def test_excel_statistics_kruskal_groups_match_filtered_samples(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "kruskal.xlsx"
+            pd.DataFrame(
+                {"g": ["A", "A", "B", "B", "C", "C"], "v": [float("nan"), float("nan"), 2, 3, 4, 5]}
+            ).to_excel(path, index=False)
+            response = asyncio.run(
+                ExcelStatisticsSkill().run(
+                    SkillRequest(
+                        query="kruskal wallis",
+                        arguments={
+                            "file_path": str(path),
+                            "table_name": "Sheet1",
+                            "method": "kruskal_wallis",
+                            "value_columns": ["v"],
+                            "group_column": "g",
+                        },
+                    )
+                )
+            )
+
+        # 原因：空数值组（A）被过滤后，报告的组列表必须与实际统计使用的组一致。
+        # 作用：锁定 group_count 与 groups 都与过滤后的样本对齐，避免误导性组列表。
+        self.assertTrue(response.success)
+        row = response.data["rows"][0]
+        self.assertEqual(row["group_count"], 2)
+        self.assertEqual(row["groups"], "B, C")
+
+    def test_excel_modeling_logistic_rejects_fractional_outcome(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "fractional.xlsx"
+            pd.DataFrame(
+                {
+                    "x": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+                    "y": [0.5, 0.5, 0.5, 0.5, 0.7, 0.7, 0.7, 0.7, 0.7, 0.7],
+                }
+            ).to_excel(path, index=False)
+            response = asyncio.run(
+                ExcelModelingSkill().run(
+                    SkillRequest(
+                        query="logistic regression",
+                        arguments={
+                            "file_path": str(path),
+                            "table_name": "Sheet1",
+                            "method": "logistic_regression",
+                            "outcome_column": "y",
+                            "predictor_columns": ["x"],
+                            "confidence_level": 0.95,
+                        },
+                    )
+                )
+            )
+
+        # 原因：分数 outcome（0.5/0.7）违反 Logit endog∈(0,1) 约束，会产生伪 R² 为负等垃圾结果。
+        # 作用：锁定拒绝而不是返回 success=True 的静默错误结果。
+        self.assertFalse(response.success)
+        self.assertIn("fractional", response.content)
+
+    def test_excel_modeling_logistic_codes_numeric_1_2_as_binary(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "binary.xlsx"
+            pd.DataFrame(
+                {
+                    "x": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+                    "y": [1, 1, 1, 2, 1, 2, 2, 2, 2, 2],
+                }
+            ).to_excel(path, index=False)
+            response = asyncio.run(
+                ExcelModelingSkill().run(
+                    SkillRequest(
+                        query="logistic regression",
+                        arguments={
+                            "file_path": str(path),
+                            "table_name": "Sheet1",
+                            "method": "logistic_regression",
+                            "outcome_column": "y",
+                            "predictor_columns": ["x"],
+                            "confidence_level": 0.95,
+                        },
+                    )
+                )
+            )
+
+        # 原因：1/2 数值编码是合法的二分类，应映射为 0/1 而非报错。
+        # 作用：锁定非 (0,1) 区间的两个 distinct 数值能正常建模。
+        self.assertTrue(response.success)
+        self.assertIn("Model summary", response.data["tables"])
+        summary = response.data["tables"]["Model summary"][0]
+        self.assertGreater(summary["pseudo_r_squared"], 0)
+
     def test_excel_modeling_matches_r_style_linear_model_summary(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "regression.xlsx"
