@@ -133,6 +133,10 @@ def normalize_lookup_text(value: str) -> str:
 def required_spreadsheet_methods(user_question: str) -> tuple[tuple[str, str], ...]:
     """Map spreadsheet intents to deterministic local Skill methods."""
     normalized = user_question.casefold()
+    if any(marker in normalized for marker in ("logistic", "logit", "逻辑回归", "二分类")):
+        # 原因：“逻辑回归”含“回归”，必须先于 generic regression 检查命中。
+        # 作用：把二分类目标问题路由到 logistic_regression，而不是线性回归。
+        return (("excel_modeling", "logistic_regression"),)
     if any(marker in normalized for marker in ("anova", "方差分析")):
         return (("excel_modeling", "one_way_anova"),)
     if any(
@@ -201,8 +205,81 @@ def required_spreadsheet_methods(user_question: str) -> tuple[tuple[str, str], .
         ("correlation", ("correlation", "相关", "相关性")),
         ("group_summary", ("group summary", "分组统计", "按组统计", "by group")),
         ("missing", ("missing", "缺失", "空值", "null", "na")),
+        # 原因：z-score 与 iqr 都回答“离群点”，但弱模型会混淆两者。
+        # 作用：z-score 家族词显式路由到 zscore_outliers，裸“离群/异常”仍走 iqr。
+        (
+            "zscore_outliers",
+            ("z-score", "z score", "zscore", "z值", "z 值", "z分数", "z 分数"),
+        ),
         ("iqr_outliers", ("outlier", "异常", "离群", "极端值")),
         ("frequency", ("frequency", "count", "counts", "频数", "频率", "计数")),
+        (
+            "mean_confidence_interval",
+            ("confidence interval", "置信区间", "置信", "ci"),
+        ),
+        (
+            "two_sample_t_test",
+            ("two-sample", "two sample", "双样本", "两组", "两样本", "组间比较"),
+        ),
+        (
+            "mann_whitney_u",
+            (
+                "mann-whitney",
+                "mann whitney",
+                "曼-惠特尼",
+                "曼惠特尼",
+                "u test",
+                "u检验",
+                "u 检验",
+                "秩和检验",
+                "rank-sum",
+                "rank sum",
+            ),
+        ),
+        (
+            "wilcoxon_signed_rank",
+            ("wilcoxon", "威尔科克森", "符号秩", "signed rank", "配对"),
+        ),
+        (
+            "kruskal_wallis",
+            (
+                "kruskal-wallis",
+                "kruskal",
+                "克鲁斯卡尔",
+                "多组比较",
+                "h检验",
+                "h 检验",
+            ),
+        ),
+        (
+            "one_sample_t_test",
+            ("t-test", "t test", "t 检验", "t检验", "单样本t"),
+        ),
+        # 原因：pivot/date_extract/deduplicate/rank 是数据整理意图，与统计方法并列。
+        # 作用：裸 "date"/"year"/"rank" 太易误撞（date 常见于普通列名、rank 撞 rank-sum），
+        # 只用带动作的组合词做 marker，避免抢走 describe/回归等更明确的意图。
+        ("pivot", ("pivot", "透视")),
+        (
+            "deduplicate",
+            ("去重", "重复项", "重复行", "duplicate rows", "dedup", "删重复"),
+        ),
+        (
+            "date_extract",
+            (
+                "提取日期",
+                "提取年份",
+                "提取月份",
+                "提取季度",
+                "提取周几",
+                "年月日拆分",
+                "拆分日期",
+                "extract year",
+                "extract month",
+                "year and month",
+                "月份和年份",
+            ),
+        ),
+        ("rank", ("排名", "名次", "排位", "rank of", "按分数排序", "top 10", "前 10")),
         (
             "describe",
             (
@@ -405,6 +482,40 @@ def spreadsheet_computation_summary(
                 lines.append("- 已完成 Z-score 异常值检查，具体结果见核验表。")
             else:
                 lines.append(f"- Z-score 异常值检查发现 {count} 个候选极端值。")
+        if "one_sample_t_test" in method_observations:
+            lines.append(
+                "- 已执行单样本 t 检验：样本均值与假设总体均值的差异及 p 值见核验表。"
+            )
+        if "two_sample_t_test" in method_observations:
+            lines.append(
+                "- 已对两组执行 Welch 双样本 t 检验，统计量、p 值与差值区间见核验表。"
+            )
+        if "mann_whitney_u" in method_observations:
+            lines.append(
+                "- 已对两组执行 Mann-Whitney U 检验，统计量与 p 值见核验表。"
+            )
+        if "wilcoxon_signed_rank" in method_observations:
+            lines.append(
+                "- 已对配对前后执行 Wilcoxon 符号秩检验，统计量与 p 值见核验表。"
+            )
+        if "kruskal_wallis" in method_observations:
+            lines.append(
+                "- 已对多个组执行 Kruskal-Wallis H 检验，统计量与 p 值见核验表。"
+            )
+        if "pivot" in method_observations:
+            lines.append(
+                "- 已按两个分类字段对数值列透视汇总，聚合单元格值见核验表。"
+            )
+        if "date_extract" in method_observations:
+            lines.append(
+                "- 已从日期列提取年月等时间分量，解析数量与年份范围见核验表。"
+            )
+        if "deduplicate" in method_observations:
+            lines.append(
+                "- 已按指定列去除重复行，原始行数、保留行数与删除行数见核验表。"
+            )
+        if "rank" in method_observations:
+            lines.append("- 已对数值列计算排名或分位分组，每行结果见核验表。")
         return "\n".join(lines)
 
     lines = ["## Local Statistical Reading"]
@@ -454,6 +565,50 @@ def spreadsheet_computation_summary(
             lines.append("- The Z-score outlier check was completed; details are shown below.")
         else:
             lines.append(f"- The Z-score outlier check found {count} candidate extreme values.")
+    if "one_sample_t_test" in method_observations:
+        lines.append(
+            "- A one-sample t-test was run; the difference from the hypothesized mean "
+            "and the p-value are in the verified table."
+        )
+    if "two_sample_t_test" in method_observations:
+        lines.append(
+            "- A Welch two-sample t-test was run; the statistic, p-value, and "
+            "difference interval are in the verified table."
+        )
+    if "mann_whitney_u" in method_observations:
+        lines.append(
+            "- A Mann-Whitney U test was run for the two groups; the statistic and "
+            "p-value are in the verified table."
+        )
+    if "wilcoxon_signed_rank" in method_observations:
+        lines.append(
+            "- A Wilcoxon signed-rank test was run on the paired measurements; the "
+            "statistic and p-value are in the verified table."
+        )
+    if "kruskal_wallis" in method_observations:
+        lines.append(
+            "- A Kruskal-Wallis H test was run across groups; the statistic and "
+            "p-value are in the verified table."
+        )
+    if "pivot" in method_observations:
+        lines.append(
+            "- The value column was pivoted by two categorical fields; the aggregated "
+            "cells are in the verified table."
+        )
+    if "date_extract" in method_observations:
+        lines.append(
+            "- Date components were extracted from the date column; the parsed count "
+            "and year range are in the verified table."
+        )
+    if "deduplicate" in method_observations:
+        lines.append(
+            "- Duplicate rows were removed by the selected columns; total, kept, and "
+            "dropped counts are in the verified table."
+        )
+    if "rank" in method_observations:
+        lines.append(
+            "- The numeric column was ranked or binned; per-row results are shown below."
+        )
     return "\n".join(lines)
 
 
@@ -556,6 +711,16 @@ def sanitize_spreadsheet_narrative(
             else (
                 "Method limit: raw regression coefficients depend on variable scale "
                 "and are not a standalone variable-importance ranking."
+            )
+        )
+        retained.extend(["", f"> {note}"])
+    elif required_method == ("excel_modeling", "logistic_regression"):
+        note = (
+            "方法限制：逻辑回归系数以 log-odds 为单位，不能直接解释为概率变化。"
+            if use_chinese
+            else (
+                "Method limit: logistic regression coefficients are in log-odds and "
+                "are not direct probability changes."
             )
         )
         retained.extend(["", f"> {note}"])

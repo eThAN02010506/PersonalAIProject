@@ -590,6 +590,181 @@ class BuiltinSkillTests(unittest.TestCase):
         self.assertEqual(row["decision"], "reject equal-means null hypothesis")
         self.assertIn("| score | A |", response.content)
 
+    def test_excel_statistics_pivots_two_categorical_columns(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "sales.xlsx"
+            pd.DataFrame(
+                {
+                    "region": ["East", "West", "East", "West"],
+                    "product": ["a", "a", "b", "b"],
+                    "revenue": [10, 20, 30, 40],
+                }
+            ).to_excel(path, index=False)
+            response = asyncio.run(
+                ExcelStatisticsSkill().run(
+                    SkillRequest(
+                        query="pivot revenue by region and product",
+                        arguments={
+                            "file_path": str(path),
+                            "table_name": "Sheet1",
+                            "method": "pivot",
+                            "row_column": "region",
+                            "column_column": "product",
+                            "value_column": "revenue",
+                            "agg": "sum",
+                        },
+                    )
+                )
+            )
+
+        # 原因：pivot 是数据整理请求，结果必须是可复核的聚合单元格而非宽表占位。
+        # 作用：锁定 East×a=10、West×b=40 等单元格值来自本地 pivot_table。
+        self.assertTrue(response.success)
+        self.assertEqual(response.data["details"]["pivot_rows"], 2)
+        rows = {row["region"]: row for row in response.data["rows"]}
+        self.assertEqual(rows["East"]["a"], 10)
+        self.assertEqual(rows["East"]["b"], 30)
+        self.assertEqual(rows["West"]["b"], 40)
+        self.assertIn("| East |", response.content)
+
+    def test_excel_statistics_extracts_date_components(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "dates.xlsx"
+            pd.DataFrame(
+                {
+                    "order_date": ["2024-01-05", "2024-06-20", "2023-12-01"],
+                    "amount": [10, 20, 30],
+                }
+            ).to_excel(path, index=False)
+            response = asyncio.run(
+                ExcelStatisticsSkill().run(
+                    SkillRequest(
+                        query="extract year and month",
+                        arguments={
+                            "file_path": str(path),
+                            "table_name": "Sheet1",
+                            "method": "date_extract",
+                            "date_column": "order_date",
+                            "parts": ["year", "month"],
+                        },
+                    )
+                )
+            )
+
+        # 原因：日期提取需要输出可用的时间分量和解析统计，而非原始字符串。
+        # 作用：锁定 year/month 列与 min_year/max_year 来自本地解析。
+        self.assertTrue(response.success)
+        self.assertEqual(response.data["details"]["min_year"], 2023)
+        self.assertEqual(response.data["details"]["max_year"], 2024)
+        self.assertEqual(response.data["details"]["parsed_count"], 3)
+        rows = response.data["rows"]
+        self.assertEqual(rows[0]["order_date_year"], 2024)
+        self.assertEqual(rows[0]["order_date_month"], 1)
+        self.assertEqual(rows[2]["order_date_year"], 2023)
+        self.assertIn("order_date_year", response.content)
+
+    def test_excel_statistics_deduplicates_rows_with_auditable_counts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "dupes.xlsx"
+            pd.DataFrame(
+                {
+                    "id": [1, 1, 2, 2, 3],
+                    "name": ["A", "A", "B", "B", "C"],
+                }
+            ).to_excel(path, index=False)
+            response = asyncio.run(
+                ExcelStatisticsSkill().run(
+                    SkillRequest(
+                        query="remove duplicate rows",
+                        arguments={
+                            "file_path": str(path),
+                            "table_name": "Sheet1",
+                            "method": "deduplicate",
+                            "columns": ["id", "name"],
+                            "keep": "first",
+                        },
+                    )
+                )
+            )
+
+        # 原因：去重必须给出保留/删除计数，用户才能核对是否有合法行被误删。
+        # 作用：锁定 dropped_count 与 keep 语义来自本地 drop_duplicates。
+        self.assertTrue(response.success)
+        self.assertEqual(response.data["details"]["total_rows"], 5)
+        self.assertEqual(response.data["details"]["kept_rows"], 3)
+        self.assertEqual(response.data["details"]["dropped_count"], 2)
+        self.assertEqual(len(response.data["rows"]), 3)
+        self.assertEqual(response.data["rows"][0]["id"], 1)
+        self.assertIn("dropped_count", response.content)
+
+    def test_excel_statistics_ranks_and_bins_numeric_column(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "scores.xlsx"
+            pd.DataFrame(
+                {
+                    "student": ["A", "B", "C", "D"],
+                    "score": [10, 20, 30, 40],
+                }
+            ).to_excel(path, index=False)
+            response = asyncio.run(
+                ExcelStatisticsSkill().run(
+                    SkillRequest(
+                        query="rank scores",
+                        arguments={
+                            "file_path": str(path),
+                            "table_name": "Sheet1",
+                            "method": "rank",
+                            "value_column": "score",
+                            "rank_method": "rank",
+                            "label_columns": ["student"],
+                        },
+                    )
+                )
+            )
+
+        # 原因：排名请求输出每行名次，avg 秩对应 R rank() 默认。
+        # 作用：锁定 10→1、40→4 的名次来自本地 Series.rank。
+        self.assertTrue(response.success)
+        self.assertEqual(response.data["details"]["rank_method"], "rank")
+        rows = {row["student"]: row["rank"] for row in response.data["rows"]}
+        self.assertEqual(rows["A"], 1)
+        self.assertEqual(rows["D"], 4)
+
+    def test_excel_statistics_ranks_into_ntile_bins(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "scores.xlsx"
+            pd.DataFrame(
+                {
+                    "student": ["A", "B", "C", "D"],
+                    "score": [10, 20, 30, 40],
+                }
+            ).to_excel(path, index=False)
+            response = asyncio.run(
+                ExcelStatisticsSkill().run(
+                    SkillRequest(
+                        query="split scores into quartiles",
+                        arguments={
+                            "file_path": str(path),
+                            "table_name": "Sheet1",
+                            "method": "rank",
+                            "value_column": "score",
+                            "rank_method": "ntile",
+                            "into_bins": 2,
+                            "label_columns": ["student"],
+                        },
+                    )
+                )
+            )
+
+        # 原因：分位分组把连续值映射为 1..N 组，便于分层解读。
+        # 作用：锁定两桶时 10/20→1、30/40→2。
+        self.assertTrue(response.success)
+        rows = {row["student"]: row["rank_ntile"] for row in response.data["rows"]}
+        self.assertEqual(rows["A"], 1)
+        self.assertEqual(rows["B"], 1)
+        self.assertEqual(rows["C"], 2)
+        self.assertEqual(rows["D"], 2)
+
     def test_excel_modeling_matches_r_style_linear_model_summary(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "regression.xlsx"

@@ -26,7 +26,10 @@ from qwopus_agent.integrations.smolagents_runtime import (
     run_smolagents_chat_turn,
     run_smolagents_file_analysis_with_debug,
 )
-from qwopus_agent.integrations.smolagents_spreadsheets import remove_markdown_tables
+from qwopus_agent.integrations.smolagents_spreadsheets import (
+    remove_markdown_tables,
+    required_spreadsheet_methods,
+)
 from qwopus_agent.reports.recipe import default_recipe
 from qwopus_agent.services.orchestration_models import AnswerContract, AnswerPlan
 from qwopus_agent.skills import (
@@ -2913,8 +2916,8 @@ class SmolagentsRuntimeTests(unittest.TestCase):
             )
 
         # 原因：模型自算的 mean 与本地复算一致时应被接受，而不是 fail-closed。
-        # 作用：锁定真数值校验路径——最终答案含本地复核表格，且不报“未调用工具”。
-        self.assertIn("复核 describe", result.answer)
+        # 作用：锁定真数值校验路径——匹配时保留模型原解释并附本地复核表。
+        self.assertIn("Sepal.Length 的平均值是", result.answer)
         self.assertIn("本地计算表格", result.answer)
         self.assertIn("| Sepal.Length | 10 | 0 |", result.answer)
         self.assertTrue(
@@ -3382,3 +3385,105 @@ class SmolagentsRuntimeTests(unittest.TestCase):
         self.assertEqual(result.tool_calls, ["excel_schema", "excel_statistics"])
         self.assertIn("| Sepal.Length | 150 | 5.843333 |", result.answer)
         self.assertIn("| 0.828066 |", result.answer)
+
+
+class SpreadsheetIntentMappingTests(unittest.TestCase):
+    """Route z-score / confidence interval / t-test questions to their Skill methods."""
+
+    def test_zscore_question_routes_to_zscore_outliers(self) -> None:
+        self.assertEqual(
+            required_spreadsheet_methods("用 z-score 找出离群点"),
+            (("excel_statistics", "zscore_outliers"),),
+        )
+
+    def test_plain_outlier_question_stays_on_iqr(self) -> None:
+        # 无 z-score 词时“离群点/异常”仍走 iqr，不能被新 marker 抢走。
+        self.assertEqual(
+            required_spreadsheet_methods("离群点有哪些"),
+            (("excel_statistics", "iqr_outliers"),),
+        )
+        self.assertEqual(
+            required_spreadsheet_methods("异常值"),
+            (("excel_statistics", "iqr_outliers"),),
+        )
+
+    def test_confidence_interval_question_routes_to_mean_confidence_interval(self) -> None:
+        self.assertEqual(
+            required_spreadsheet_methods("均值的置信区间"),
+            (("excel_statistics", "mean_confidence_interval"),),
+        )
+        self.assertEqual(
+            required_spreadsheet_methods("95% confidence interval"),
+            (("excel_statistics", "mean_confidence_interval"),),
+        )
+
+    def test_mean_question_is_not_stolen_by_ci(self) -> None:
+        # “均值是多少”无 CI 词，不能被 mean_confidence_interval 抢走。
+        self.assertEqual(
+            required_spreadsheet_methods("均值是多少"),
+            (("excel_statistics", "lookup"),),
+        )
+
+    def test_t_test_question_routes_to_one_sample_t_test(self) -> None:
+        self.assertEqual(
+            required_spreadsheet_methods("t 检验均值是否为 5"),
+            (("excel_statistics", "one_sample_t_test"),),
+        )
+        self.assertEqual(
+            required_spreadsheet_methods("run a t-test"),
+            (("excel_statistics", "one_sample_t_test"),),
+        )
+
+    def test_normality_test_is_not_stolen_by_bare_t_keyword(self) -> None:
+        # 裸“检验”未作为 marker，正态性检验不被 t 检验抢走。
+        self.assertEqual(
+            required_spreadsheet_methods("正态性检验"),
+            (("excel_statistics", "normality_test"),),
+        )
+
+    def test_pivot_question_routes_to_pivot(self) -> None:
+        self.assertEqual(
+            required_spreadsheet_methods("透视各区域的收入"),
+            (("excel_statistics", "pivot"),),
+        )
+
+    def test_deduplicate_question_routes_to_deduplicate(self) -> None:
+        self.assertEqual(
+            required_spreadsheet_methods("去掉重复行"),
+            (("excel_statistics", "deduplicate"),),
+        )
+        self.assertEqual(
+            required_spreadsheet_methods("dedup duplicate rows"),
+            (("excel_statistics", "deduplicate"),),
+        )
+
+    def test_date_extract_question_routes_to_date_extract(self) -> None:
+        self.assertEqual(
+            required_spreadsheet_methods("提取日期列的年份和月份"),
+            (("excel_statistics", "date_extract"),),
+        )
+
+    def test_rank_question_routes_to_rank(self) -> None:
+        self.assertEqual(
+            required_spreadsheet_methods("按分数排名"),
+            (("excel_statistics", "rank"),),
+        )
+        self.assertEqual(
+            required_spreadsheet_methods("rank of scores"),
+            (("excel_statistics", "rank"),),
+        )
+
+    def test_rank_word_does_not_steal_rank_sum_test(self) -> None:
+        # 裸 rank 不是 marker，rank-sum 仍走 mann_whitney_u。
+        self.assertEqual(
+            required_spreadsheet_methods("rank-sum 检验"),
+            (("excel_statistics", "mann_whitney_u"),),
+        )
+
+    def test_mean_question_is_not_stolen_by_date_extract(self) -> None:
+        # “月均”这类带“月”的词不能触发 date_extract（无日期提取动作词）。
+        self.assertEqual(
+            required_spreadsheet_methods("月均收入"),
+            (),
+        )
+

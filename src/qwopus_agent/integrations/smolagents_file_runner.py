@@ -506,9 +506,9 @@ def run_smolagents_file_analysis_with_debug(
         successful_tool_calls.append("excel_statistics")
     elif missing_tools.intersection({"excel_statistics", "excel_modeling"}):
         # 原因：模型可能自算统计值却跳过本地工具，直接报错会让强模型的正确自算白跑。
-        # 作用：本地复算并校验模型叙述数值，一致才接受；不一致仍走 fail-closed。
+        # 作用：本地复算并校验模型叙述数值；全部一致则保留模型原答案，有降级则用中性句替换。
         verified_before = set(missing_tools)
-        verified_answer = _local_verify_missing_spreadsheet_methods(
+        verified_prose, degraded = _local_verify_missing_spreadsheet_methods(
             all_steps,
             spreadsheet_paths=spreadsheet_paths or {},
             spreadsheet_names=spreadsheet_names,
@@ -517,12 +517,13 @@ def run_smolagents_file_analysis_with_debug(
             required_spreadsheet_methods=required_spreadsheet_methods,
             debug_steps=debug_steps,
             narrative=final_answer,
+            use_chinese=_contains_cjk(user_question),
         )
-        if verified_answer:
-            final_answer = verified_answer
-            for verified_tool in verified_before.difference(missing_tools):
-                tool_calls.append(verified_tool)
-                successful_tool_calls.append(verified_tool)
+        if verified_prose:
+            final_answer = verified_prose
+        for verified_tool in verified_before.difference(missing_tools):
+            tool_calls.append(verified_tool)
+            successful_tool_calls.append(verified_tool)
     if missing_tools:
         missing_names = ", ".join(sorted(missing_tools))
         raise RuntimeError(f"smolagents did not call required file tools: {missing_names}.")

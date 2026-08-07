@@ -19,17 +19,24 @@ SUPPORTED_METHODS = {
     "correlation",
     "covariance",
     "crosstab",
+    "date_extract",
+    "deduplicate",
     "describe",
     "frequency",
     "group_summary",
     "iqr_outliers",
+    "kruskal_wallis",
     "lookup",
+    "mann_whitney_u",
     "mean_confidence_interval",
     "missing",
     "normality_test",
     "one_sample_t_test",
+    "pivot",
     "quantiles",
+    "rank",
     "two_sample_t_test",
+    "wilcoxon_signed_rank",
     "zscore_outliers",
 }
 CROSSTAB_MAX_DISPLAY_CATEGORIES = 20
@@ -45,8 +52,10 @@ class ExcelStatisticsSkill(BaseSkill):
         "Run deterministic spreadsheet statistics: describe, missing, IQR outliers, "
         "Z-score outliers, frequency tables, grouped summaries, correlations, "
         "covariance, quantiles, normality checks, crosstabs, chi-square tests, "
-        "lookup, confidence intervals, or t-tests. Prefer this skill for common "
-        "statistical questions; use excel_analysis only for custom computations."
+        "lookup, confidence intervals, t-tests, or non-parametric tests. Also "
+        "handles data-shaping tasks: pivot, date_extract, deduplicate, and rank. "
+        "Prefer this skill for common statistical questions; use excel_analysis "
+        "only for custom computations."
     )
 
     async def run(self, request: SkillRequest) -> SkillResponse:
@@ -88,6 +97,32 @@ class ExcelStatisticsSkill(BaseSkill):
             )
             scope_required_columns = _column_list(
                 request.arguments.get("scope_required_columns")
+            )
+            row_column = _optional_text_argument(
+                request.arguments.get("row_column")
+            )
+            column_column = _optional_text_argument(
+                request.arguments.get("column_column")
+            )
+            value_column = _optional_text_argument(
+                request.arguments.get("value_column")
+            )
+            agg = _optional_text_argument(request.arguments.get("agg")) or "sum"
+            date_column = _optional_text_argument(
+                request.arguments.get("date_column")
+            )
+            keep = _optional_text_argument(request.arguments.get("keep")) or "first"
+            rank_method = (
+                _optional_text_argument(request.arguments.get("rank_method"))
+                or "rank"
+            )
+            parts = _column_list(request.arguments.get("parts"))
+            columns = _column_list(request.arguments.get("columns"))
+            into_bins_argument = request.arguments.get("into_bins")
+            into_bins = (
+                4
+                if into_bins_argument is None
+                else int(into_bins_argument)
             )
             top_n = max(1, min(int(request.arguments.get("top_n") or 20), 100))
             threshold_argument = request.arguments.get("threshold")
@@ -163,6 +198,16 @@ class ExcelStatisticsSkill(BaseSkill):
                 threshold=threshold,
                 confidence_level=confidence_level,
                 hypothesized_mean=hypothesized_mean,
+                row_column=row_column,
+                column_column=column_column,
+                value_column=value_column,
+                agg=agg,
+                date_column=date_column,
+                parts=parts,
+                columns=columns,
+                keep=keep,
+                rank_method=rank_method,
+                into_bins=into_bins,
             )
             details = {**scope_details, **details}
         except KeyError as exc:
@@ -213,10 +258,56 @@ def _run_statistical_method(
     threshold: float,
     confidence_level: float,
     hypothesized_mean: float | None,
+    row_column: str,
+    column_column: str,
+    value_column: str,
+    agg: str,
+    date_column: str,
+    parts: list[str],
+    columns: list[str],
+    keep: str,
+    rank_method: str,
+    into_bins: int,
 ) -> tuple[pd.DataFrame, dict[str, Any]]:
     """Dispatch one validated common method against an in-memory dataframe."""
     if method == "lookup":
         return _lookup_rows(dataframe, lookup_value=lookup_value, top_n=top_n)
+
+    # 原因：pivot/date_extract/deduplicate/rank 用各自的参数（不一定有 value_columns），
+    # 必须先于下方 `if not value_columns:` 的自动选取，否则因无 value_columns 提前报错。
+    # 作用：把数据整理方法从“按数值列统计”的公共路径中分离。
+    if method == "pivot":
+        return _pivot_table(
+            dataframe,
+            row_column=row_column,
+            column_column=column_column,
+            value_column=value_column,
+            agg=agg,
+            top_n=top_n,
+        )
+    if method == "date_extract":
+        return _date_extract(
+            dataframe,
+            date_column=date_column,
+            parts=parts,
+            top_n=top_n,
+        )
+    if method == "deduplicate":
+        return _deduplicate_rows(
+            dataframe,
+            columns=columns,
+            keep=keep,
+            top_n=top_n,
+        )
+    if method == "rank":
+        return _rank_rows(
+            dataframe,
+            value_column=value_column,
+            rank_method=rank_method,
+            into_bins=into_bins,
+            label_columns=label_columns,
+            top_n=top_n,
+        )
 
     if method in {"crosstab", "chi_square_independence"}:
         return _categorical_association(
@@ -421,6 +512,43 @@ def _run_statistical_method(
             "confidence_level": confidence_level,
         }
 
+    if method == "mann_whitney_u":
+        if len(value_columns) != 1:
+            raise ValueError("mann_whitney_u requires exactly one value column.")
+        if not group_column:
+            raise ValueError("mann_whitney_u requires group_column.")
+        result = _mann_whitney_u(
+            dataframe,
+            value_column=value_columns[0],
+            group_column=group_column,
+            group_values=group_values,
+        )
+        return result, {"method": "Mann-Whitney U (independent samples)"}
+
+    if method == "wilcoxon_signed_rank":
+        if len(value_columns) != 2:
+            raise ValueError(
+                "wilcoxon_signed_rank requires exactly two value columns (before/after)."
+            )
+        result = _wilcoxon_signed_rank(
+            dataframe,
+            before_column=value_columns[0],
+            after_column=value_columns[1],
+        )
+        return result, {"method": "Wilcoxon signed-rank (paired)", "paired": True}
+
+    if method == "kruskal_wallis":
+        if len(value_columns) != 1:
+            raise ValueError("kruskal_wallis requires exactly one value column.")
+        if not group_column:
+            raise ValueError("kruskal_wallis requires group_column.")
+        result = _kruskal_wallis(
+            dataframe,
+            value_column=value_columns[0],
+            group_column=group_column,
+        )
+        return result, {"method": "Kruskal-Wallis H test"}
+
     series, metric_name = _row_metric(values)
     labels = (
         dataframe[label_columns].copy()
@@ -558,6 +686,200 @@ def _lookup_rows(
         "match_rule": "case-insensitive exact row match, then contains fallback",
         "match_count": int(mask.sum()),
     }
+
+
+def _pivot_table(
+    dataframe: pd.DataFrame,
+    *,
+    row_column: str,
+    column_column: str,
+    value_column: str,
+    agg: str,
+    top_n: int,
+) -> tuple[pd.DataFrame, dict[str, Any]]:
+    """Reshape one value column into a pivot table with a numeric aggregation."""
+    if not row_column or not column_column or not value_column:
+        raise ValueError("pivot requires row_column, column_column, and value_column.")
+    missing = [
+        column
+        for column in [row_column, column_column, value_column]
+        if column not in dataframe.columns
+    ]
+    if missing:
+        raise KeyError(", ".join(missing))
+    allowed_aggs = {"sum", "mean", "count", "min", "max"}
+    if agg not in allowed_aggs:
+        raise ValueError(
+            f"pivot agg must be one of: {', '.join(sorted(allowed_aggs))}."
+        )
+    numeric = pd.to_numeric(dataframe[value_column], errors="coerce")
+    work = dataframe[[row_column, column_column]].copy()
+    work[value_column] = numeric
+    # 原因：aggfunc 只接受 pandas 白名单字符串，但 stubs 把类型标成 Literal 联合。
+    # 作用：值已在 allowed_aggs 校验过，这里仅绕过 mypy 的 arg-type 误报。
+    table = pd.pivot_table(
+        work,
+        index=row_column,
+        columns=column_column,
+        values=value_column,
+        aggfunc=agg,  # type: ignore[arg-type]
+    )
+    # 原因：pivot 可能产生高基数列导致表格宽度爆炸。
+    # 作用：按最常见的列类别截断，完整类别数留在 details 供 Agent 说明口径。
+    column_order = (
+        table.notna().sum().sort_values(ascending=False).index[:top_n]
+    )
+    result = table.loc[:, column_order].reset_index()
+    return result.round(6), {
+        "row_column": row_column,
+        "column_column": column_column,
+        "value_column": value_column,
+        "agg": agg,
+        "pivot_rows": int(table.shape[0]),
+        "pivot_columns": int(table.shape[1]),
+        "displayed_columns": int(result.shape[1]) - 1,
+    }
+
+
+def _date_extract(
+    dataframe: pd.DataFrame,
+    *,
+    date_column: str,
+    parts: list[str],
+    top_n: int,
+) -> tuple[pd.DataFrame, dict[str, Any]]:
+    """Extract date components (year, month, quarter, weekday) into new columns."""
+    if not date_column:
+        raise ValueError("date_extract requires date_column.")
+    if date_column not in dataframe.columns:
+        raise KeyError(date_column)
+    parsed = pd.to_datetime(dataframe[date_column], errors="coerce")
+    parsed_count = int(parsed.notna().sum())
+    if parsed_count == 0:
+        raise ValueError(
+            f"date_extract could not parse any value in column {date_column}."
+        )
+    valid_parts = {"year", "month", "quarter", "weekday"}
+    selected = parts or ["year", "month"]
+    unknown = [part for part in selected if part not in valid_parts]
+    if unknown:
+        raise ValueError(
+            f"date_extract parts must be in: {', '.join(sorted(valid_parts))}."
+        )
+    result = dataframe[[date_column]].copy()
+    for part in selected:
+        if part == "year":
+            result[f"{date_column}_year"] = parsed.dt.year
+        elif part == "month":
+            result[f"{date_column}_month"] = parsed.dt.month
+        elif part == "quarter":
+            result[f"{date_column}_quarter"] = parsed.dt.quarter
+        else:
+            result[f"{date_column}_weekday"] = parsed.dt.dayofweek
+    result = result[parsed.notna()].head(top_n).reset_index(drop=True)
+    min_year = int(parsed.dt.year.min())
+    max_year = int(parsed.dt.year.max())
+    return result, {
+        "date_column": date_column,
+        "parts": ", ".join(selected),
+        "parsed_count": parsed_count,
+        "unparsed_count": int(parsed.isna().sum()),
+        "min_year": min_year,
+        "max_year": max_year,
+    }
+
+
+def _deduplicate_rows(
+    dataframe: pd.DataFrame,
+    *,
+    columns: list[str],
+    keep: str,
+    top_n: int,
+) -> tuple[pd.DataFrame, dict[str, Any]]:
+    """Drop duplicate rows on a column subset, keeping the first or last row."""
+    if keep not in {"first", "last"}:
+        raise ValueError("deduplicate keep must be 'first' or 'last'.")
+    subset = columns or list(dataframe.columns)
+    missing = [column for column in subset if column not in dataframe.columns]
+    if missing:
+        raise KeyError(", ".join(missing))
+    # 原因：keep 已在上面校验为 "first"/"last"，pandas stubs 只认 Literal。
+    # 作用：运行时语义正确，仅绕过 mypy 的 call-overload 误报。
+    dropped = dataframe.drop_duplicates(  # type: ignore[call-overload]
+        subset=subset, keep=keep
+    )
+    result = dropped.head(top_n).reset_index(drop=True)
+    return result, {
+        "subset": ", ".join(subset),
+        "keep": keep,
+        "total_rows": int(len(dataframe)),
+        "kept_rows": int(len(dropped)),
+        "dropped_count": int(len(dataframe) - len(dropped)),
+    }
+
+
+def _rank_rows(
+    dataframe: pd.DataFrame,
+    *,
+    value_column: str,
+    rank_method: str,
+    into_bins: int,
+    label_columns: list[str],
+    top_n: int,
+) -> tuple[pd.DataFrame, dict[str, Any]]:
+    """Rank one numeric column, optionally binning it into ranked groups."""
+    if not value_column:
+        raise ValueError("rank requires value_column.")
+    if value_column not in dataframe.columns:
+        raise KeyError(value_column)
+    values = pd.to_numeric(dataframe[value_column], errors="coerce")
+    if values.notna().sum() == 0:
+        raise ValueError(f"rank found no numeric observations in {value_column}.")
+    base_columns = list(label_columns or []) + [value_column]
+    missing = [
+        column for column in base_columns if column not in dataframe.columns
+    ]
+    if missing:
+        raise KeyError(", ".join(missing))
+    if rank_method == "ntile":
+        if into_bins <= 0:
+            raise ValueError("rank into_bins must be greater than zero.")
+        # 原因：qcut 需要至少两行有效数据且组数不超过行数。
+        # 作用：数据不足时明确失败，由调用方解释，而不是产生 NaN 桶。
+        valid_count = int(values.notna().sum())
+        if valid_count < 2:
+            raise ValueError("rank ntile requires at least two numeric observations.")
+        bin_count = min(into_bins, valid_count)
+        bins = pd.qcut(values, q=bin_count, labels=False, duplicates="drop")
+        result = dataframe[base_columns].copy()
+        result["rank_ntile"] = bins + 1
+        details: dict[str, Any] = {
+            "value_column": value_column,
+            "rank_method": "ntile",
+            "into_bins": int(bins.nunique()),
+            "total_rows": int(len(dataframe)),
+        }
+    else:
+        if rank_method not in {"rank", "average", "dense"}:
+            raise ValueError(
+                "rank rank_method must be one of: rank, average, dense, ntile."
+            )
+        # 原因：pandas Series.rank 没有 "rank" 方法值；"rank" 是 R 语义的
+        # 平均秩（平局取均值），对应 pandas 的 "average"。
+        # 作用：把 R 风格默认值映射到 pandas 合法方法，保持工具契约稳定。
+        pandas_method = "average" if rank_method == "rank" else rank_method
+        ranked = values.rank(
+            method=pandas_method,  # type: ignore[arg-type]
+            na_option="keep",
+        )
+        result = dataframe[base_columns].copy()
+        result["rank"] = ranked
+        details = {
+            "value_column": value_column,
+            "rank_method": rank_method,
+            "total_rows": int(len(dataframe)),
+        }
+    return result.head(top_n).reset_index(drop=True), details
 
 
 def _quantile_summary(values: pd.DataFrame) -> pd.DataFrame:
@@ -853,6 +1175,145 @@ def _two_sample_t_test(
                     "reject equal-means null hypothesis"
                     if p_value < 1.0 - confidence_level
                     else "do not reject equal-means null hypothesis"
+                ),
+            }
+        ]
+    ).round(6)
+
+
+def _mann_whitney_u(
+    dataframe: pd.DataFrame,
+    *,
+    value_column: str,
+    group_column: str,
+    group_values: list[str],
+) -> pd.DataFrame:
+    """Compare two independent groups with the non-parametric Mann-Whitney U test."""
+    observed_groups = list(
+        dict.fromkeys(dataframe[group_column].dropna().astype(str))
+    )
+    selected_groups = group_values or observed_groups
+    if len(selected_groups) != 2:
+        raise ValueError(
+            "mann_whitney_u requires exactly two group_values, or a group_column "
+            "containing exactly two non-null groups."
+        )
+    group_series = dataframe[group_column].astype(str)
+    samples = [
+        pd.to_numeric(
+            dataframe.loc[group_series == group, value_column],
+            errors="coerce",
+        ).dropna()
+        for group in selected_groups
+    ]
+    if any(len(sample) < 2 for sample in samples):
+        raise ValueError("mann_whitney_u requires at least two observations per group.")
+    first, second = samples
+    test = stats.mannwhitneyu(
+        first.to_numpy(),
+        second.to_numpy(),
+        alternative="two-sided",
+        method="auto",
+    )
+    p_value = float(test.pvalue)
+    return pd.DataFrame(
+        [
+            {
+                "value_column": value_column,
+                "group_1": selected_groups[0],
+                "group_1_count": len(first),
+                "group_1_median": float(first.median()),
+                "group_2": selected_groups[1],
+                "group_2_count": len(second),
+                "group_2_median": float(second.median()),
+                "u_statistic": float(test.statistic),
+                "p_value": p_value,
+                "decision_at_0.05": (
+                    "reject equal-distributions null hypothesis"
+                    if p_value < 0.05
+                    else "do not reject equal-distributions null hypothesis"
+                ),
+            }
+        ]
+    ).round(6)
+
+
+def _wilcoxon_signed_rank(
+    dataframe: pd.DataFrame,
+    *,
+    before_column: str,
+    after_column: str,
+) -> pd.DataFrame:
+    """Compare paired before/after measurements with the Wilcoxon signed-rank test."""
+    before = pd.to_numeric(dataframe[before_column], errors="coerce")
+    after = pd.to_numeric(dataframe[after_column], errors="coerce")
+    paired = pd.DataFrame({"before": before, "after": after}).dropna()
+    if len(paired) < 5:
+        raise ValueError("wilcoxon_signed_rank requires at least five paired observations.")
+    test = stats.wilcoxon(
+        paired["before"].to_numpy(),
+        paired["after"].to_numpy(),
+        zero_method="wilcox",
+    )
+    p_value = float(test.pvalue)
+    median_difference = float((paired["after"] - paired["before"]).median())
+    return pd.DataFrame(
+        [
+            {
+                "before_column": before_column,
+                "after_column": after_column,
+                "paired_count": len(paired),
+                "median_difference": median_difference,
+                "w_statistic": float(test.statistic),
+                "p_value": p_value,
+                "decision_at_0.05": (
+                    "reject equal-medians null hypothesis"
+                    if p_value < 0.05
+                    else "do not reject equal-medians null hypothesis"
+                ),
+            }
+        ]
+    ).round(6)
+
+
+def _kruskal_wallis(
+    dataframe: pd.DataFrame,
+    *,
+    value_column: str,
+    group_column: str,
+) -> pd.DataFrame:
+    """Compare two or more independent groups with the Kruskal-Wallis H test."""
+    group_series = dataframe[group_column].astype(str)
+    groups = list(dict.fromkeys(group_series[group_series.notna()]))
+    samples = [
+        pd.to_numeric(
+            dataframe.loc[group_series == group, value_column],
+            errors="coerce",
+        ).dropna()
+        for group in groups
+    ]
+    samples = [sample for sample in samples if not sample.empty]
+    if len(samples) < 2:
+        raise ValueError(
+            "kruskal_wallis requires at least two non-empty groups in group_column."
+        )
+    if any(len(sample) < 2 for sample in samples):
+        raise ValueError("kruskal_wallis requires at least two observations per group.")
+    test = stats.kruskal(*[sample.to_numpy() for sample in samples])
+    p_value = float(test.pvalue)
+    return pd.DataFrame(
+        [
+            {
+                "value_column": value_column,
+                "group_column": group_column,
+                "group_count": len(samples),
+                "groups": ", ".join(groups),
+                "h_statistic": float(test.statistic),
+                "p_value": p_value,
+                "decision_at_0.05": (
+                    "reject equal-distributions null hypothesis"
+                    if p_value < 0.05
+                    else "do not reject equal-distributions null hypothesis"
                 ),
             }
         ]

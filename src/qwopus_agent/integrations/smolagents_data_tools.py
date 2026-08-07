@@ -149,11 +149,16 @@ def build_excel_statistics_tool(spreadsheets: Mapping[str, str | Path]) -> Any:
             "describe, frequency, missing, iqr_outliers, zscore_outliers, group_summary, "
             "correlation, covariance, quantiles, normality_test, crosstab, "
             "chi_square_independence, lookup, mean_confidence_interval, "
-            "one_sample_t_test, and two_sample_t_test. "
+            "one_sample_t_test, two_sample_t_test, mann_whitney_u, wilcoxon_signed_rank, "
+            "kruskal_wallis, pivot, date_extract, deduplicate, and rank. "
             "Use describe for an R summary()-style numeric profile and frequency for "
             "R table()-style categorical counts. "
             "Use crosstab or chi_square_independence for two categorical columns. "
             "Use lookup for questions about one row, item, character field, SKU, or label value. "
+            "Use pivot to reshape one value column into a summary matrix by two "
+            "categorical columns, "
+            "date_extract to pull year/month/quarter/weekday from a date column, "
+            "deduplicate to drop duplicate rows, and rank to rank or bin one numeric column. "
             "Use exact table and column names from excel_schema. For abstract outlier questions, "
             "prefer one interpretable business metric. Select multiple value columns only when "
             "they are repeated measurements of that same metric and unit, such as years; never "
@@ -197,10 +202,77 @@ def build_excel_statistics_tool(spreadsheets: Mapping[str, str | Path]) -> Any:
             "group_values": {
                 "type": "array",
                 "description": (
-                    "Exactly two group labels for two_sample_t_test; null when the column "
-                    "already contains exactly two groups or for other methods."
+                    "Exactly two group labels for two_sample_t_test or mann_whitney_u; "
+                    "null when the column already contains exactly two groups or for "
+                    "other methods."
                 ),
                 "items": {"type": "string"},
+                "nullable": True,
+            },
+            "row_column": {
+                "type": "string",
+                "description": "Row index column for pivot.",
+                "nullable": True,
+            },
+            "column_column": {
+                "type": "string",
+                "description": "Column header column for pivot.",
+                "nullable": True,
+            },
+            "value_column": {
+                "type": "string",
+                "description": (
+                    "Single value column to aggregate for pivot or to rank/date-extract for "
+                    "rank or date_extract."
+                ),
+                "nullable": True,
+            },
+            "agg": {
+                "type": "string",
+                "description": (
+                    "Pivot aggregation: sum, mean, count, min, or max; normally sum."
+                ),
+                "nullable": True,
+            },
+            "date_column": {
+                "type": "string",
+                "description": "Exact date column for date_extract.",
+                "nullable": True,
+            },
+            "parts": {
+                "type": "array",
+                "description": (
+                    "Date components for date_extract: year, month, quarter, or weekday."
+                ),
+                "items": {"type": "string"},
+                "nullable": True,
+            },
+            "columns": {
+                "type": "array",
+                "description": (
+                    "Exact columns used to detect duplicates for deduplicate; null "
+                    "keeps all columns."
+                ),
+                "items": {"type": "string"},
+                "nullable": True,
+            },
+            "keep": {
+                "type": "string",
+                "description": "Deduplicate row to keep: first or last.",
+                "nullable": True,
+            },
+            "rank_method": {
+                "type": "string",
+                "description": (
+                    "Rank strategy for rank: rank (average), average, dense, or ntile."
+                ),
+                "nullable": True,
+            },
+            "into_bins": {
+                "type": "integer",
+                "description": (
+                    "Number of quantile bins when rank_method is ntile; normally 4."
+                ),
                 "nullable": True,
             },
             "category_columns": {
@@ -295,7 +367,8 @@ def build_excel_modeling_tool(spreadsheets: Mapping[str, str | Path]) -> Any:
         tool_name="excel_modeling",
         description=(
             "Fit reviewed local spreadsheet models after excel_schema. Use linear_regression "
-            "for an R summary(lm())-style OLS result, or one_way_anova for group means, "
+            "for an R summary(lm())-style OLS result, logistic_regression for a binary "
+            "outcome, or one_way_anova for group means, "
             "ANOVA, effect sizes, variance diagnostics, and optional Tukey HSD. "
             f"Available files: {available_files}."
         ),

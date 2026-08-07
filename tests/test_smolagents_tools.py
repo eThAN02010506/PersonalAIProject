@@ -460,6 +460,64 @@ class SmolagentsToolsTests(unittest.TestCase):
                     threshold=1.5,
                 )
 
+    def test_excel_statistics_tool_exposes_data_shaping_methods(self) -> None:
+        fake_module = types.SimpleNamespace(Tool=FakeTool)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "sales.xlsx"
+            pd.DataFrame(
+                {
+                    "region": ["East", "West", "East", "West"],
+                    "product": ["a", "a", "b", "b"],
+                    "revenue": [10, 20, 30, 40],
+                    "date": ["2024-01-01", "2024-02-01", "2024-03-01", "2024-04-01"],
+                }
+            ).to_excel(path, index=False)
+
+            with patch.dict(sys.modules, {"smolagents": fake_module}):
+                tool = build_excel_statistics_tool({"sales.xlsx": path})
+
+            pivot = tool.forward(
+                file_name="sales.xlsx",
+                table_name="Sheet1",
+                method="pivot",
+                row_column="region",
+                column_column="product",
+                value_column="revenue",
+                agg="sum",
+            )
+            self.assertIn("| East |", pivot)
+            self.assertIn("| 30 |", pivot)
+
+            dedup = tool.forward(
+                file_name="sales.xlsx",
+                table_name="Sheet1",
+                method="deduplicate",
+                columns=["region"],
+                keep="first",
+            )
+            self.assertIn("dropped_count", dedup)
+
+            dates = tool.forward(
+                file_name="sales.xlsx",
+                table_name="Sheet1",
+                method="date_extract",
+                date_column="date",
+                parts=["year", "month"],
+            )
+            self.assertIn("date_year", dates)
+            self.assertIn("min_year", dates)
+
+            ranked = tool.forward(
+                file_name="sales.xlsx",
+                table_name="Sheet1",
+                method="rank",
+                value_column="revenue",
+                rank_method="rank",
+                label_columns=["region"],
+            )
+            self.assertIn("| East |", ranked)
+            self.assertIn("| 1.0 |", ranked)
+
     def test_excel_modeling_tool_runs_reviewed_regression_locally(self) -> None:
         fake_module = types.SimpleNamespace(Tool=FakeTool)
         with tempfile.TemporaryDirectory() as tmpdir:

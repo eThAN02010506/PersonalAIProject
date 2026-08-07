@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass
 from itertools import combinations
 from pathlib import Path
@@ -16,7 +17,7 @@ from qwopus_agent.analysis.excel_processing import read_spreadsheet
 from qwopus_agent.analysis.markdown_tables import dataframe_to_markdown
 from qwopus_agent.skills.base import BaseSkill, SkillRequest, SkillResponse
 
-SUPPORTED_METHODS = {"linear_regression", "one_way_anova"}
+SUPPORTED_METHODS = {"linear_regression", "one_way_anova", "logistic_regression"}
 
 
 @dataclass
@@ -86,6 +87,13 @@ class ExcelModelingSkill(BaseSkill):
                     predictor_columns=predictor_columns,
                     confidence_level=confidence_level,
                 )
+            elif method == "logistic_regression":
+                tables, details = _logistic_regression(
+                    dataframe,
+                    outcome_column=outcome_column,
+                    predictor_columns=predictor_columns,
+                    confidence_level=confidence_level,
+                )
             else:
                 tables, details = _one_way_anova(
                     dataframe,
@@ -128,6 +136,135 @@ class ExcelModelingSkill(BaseSkill):
         )
 
 
+def _design_matrix(
+    dataframe: pd.DataFrame,
+    *,
+    predictor_columns: list[str],
+) -> pd.DataFrame:
+    """Build a design matrix with constant from numeric or categorical predictors."""
+    design_parts: list[pd.DataFrame] = []
+    for column in predictor_columns:
+        raw = dataframe[column]
+        numeric = pd.to_numeric(raw, errors="coerce")
+        if numeric.notna().all():
+            design_parts.append(pd.DataFrame({column: numeric.astype(float)}))
+            continue
+        text = raw.astype("string")
+        categories = list(dict.fromkeys(text))
+        encoded = pd.get_dummies(
+            pd.Categorical(text, categories=categories),
+            prefix=column,
+            drop_first=True,
+            dtype=float,
+        )
+        encoded.index = raw.index
+        if encoded.empty:
+            raise ValueError(f"categorical predictor {column} has fewer than two levels.")
+        design_parts.append(encoded)
+    design = sm.add_constant(pd.concat(design_parts, axis=1), has_constant="add")
+    if np.linalg.matrix_rank(design.to_numpy(dtype=float)) < design.shape[1]:
+        raise ValueError("predictors are perfectly collinear.")
+    return pd.DataFrame(design)
+
+
+def _logistic_regression(
+    dataframe: pd.DataFrame,
+    *,
+    outcome_column: str,
+    predictor_columns: list[str],
+    confidence_level: float,
+) -> tuple[dict[str, pd.DataFrame], dict[str, Any]]:
+    """Fit a binary logistic regression with McFadden pseudo R-squared."""
+    if not predictor_columns:
+        raise ValueError("logistic_regression requires predictor_columns.")
+    if outcome_column in predictor_columns:
+        raise ValueError("outcome_column cannot also be a predictor.")
+    required = [outcome_column, *predictor_columns]
+    missing = [column for column in required if column not in dataframe.columns]
+    if missing:
+        raise KeyError(", ".join(missing))
+
+    model_data = dataframe[required].dropna().copy()
+    raw_outcome = model_data[outcome_column].dropna()
+    outcome_levels = list(dict.fromkeys(raw_outcome.astype(str)))
+    if len(outcome_levels) != 2:
+        raise ValueError(
+            "logistic_regression requires a binary outcome with exactly two distinct values."
+        )
+    if pd.api.types.is_numeric_dtype(raw_outcome):
+        binary = pd.to_numeric(raw_outcome, errors="coerce").astype(float)
+    else:
+        # 原因：非数值二分类目标（如 pass/fail、是/否）需要映射为 0/1。
+        # 作用：把第一个出现的类别作为 0，第二个作为 1，并在 details 记录原始标签。
+        binary = raw_outcome.astype(str).map(
+            {outcome_levels[0]: 0.0, outcome_levels[1]: 1.0}
+        ).astype(float)
+    model_data = model_data.loc[binary.notna()]
+    outcome = binary.loc[binary.notna()].astype(float)
+    design = _design_matrix(model_data, predictor_columns=predictor_columns)
+    if len(outcome) <= design.shape[1]:
+        raise ValueError("logistic_regression needs more complete rows than coefficients.")
+
+    # 原因：完美分离或样本过小时 statsmodels 会刷 PerfectSeparation/Convergence 警告。
+    # 作用：静默这些可预期的建模提示，避免污染最终答案，仍由 fit 的异常路径 fail-closed。
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        fitted = sm.Logit(outcome, design).fit(disp=False, maxiter=100)
+    intervals = fitted.conf_int(alpha=1.0 - confidence_level)
+    coefficients = pd.DataFrame(
+        {
+            "term": fitted.params.index,
+            "estimate": fitted.params.to_numpy(),
+            "standard_error": fitted.bse.to_numpy(),
+            "z_statistic": fitted.tvalues.to_numpy(),
+            "p_value": fitted.pvalues.to_numpy(),
+            "ci_lower": intervals.iloc[:, 0].to_numpy(),
+            "ci_upper": intervals.iloc[:, 1].to_numpy(),
+        }
+    ).round(6)
+    predictions = (fitted.predict(design) >= 0.5).astype(int)
+    predicted_positive = int(predictions.sum())
+    actual_positive = int(outcome.sum())
+    accuracy = float((predictions == outcome).mean())
+    model_summary = pd.DataFrame(
+        [
+            {
+                "observations": int(len(outcome)),
+                "log_likelihood": float(fitted.llf),
+                "pseudo_r_squared": float(fitted.prsquared),
+                "likelihood_ratio": float(fitted.llr),
+                "lr_p_value": float(fitted.llr_pvalue),
+            }
+        ]
+    ).round(6)
+    classification = pd.DataFrame(
+        [
+            {
+                "threshold": 0.5,
+                "predicted_positive": predicted_positive,
+                "actual_positive": actual_positive,
+                "accuracy": accuracy,
+            }
+        ]
+    ).round(6)
+    details = {
+        "outcome": outcome_column,
+        "predictors": predictor_columns,
+        "outcome_levels": outcome_levels,
+        "confidence_level": confidence_level,
+        "lr_p_value": float(fitted.llr_pvalue),
+        "method": "binary logistic regression (McFadden pseudo R-squared)",
+    }
+    return (
+        {
+            "Model summary": model_summary,
+            "Coefficients": coefficients,
+            "Classification": classification,
+        },
+        details,
+    )
+
+
 def _linear_regression(
     dataframe: pd.DataFrame,
     *,
@@ -149,32 +286,9 @@ def _linear_regression(
     outcome = pd.to_numeric(model_data[outcome_column], errors="coerce")
     model_data = model_data.loc[outcome.notna()]
     outcome = outcome.loc[outcome.notna()].astype(float)
-    design_parts: list[pd.DataFrame] = []
-    for column in predictor_columns:
-        raw = model_data[column]
-        numeric = pd.to_numeric(raw, errors="coerce")
-        if numeric.notna().all():
-            design_parts.append(pd.DataFrame({column: numeric.astype(float)}))
-            continue
-        text = raw.astype("string")
-        categories = list(dict.fromkeys(text))
-        encoded = pd.get_dummies(
-            pd.Categorical(text, categories=categories),
-            prefix=column,
-            drop_first=True,
-            dtype=float,
-        )
-        # 原因：Categorical 编码会生成新的 RangeIndex，而 Excel 数据帧保留工作表行号。
-        # 作用：恢复原索引后再与数值预测量按行拼接，避免错位产生 NaN 并使 OLS 失败。
-        encoded.index = raw.index
-        if encoded.empty:
-            raise ValueError(f"categorical predictor {column} has fewer than two levels.")
-        design_parts.append(encoded)
-    design = sm.add_constant(pd.concat(design_parts, axis=1), has_constant="add")
+    design = _design_matrix(model_data, predictor_columns=predictor_columns)
     if len(outcome) <= design.shape[1]:
         raise ValueError("linear_regression needs more complete rows than coefficients.")
-    if np.linalg.matrix_rank(design.to_numpy(dtype=float)) < design.shape[1]:
-        raise ValueError("linear_regression predictors are perfectly collinear.")
 
     fitted = sm.OLS(outcome, design).fit()
     intervals = fitted.conf_int(alpha=1.0 - confidence_level)

@@ -44,7 +44,7 @@ class ClaimedValueExtractionTests(unittest.TestCase):
 
     def test_extracts_outlier_count_positive(self) -> None:
         self.assertEqual(
-            _extract_claimed_value("zscore_outliers", "outlier_count is 3"),
+            _extract_claimed_value("iqr_outliers", "outlier_count is 3"),
             (3,),
         )
 
@@ -112,11 +112,12 @@ class VerificationEndToEndTests(unittest.TestCase):
             debug_steps=[],
         )
         self.assertIsNotNone(result)
-        synthetic_step, prose = result
+        synthetic_step, prose, is_verified = result
         self.assertEqual(
             synthetic_step["tool_calls"][0]["function"]["name"],
             "excel_statistics",
         )
+        self.assertTrue(is_verified)
         self.assertIn("复核 describe", prose)
 
     def test_verify_one_method_degrades_on_wrong_self_computed_mean(self) -> None:
@@ -131,7 +132,8 @@ class VerificationEndToEndTests(unittest.TestCase):
             debug_steps=[],
         )
         self.assertIsNotNone(result)
-        synthetic_step, prose = result
+        synthetic_step, prose, is_verified = result
+        self.assertFalse(is_verified)
         self.assertIn("重新计算", prose)
         self.assertNotIn("6.2", prose)
 
@@ -147,7 +149,8 @@ class VerificationEndToEndTests(unittest.TestCase):
             debug_steps=[],
         )
         self.assertIsNotNone(result)
-        synthetic_step, prose = result
+        synthetic_step, prose, is_verified = result
+        self.assertFalse(is_verified)
         self.assertIn("重新计算", prose)
 
     def test_local_verify_appends_step_and_discards_missing_tool(self) -> None:
@@ -161,7 +164,7 @@ class VerificationEndToEndTests(unittest.TestCase):
             }
         ]
         missing_tools = {"excel_statistics"}
-        result = local_verify_missing_spreadsheet_methods(
+        prose, degraded = local_verify_missing_spreadsheet_methods(
             steps,
             spreadsheet_paths=self.paths,
             spreadsheet_names=["iris.xlsx"],
@@ -169,8 +172,11 @@ class VerificationEndToEndTests(unittest.TestCase):
             missing_tools=missing_tools,
             required_spreadsheet_methods=(("excel_statistics", "describe"),),
             debug_steps=[],
+            narrative=f"Sepal.Length 的平均值是 {self.true_mean}。",
         )
-        self.assertTrue(result)
+        # 自算值匹配 → 保留原答案，不降级。
+        self.assertEqual(prose, "")
+        self.assertFalse(degraded)
         self.assertNotIn("excel_statistics", missing_tools)
         self.assertEqual(len(steps), 2)
         self.assertEqual(
@@ -188,7 +194,7 @@ class VerificationEndToEndTests(unittest.TestCase):
             }
         ]
         missing_tools = {"excel_statistics"}
-        result = local_verify_missing_spreadsheet_methods(
+        prose, degraded = local_verify_missing_spreadsheet_methods(
             steps,
             spreadsheet_paths=self.paths,
             spreadsheet_names=["iris.xlsx"],
@@ -196,8 +202,11 @@ class VerificationEndToEndTests(unittest.TestCase):
             missing_tools=missing_tools,
             required_spreadsheet_methods=(("excel_statistics", "describe"),),
             debug_steps=[],
+            narrative="Sepal.Length 的平均值是 9.9。",
         )
-        self.assertTrue(result)
+        # 自算值错误 → 降级，返回中性 prose 替换。
+        self.assertTrue(prose)
+        self.assertTrue(degraded)
         self.assertNotIn("excel_statistics", missing_tools)
 
     def test_local_comparison_values_reads_rows_and_tables(self) -> None:
@@ -336,6 +345,205 @@ class VerificationEndToEndTests(unittest.TestCase):
                 steps=schema_steps,
             )
             self.assertIsNotNone(result)
+
+    def test_verify_ci_lower_claim_matches(self) -> None:
+        import qwopus_agent.integrations.spreadsheet_verification as module
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "ci.xlsx"
+            pd.DataFrame({"Sepal.Length": [5.1, 4.9, 5.8, 6.4, 5.5]}).to_excel(
+                path, index=False
+            )
+            resp = module._run_local_method(
+                "excel_statistics",
+                "mean_confidence_interval",
+                path,
+                "均值的置信区间",
+            )
+            local = module._local_comparison_values(
+                "mean_confidence_interval", resp.data
+            )
+            self.assertTrue(local)
+            # 模型声称的 ci_lower 与本地复算一致 → 校验通过。
+            narrative = f"置信下限是 {local[0]:.4f}。"
+            result = module.verify_one_method(
+                ("excel_statistics", "mean_confidence_interval"),
+                spreadsheet_names=["ci.xlsx"],
+                spreadsheet_paths={"ci.xlsx": path},
+                user_question="均值的置信区间",
+                narrative=narrative,
+                debug_steps=[],
+            )
+            self.assertIsNotNone(result)
+            self.assertTrue(result[2])  # is_verified
+
+    def test_verify_zscore_outlier_count_matches(self) -> None:
+        import qwopus_agent.integrations.spreadsheet_verification as module
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "z.xlsx"
+            pd.DataFrame({"Sepal.Length": [5.1, 4.9, 5.8, 5.5]}).to_excel(path, index=False)
+            resp = module._run_local_method(
+                "excel_statistics",
+                "zscore_outliers",
+                path,
+                "z-score 离群点",
+            )
+            self.assertTrue(resp.success)
+            # 本地 outlier_count 为 0，模型声称 0 → 校验通过。
+            narrative = "outlier_count: 0"
+            result = module.verify_one_method(
+                ("excel_statistics", "zscore_outliers"),
+                spreadsheet_names=["z.xlsx"],
+                spreadsheet_paths={"z.xlsx": path},
+                user_question="z-score 离群点",
+                narrative=narrative,
+                debug_steps=[],
+            )
+            self.assertIsNotNone(result)
+            self.assertTrue(result[2])
+
+    def test_extract_hypothesized_mean_cases(self) -> None:
+        import qwopus_agent.integrations.spreadsheet_verification as module
+
+        cases = {
+            "均值是否为 5": 5.0,
+            "different from 9": 9.0,
+            "等于 10.5": 10.5,
+            "大于 3": 3.0,
+            "均值检验": 0.0,
+        }
+        for question, expected in cases.items():
+            self.assertEqual(
+                module._extract_hypothesized_mean(question),
+                expected,
+                f"{question!r} should extract {expected}",
+            )
+
+    def test_verify_one_sample_t_test_p_value_matches(self) -> None:
+        import qwopus_agent.integrations.spreadsheet_verification as module
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "ttest.xlsx"
+            pd.DataFrame({"Sepal.Length": [5.1, 4.9, 5.8, 6.4, 5.5]}).to_excel(
+                path, index=False
+            )
+            resp = module._run_local_method(
+                "excel_statistics",
+                "one_sample_t_test",
+                path,
+                "t 检验均值是否为 5",
+            )
+            self.assertTrue(resp.success)
+            local = module._local_comparison_values("one_sample_t_test", resp.data)
+            self.assertTrue(local)
+            narrative = f"p-value = {local[0]:.4f}"
+            result = module.verify_one_method(
+                ("excel_statistics", "one_sample_t_test"),
+                spreadsheet_names=["ttest.xlsx"],
+                spreadsheet_paths={"ttest.xlsx": path},
+                user_question="t 检验均值是否为 5",
+                narrative=narrative,
+                debug_steps=[],
+            )
+            self.assertIsNotNone(result)
+            self.assertTrue(result[2])
+
+    def test_verify_pivot_rows_claim_matches(self) -> None:
+        import qwopus_agent.integrations.spreadsheet_verification as module
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "sales.xlsx"
+            pd.DataFrame(
+                {
+                    "region": ["East", "West", "East", "West"],
+                    "product": ["a", "a", "b", "b"],
+                    "revenue": [10, 20, 30, 40],
+                }
+            ).to_excel(path, index=False)
+            resp = module._run_local_method(
+                "excel_statistics",
+                "pivot",
+                path,
+                "透视各区域的产品收入",
+            )
+            local = module._local_comparison_values("pivot", resp.data)
+            self.assertTrue(local)
+            narrative = f"透视行数 {int(local[0])}"
+            result = module.verify_one_method(
+                ("excel_statistics", "pivot"),
+                spreadsheet_names=["sales.xlsx"],
+                spreadsheet_paths={"sales.xlsx": path},
+                user_question="透视各区域的产品收入",
+                narrative=narrative,
+                debug_steps=[],
+            )
+            self.assertIsNotNone(result)
+            self.assertTrue(result[2])
+
+    def test_verify_deduplicate_dropped_count_claim_matches(self) -> None:
+        import qwopus_agent.integrations.spreadsheet_verification as module
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "dupes.xlsx"
+            pd.DataFrame(
+                {
+                    "id": [1, 1, 2, 2, 3],
+                    "name": ["A", "A", "B", "B", "C"],
+                }
+            ).to_excel(path, index=False)
+            resp = module._run_local_method(
+                "excel_statistics",
+                "deduplicate",
+                path,
+                "去掉重复行",
+            )
+            self.assertTrue(resp.success)
+            local = module._local_comparison_values("deduplicate", resp.data)
+            self.assertTrue(local)
+            narrative = f"删除行数 {int(local[0])}"
+            result = module.verify_one_method(
+                ("excel_statistics", "deduplicate"),
+                spreadsheet_names=["dupes.xlsx"],
+                spreadsheet_paths={"dupes.xlsx": path},
+                user_question="去掉重复行",
+                narrative=narrative,
+                debug_steps=[],
+            )
+            self.assertIsNotNone(result)
+            self.assertTrue(result[2])
+
+    def test_verify_date_extract_min_year_claim_matches(self) -> None:
+        import qwopus_agent.integrations.spreadsheet_verification as module
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "dates.xlsx"
+            pd.DataFrame(
+                {
+                    "order_date": ["2024-01-05", "2023-12-01"],
+                    "amount": [10, 20],
+                }
+            ).to_excel(path, index=False)
+            resp = module._run_local_method(
+                "excel_statistics",
+                "date_extract",
+                path,
+                "提取日期的年份",
+            )
+            self.assertTrue(resp.success)
+            local = module._local_comparison_values("date_extract", resp.data)
+            self.assertTrue(local)
+            narrative = f"最早年份 {int(local[0])}"
+            result = module.verify_one_method(
+                ("excel_statistics", "date_extract"),
+                spreadsheet_names=["dates.xlsx"],
+                spreadsheet_paths={"dates.xlsx": path},
+                user_question="提取日期的年份",
+                narrative=narrative,
+                debug_steps=[],
+            )
+            self.assertIsNotNone(result)
+            self.assertTrue(result[2])
 
 
 if __name__ == "__main__":
