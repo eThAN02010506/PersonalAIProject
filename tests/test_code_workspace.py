@@ -458,6 +458,26 @@ class CodeWorkspaceTests(unittest.TestCase):
             self.service.apply(proposal.id, "admin")
         self.assertIn("user edit", self.source.read_text(encoding="utf-8"))
 
+    def test_rollback_rejects_file_changed_after_apply(self) -> None:
+        proposal = self.service.propose(
+            root=str(self.root),
+            objective="Make the greeting clearer.",
+            selected_files=["src/example.py"],
+            owner_user_id="admin",
+        )
+        applied = self.service.apply(proposal.id, "admin")
+        self.assertEqual(applied.status, "applied")
+        self.assertIn("hello world", self.source.read_text(encoding="utf-8"))
+
+        # 应用后、回滚前，文件被外部改动 → 回滚不得覆盖用户的新改动。
+        edited = 'def greet() -> str:\n    return "user edit after apply"\n'
+        self.source.write_text(edited, encoding="utf-8")
+
+        with self.assertRaisesRegex(CodeWorkspaceError, "changed after"):
+            self.service.rollback(proposal.id, "admin")
+        # 用户改动必须原样保留。
+        self.assertIn("user edit after apply", self.source.read_text(encoding="utf-8"))
+
     def test_workspace_root_must_be_git_root(self) -> None:
         with self.assertRaisesRegex(CodeWorkspaceError, "repository root"):
             scan_code_workspace(self.root / "src")

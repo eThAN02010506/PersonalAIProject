@@ -9,7 +9,7 @@ from openpyxl import Workbook
 
 from qwopus_agent.analysis import AnalysisResult, analyze_uploaded_file
 from qwopus_agent.documents import mineru, parse_document, save_uploaded_bytes
-from qwopus_agent.documents.mineru import MinerUResult
+from qwopus_agent.documents.mineru import MinerUResult, MinerUUnavailableError
 from qwopus_agent.services.analysis_service import combine_analysis_results
 
 
@@ -80,6 +80,22 @@ class DocumentAnalysisTests(unittest.TestCase):
             self.assertEqual(parsed.metadata["source_type"], "image")
             self.assertEqual(parsed.metadata["parser"], "mineru")
 
+    def test_parse_image_fails_loudly_when_mineru_unavailable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "scan.png"
+            path.write_bytes(b"image placeholder")
+
+            with (
+                patch(
+                    "qwopus_agent.documents.parser.parse_document_with_mineru",
+                    side_effect=MinerUUnavailableError("mineru missing"),
+                ),
+                self.assertRaises(MinerUUnavailableError),
+            ):
+                # 原因：图片没有可用的文本回退路径，MinerU 不可用必须响亮失败，
+                # 而不是静默返回空 Markdown 或错误走 PDF 文本解析器。
+                # 作用：锁定 MinerUUnavailableError 从图片解析路径向上传播。
+                parse_document(path)
     def test_mineru_command_prefers_vendor_source(self) -> None:
         with patch.object(mineru, "VENDOR_MINERU_DIR", Path("vendor/mineru")):
             command = mineru._build_mineru_command()

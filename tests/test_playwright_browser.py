@@ -4,7 +4,10 @@ import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from qwopus_agent.integrations.playwright_browser import PlaywrightBrowserProvider
+from qwopus_agent.integrations.playwright_browser import (
+    PlaywrightBrowserProvider,
+    _validate_url,
+)
 
 
 class _DynamicPageHandler(BaseHTTPRequestHandler):
@@ -29,6 +32,16 @@ class PlaywrightBrowserProviderTests(unittest.TestCase):
     def test_private_network_is_blocked_by_default(self) -> None:
         with self.assertRaisesRegex(ValueError, "private or local"):
             PlaywrightBrowserProvider().open("http://127.0.0.1:8000")
+
+    def test_file_url_is_rejected(self) -> None:
+        # 原因：file:// 不是 http/https，若被放行会读取本机任意文件。
+        # 作用：锁定本地文件 scheme 在 URL 校验阶段被拒绝。
+        with self.assertRaisesRegex(ValueError, "http or https"):
+            _validate_url("file:///etc/passwd", allow_private_hosts=False)
+
+    def test_embedded_credentials_are_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "credentials"):
+            _validate_url("https://user:secret@example.com/page", allow_private_hosts=False)
 
     @unittest.skipUnless(
         importlib.util.find_spec("playwright") is not None

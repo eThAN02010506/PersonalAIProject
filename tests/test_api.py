@@ -216,6 +216,51 @@ class ApiTests(unittest.TestCase):
         records = load_debug_records(directory=self.debug_directory)
         self.assertTrue(any(record["source"] == "code_workspace" for record in records))
 
+    def test_code_workspace_routes_deny_non_administrator(self) -> None:
+        admin_token = self.client.cookies.get("qwopus_session")
+        self.assertIsNotNone(admin_token)
+        self.client.cookies.clear()
+
+        member = self.client.post(
+            "/api/users",
+            headers={"Cookie": f"qwopus_session={admin_token}"},
+            json={
+                "username": "member",
+                "display_name": "Member",
+                "password": "member-password-123",
+                "role": "member",
+            },
+        )
+        self.assertEqual(member.status_code, 201)
+        member_login = self.client.post(
+            "/api/auth/login",
+            json={"username": "member", "password": "member-password-123"},
+        )
+        self.assertEqual(member_login.status_code, 200)
+        member_token = self.client.cookies.get("qwopus_session")
+        self.assertIsNotNone(member_token)
+        self.client.cookies.clear()
+        member_header = {"Cookie": f"qwopus_session={member_token}"}
+
+        # 原因：Code workspace 是仅本机管理员能力，普通成员即使用有效会话也必须被拒绝。
+        # 作用：锁定 scan/propose 等路由对成员返回 403，而不是 200 或 401。
+        scanned = self.client.post(
+            "/api/code-workspaces/scan",
+            headers=member_header,
+            json={"path": str(self.code_root)},
+        )
+        self.assertEqual(scanned.status_code, 403)
+        proposed = self.client.post(
+            "/api/code-changes/propose",
+            headers=member_header,
+            json={
+                "root": str(self.code_root),
+                "objective": "Change the sample value.",
+                "selected_files": ["sample.py"],
+            },
+        )
+        self.assertEqual(proposed.status_code, 403)
+
     def test_code_workspace_chat_prepares_grounded_change_without_writing(self) -> None:
         discussed = self.client.post(
             "/api/code-workspaces/chat",

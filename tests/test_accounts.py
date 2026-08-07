@@ -420,6 +420,130 @@ class AccountIsolationTests(unittest.TestCase):
         self.assertEqual(response.status_code, 403)
         self.assertIn("host machine", response.json()["detail"])
 
+    def test_disabling_account_revokes_sessions_and_cancels_runs(self) -> None:
+        bootstrap = self.client.post(
+            "/api/auth/bootstrap",
+            json={
+                "username": "admin",
+                "display_name": "Admin",
+                "password": "admin-password-123",
+            },
+        )
+        self.assertEqual(bootstrap.status_code, 201)
+        admin_token = self._take_cookie()
+
+        member = self.client.post(
+            "/api/users",
+            headers=_session_header(admin_token),
+            json={
+                "username": "member",
+                "display_name": "Member",
+                "password": "member-password-123",
+                "role": "member",
+            },
+        ).json()
+        member_token = self._login("member", "member-password-123")
+
+        # 禁用前成员会话可用。
+        self.assertEqual(
+            self.client.get(
+                "/api/conversations",
+                headers=_session_header(member_token),
+            ).status_code,
+            200,
+        )
+
+        conversation = self.client.post(
+            "/api/conversations",
+            headers=_session_header(admin_token),
+            json={"title": "run holder"},
+        ).json()
+        conversation_id = conversation["id"]
+        # 成员需先被分享聊天才能在其中启动运行。
+        shared = self.client.post(
+            f"/api/conversations/{conversation_id}/members",
+            headers=_session_header(admin_token),
+            json={"username": "member"},
+        )
+        self.assertEqual(shared.status_code, 201)
+        with patch("qwopus_agent.api.runs.start_chat_task") as start_task:
+            start_task.return_value.refresh_phase.return_value = "executing"
+            start_task.return_value.poll_result.return_value = None
+            started = self.client.post(
+                f"/api/conversations/{conversation_id}/runs",
+                headers=_session_header(member_token),
+                json={"content": "Explain the shared project plan in detail."},
+            )
+        self.assertEqual(started.status_code, 200)
+        member_run_id = started.json()["run_id"]
+
+        disabled = self.client.patch(
+            f"/api/users/{member['id']}",
+            headers=_session_header(admin_token),
+            json={"active": False},
+        )
+        self.assertEqual(disabled.status_code, 200)
+
+        # 原因：停用账号必须立即撤销该账号的所有会话并取消其活动任务。
+        # 作用：锁定停用后的会话失效与运行取消，符合 UC-01 验收条件。
+        self.assertEqual(
+            self.client.get(
+                "/api/conversations",
+                headers=_session_header(member_token),
+            ).status_code,
+            401,
+        )
+        self.assertEqual(
+            self.app.state.runs.poll(member_run_id).status,
+            "cancelled",
+        )
+        # 成员不能重新登录已停用账号。
+        self.assertEqual(
+            self.client.post(
+                "/api/auth/login",
+                json={"username": "member", "password": "member-password-123"},
+            ).status_code,
+            401,
+        )
+
+    def test_administrator_cannot_disable_own_account(self) -> None:
+        bootstrap = self.client.post(
+            "/api/auth/bootstrap",
+            json={
+                "username": "admin",
+                "display_name": "Admin",
+                "password": "admin-password-123",
+            },
+        )
+        self.assertEqual(bootstrap.status_code, 201)
+        admin_token = self._take_cookie()
+        admin = bootstrap.json()["user"]
+
+        response = self.client.patch(
+            f"/api/users/{admin['id']}",
+            headers=_session_header(admin_token),
+            json={"active": False},
+        )
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("cannot disable", response.json()["detail"])
+
+    def test_session_cookie_is_httponly_and_samesite_strict(self) -> None:
+        bootstrap = self.client.post(
+            "/api/auth/bootstrap",
+            json={
+                "username": "admin",
+                "display_name": "Admin",
+                "password": "admin-password-123",
+            },
+        )
+        self.assertEqual(bootstrap.status_code, 201)
+        set_cookie = bootstrap.headers.get("set-cookie", "")
+
+        # 原因：会话令牌必须对 JS 不可见且绑定到同站请求，降低会话劫持风险。
+        # 作用：锁定 HttpOnly 与 SameSite=strict 直接出现在 Set-Cookie 响应头。
+        self.assertIn("HttpOnly", set_cookie)
+        self.assertIn("SameSite=strict", set_cookie)
+
     def _login(self, username: str, password: str) -> str:
         response = self.client.post(
             "/api/auth/login",
