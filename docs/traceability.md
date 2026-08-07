@@ -24,6 +24,8 @@
 | FR-DOC-01 | `documents/parser.py`、`documents/mineru.py`、`analysis/document_analysis.py` | `test_document_analysis.py`、`test_graph_multiformat_realcase.py` | 已验证 | PNG/JPEG OCR 需要 MinerU pipeline 和本地模型 |
 | FR-DOC-02 | `documents/structure.py`、`documents/chunker.py`、`documents/document_store.py` | `test_document_structure.py`、`test_saved_documents_api.py` | 已验证 | 极差 OCR 标题仍可能降低章节识别质量 |
 | FR-XLS-01 | `analysis/workbook_profile.py`、`analysis/excel_processing.py`、`analysis/pandas_sandbox.py` | `test_workbook_profile.py`、`test_document_analysis.py`、`test_pandas_sandbox.py` | 已验证 | 旧 `.xls` 依赖可用的 pandas Excel engine |
+| FR-XLS-02 | `integrations/spreadsheet_verification.py`、`integrations/smolagents_file_runner.py` | `test_spreadsheet_verification.py`、`test_smolagents_runtime.py` | 已验证 | 复算本身失败时仍 fail-closed，不提供本地表 |
+| FR-XLS-03 | `skills/excel_statistics.py`、`skills/excel_modeling.py`、`integrations/smolagents_spreadsheets.py`、`integrations/smolagents_data_tools.py` | `test_builtin_skills.py`、`test_smolagents_tools.py`、`test_smolagents_runtime.py`、`test_spreadsheet_verification.py` | 已验证 | 双因素/重复测量 ANOVA、预测区间、多表 merge 不在覆盖内；`rank` 逐行输出不进入自算值校验 |
 | FR-KNW-01 | `memory/minirag.py`、`memory/knowledge_store.py` | `test_minirag.py` | 已验证 | 使用 MiniRAG 的 NanoVectorDB，不调用完整上游 query pipeline |
 | FR-KNW-02 | `memory/conversation_knowledge.py`、`api/repository.py` | `test_conversation_knowledge.py`、`test_accounts.py`、`test_saved_documents_api.py` | 已验证 | Global 仅聚合当前账号的聊天知识 |
 | FR-KNW-03 | `memory/knowledge_graph.py`、`memory/graph_backend.py`、`memory/graph_extraction.py` | `test_knowledge_graph.py`、`test_graph_backend.py`、`test_graph_extraction.py`、`test_graph_multiformat_realcase.py` | 已验证 | 弱模型抽取失败时退回规则抽取，普通自然语言关系可能缺失 |

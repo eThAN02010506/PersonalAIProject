@@ -375,12 +375,16 @@ workbook
 `excel_statistics` performs deterministic local calculations for R
 `summary()`-style numeric summaries, categorical frequencies, missingness, IQR
 and Z-score outliers, grouped summaries, correlations, Student-t confidence
-intervals, one-sample t-tests, and Welch two-sample t-tests. `excel_modeling`
+intervals, one-sample t-tests, and Welch two-sample t-tests. Non-parametric
+comparisons cover Mann-Whitney U, Wilcoxon signed-rank, and Kruskal-Wallis H.
+Data-shaping requests (pivot, date component extraction, row deduplication, and
+ranking or quantile bins) run as the same reviewed local methods. `excel_modeling`
 provides ordinary least-squares regression with coefficient confidence
-intervals and model diagnostics, plus one-way ANOVA with group summaries,
-effect sizes, a Levene variance diagnostic, and optional Tukey HSD comparisons.
-These Skills use SciPy and statsmodels directly; the LLM selects a method and
-explains the verified result but does not calculate coefficients or p-values.
+intervals and model diagnostics, binary logistic regression with McFadden
+pseudo R-squared, plus one-way ANOVA with group summaries, effect sizes, a
+Levene variance diagnostic, and optional Tukey HSD comparisons. These Skills
+use SciPy and statsmodels directly; the LLM selects a method and explains the
+verified result but does not calculate coefficients or p-values.
 When the model states a self-computed statistic (mean, IQR outlier count,
 p-value, R-squared) without calling the local tool, the runtime re-computes the
 required method locally and verifies the claimed value against it: a match is
